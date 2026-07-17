@@ -150,8 +150,9 @@ func cmdInit(args []string) error {
 	}
 	server := flagVal("server")
 	if server == "" {
-		server = ask("Server (deploy@your-server-ip)", "")
+		server = ask("Server IP (or user@host)", lastServer())
 	}
+	server = normalizeServer(server)
 	domain := flagVal("domain")
 	if domain == "" {
 		domain = ask("Domain (e.g. app.example.com)", "")
@@ -186,6 +187,7 @@ health:
 		return err
 	}
 	step("wrote %s", configFile)
+	saveLastServer(server)
 
 	if det.gitignore != "" {
 		if err := ensureGitignore(det.gitignore); err == nil {

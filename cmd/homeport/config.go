@@ -60,6 +60,7 @@ func loadConfig() (*config, error) {
 	if cfg.Health.Path == "" {
 		cfg.Health.Path = "/"
 	}
+	cfg.Server = normalizeServer(cfg.Server)
 	switch {
 	case !appRe.MatchString(cfg.App):
 		return nil, fmt.Errorf("%s: app %q must be lowercase letters, digits, dashes, max 20 chars", configFile, cfg.App)

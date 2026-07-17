@@ -75,7 +75,7 @@ func usage() {
 	fmt.Print(`homeport — deploy single-binary web apps to your own VPS
 
 setup (once per server):
-  homeport bootstrap root@<ip>     harden a fresh Ubuntu VPS, install Caddy + homeportd
+  homeport bootstrap <ip>       harden a fresh Ubuntu VPS, install Caddy + homeportd
 
 setup (once per project):
   homeport init                    write homeport.yaml (app, server, domain, build)
