@@ -28,13 +28,15 @@ type resourcesConfig struct {
 }
 
 type config struct {
-	App       string          `yaml:"app"`
-	Server    string          `yaml:"server"`
-	Domain    string          `yaml:"domain"`
-	Internal  bool            `yaml:"internal"`
-	Build     buildConfig     `yaml:"build"`
-	Health    healthConfig    `yaml:"health"`
-	Resources resourcesConfig `yaml:"resources"`
+	App         string          `yaml:"app"`
+	Server      string          `yaml:"server"`
+	Domain      string          `yaml:"domain"`
+	Internal    bool            `yaml:"internal"`
+	Idle        bool            `yaml:"idle"`
+	IdleTimeout string          `yaml:"idle_timeout"`
+	Build       buildConfig     `yaml:"build"`
+	Health      healthConfig    `yaml:"health"`
+	Resources   resourcesConfig `yaml:"resources"`
 }
 
 // These mirror homeportd's server-side validation — fail fast with a good
@@ -46,6 +48,7 @@ var (
 	releaseRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$`)
 	memoryRe  = regexp.MustCompile(`^[0-9]+[KMG]$`)
 	cpuRe     = regexp.MustCompile(`^[0-9]+%$`)
+	timeoutRe = regexp.MustCompile(`^[0-9]+[smh]$`)
 )
 
 func loadConfig() (*config, error) {
@@ -90,6 +93,10 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: resources.memory must be a number with K/M/G suffix (e.g. 512M, 1G), got %q", configFile, cfg.Resources.Memory)
 	case cfg.Resources.CPU != "" && !cpuRe.MatchString(cfg.Resources.CPU):
 		return nil, fmt.Errorf("%s: resources.cpu must be a percentage (e.g. 150%% for 1.5 cores), got %q", configFile, cfg.Resources.CPU)
+	case cfg.IdleTimeout != "" && !timeoutRe.MatchString(cfg.IdleTimeout):
+		return nil, fmt.Errorf("%s: idle_timeout must be a number with s/m/h suffix (e.g. 300s, 5m), got %q", configFile, cfg.IdleTimeout)
+	case cfg.IdleTimeout != "" && !cfg.Idle:
+		return nil, fmt.Errorf("%s: idle_timeout is set but idle is not true", configFile)
 	}
 	return cfg, nil
 }

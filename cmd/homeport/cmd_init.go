@@ -252,6 +252,13 @@ health:
 # resources:
 #   memory: 512M   # hard cap; throttled at 90%%, OOM-killed at 100%%
 #   cpu: 150%%      # 150%% = 1.5 cores
+
+# Optional scale-to-zero for low-traffic apps: systemd holds the port and
+# starts the app on the first request, then stops it after idle_timeout.
+# Zero RAM while asleep; first request after idle pays the cold-start. Never
+# use it on a busy or latency-sensitive app.
+# idle: true
+# idle_timeout: 5m
 `, app, server, domain, indentComment(det.note), det.build, det.artifact)
 
 	if err := os.WriteFile(configFile, []byte(yaml), 0o644); err != nil {

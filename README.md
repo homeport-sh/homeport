@@ -110,6 +110,25 @@ These become systemd cgroup directives (`MemoryMax`/`MemoryHigh`/`CPUQuota`)
 — the same kernel mechanism Docker uses for `--memory`/`--cpus`. Omit the
 block for no limits. `homeport stats` shows the cap next to live usage.
 
+## Scale to zero (optional)
+
+```yaml
+# homeport.yaml
+idle: true
+idle_timeout: 5m   # default 5m
+```
+
+For **low-traffic** apps. systemd holds the app's port and starts the binary
+on the first request, then stops it after `idle_timeout` of no traffic —
+**zero RAM while asleep**, so a box can hold far more mostly-idle apps.
+Implemented with systemd socket activation + `systemd-socket-proxyd`, so it
+works for any binary (no runtime support needed).
+
+The first request after idle pays the cold-start (fast for Go, ~1s for a big
+JS-framework binary). **Don't** use it on a busy or latency-sensitive app —
+it never idles out anyway, and you'd just add a proxy hop. Always-on apps
+(the default) are untouched: no socket, no proxy, direct port bind.
+
 ## How it works
 
 ```

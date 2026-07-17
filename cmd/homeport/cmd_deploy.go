@@ -32,13 +32,19 @@ func cmdDeploy(args []string) error {
 	id := releaseID()
 	dir := fmt.Sprintf("/opt/homeport/%s/releases/%s", cfg.App, id)
 
-	// homeportd add takes positional <app> <domain> <health> <mem> <cpu>;
-	// "-" is the unset placeholder — for domain it means an internal app.
+	// homeportd add takes positional <app> <domain> <health> <mem> <cpu>
+	// <idle> <idle_timeout>; "-" is the unset placeholder (empty domain =
+	// internal, idle "true" = scale-to-zero).
 	domain := dashIfEmpty(cfg.Domain)
 	mem := dashIfEmpty(cfg.Resources.Memory)
 	cpu := dashIfEmpty(cfg.Resources.CPU)
+	idle := "-"
+	if cfg.Idle {
+		idle = "true"
+	}
+	idleTimeout := dashIfEmpty(cfg.IdleTimeout)
 	step("registering %s on %s", cfg.App, cfg.Server)
-	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, domain, cfg.Health.Path, mem, cpu)); err != nil {
+	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, domain, cfg.Health.Path, mem, cpu, idle, idleTimeout)); err != nil {
 		return fmt.Errorf("app registration failed — did you run `homeport bootstrap` on this server? (%w)", err)
 	}
 
