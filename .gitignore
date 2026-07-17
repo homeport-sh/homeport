@@ -5,6 +5,6 @@ dist/
 # example app build outputs (homeport compiles to ./server; bun leaves stray js/maps)
 examples/**/server
 examples/**/index.js
-examples/**/index.js.map
+examples/**/*.js.map
 examples/**/*.bun-build
 examples/**/.tanstack
