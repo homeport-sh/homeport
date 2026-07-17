@@ -15,6 +15,9 @@ var muxOpts = []string{
 	"-o", "ControlMaster=auto",
 	"-o", "ControlPath=~/.ssh/homeport-%C",
 	"-o", "ControlPersist=60s",
+	// Fail fast on unreachable hosts instead of the OS's ~75s TCP timeout —
+	// matters doubly for MCP tool calls, which agents sit waiting on.
+	"-o", "ConnectTimeout=10",
 }
 
 // run executes a local command with the user's terminal wired through.
