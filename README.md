@@ -75,6 +75,19 @@ SSH / a root daemon outright.)
 - A deploy is promoted only after `health.path` returns 200; otherwise the
   previous release is restored automatically.
 
+## Resource limits (optional)
+
+```yaml
+# homeport.yaml
+resources:
+  memory: 512M   # hard cap; throttled at 90%, OOM-killed at 100%
+  cpu: 150%      # 150% = 1.5 cores
+```
+
+These become systemd cgroup directives (`MemoryMax`/`MemoryHigh`/`CPUQuota`)
+— the same kernel mechanism Docker uses for `--memory`/`--cpus`. Omit the
+block for no limits. `homeport stats` shows the cap next to live usage.
+
 ## How it works
 
 ```
