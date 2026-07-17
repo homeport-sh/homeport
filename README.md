@@ -129,6 +129,23 @@ JS-framework binary). **Don't** use it on a busy or latency-sensitive app —
 it never idles out anyway, and you'd just add a proxy hop. Always-on apps
 (the default) are untouched: no socket, no proxy, direct port bind.
 
+## Replicas & rolling deploys (optional)
+
+```yaml
+# homeport.yaml (public apps only)
+replicas: 3
+```
+
+Runs N instances of the app (systemd template units), load-balanced by Caddy
+(`least_conn` + passive health checks that pull a dead replica out). Deploys
+become **rolling and zero-downtime**: instances restart one at a time,
+health-checked, while the others keep serving.
+
+Size replicas to the box's cores — on a single VPS, more replicas don't add
+capacity the box doesn't have; they mainly help single-process runtimes
+(Node/Bun) use more cores. Mutually exclusive with `idle`. `replicas: 1`
+(default) is a plain single service, unchanged.
+
 ## How it works
 
 ```

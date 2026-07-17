@@ -34,6 +34,7 @@ type config struct {
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
+	Replicas    int             `yaml:"replicas"`
 	Build       buildConfig     `yaml:"build"`
 	Health      healthConfig    `yaml:"health"`
 	Resources   resourcesConfig `yaml:"resources"`
@@ -97,6 +98,15 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: idle_timeout must be a number with s/m/h suffix (e.g. 300s, 5m), got %q", configFile, cfg.IdleTimeout)
 	case cfg.IdleTimeout != "" && !cfg.Idle:
 		return nil, fmt.Errorf("%s: idle_timeout is set but idle is not true", configFile)
+	case cfg.Replicas < 0 || cfg.Replicas > 20:
+		return nil, fmt.Errorf("%s: replicas must be 1-20 (got %d)", configFile, cfg.Replicas)
+	case cfg.Replicas > 1 && cfg.Internal:
+		return nil, fmt.Errorf("%s: replicas>1 needs a domain (Caddy load-balances them) — remove internal", configFile)
+	case cfg.Replicas > 1 && cfg.Idle:
+		return nil, fmt.Errorf("%s: replicas and idle are mutually exclusive (idle is 0<->1, replicas is 1<->N)", configFile)
+	}
+	if cfg.Replicas == 0 {
+		cfg.Replicas = 1
 	}
 	return cfg, nil
 }

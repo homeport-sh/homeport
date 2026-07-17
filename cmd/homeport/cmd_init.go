@@ -259,6 +259,11 @@ health:
 # use it on a busy or latency-sensitive app.
 # idle: true
 # idle_timeout: 5m
+
+# Optional horizontal replicas (public apps): N instances load-balanced by
+# Caddy, with rolling zero-downtime deploys. Sized to the box's cores —
+# more replicas don't add capacity a single box doesn't have.
+# replicas: 3
 `, app, server, domain, indentComment(det.note), det.build, det.artifact)
 
 	if err := os.WriteFile(configFile, []byte(yaml), 0o644); err != nil {

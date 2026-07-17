@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 func cmdDeploy(args []string) error {
@@ -43,8 +44,9 @@ func cmdDeploy(args []string) error {
 		idle = "true"
 	}
 	idleTimeout := dashIfEmpty(cfg.IdleTimeout)
+	replicas := strconv.Itoa(cfg.Replicas)
 	step("registering %s on %s", cfg.App, cfg.Server)
-	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, domain, cfg.Health.Path, mem, cpu, idle, idleTimeout)); err != nil {
+	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, domain, cfg.Health.Path, mem, cpu, idle, idleTimeout, replicas)); err != nil {
 		return fmt.Errorf("app registration failed — did you run `homeport bootstrap` on this server? (%w)", err)
 	}
 

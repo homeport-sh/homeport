@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.5.0
+HOMEPORTD_VERSION=0.6.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -179,14 +179,66 @@ swap_current() { # swap_current <app> <target>  (atomic symlink flip)
 }
 
 wait_healthy() { # uses $PORT and $HEALTH_PATH from load_app
-  local i
+  wait_healthy_port "$PORT"
+}
+
+wait_healthy_port() { # <port> — polls http://127.0.0.1:<port>$HEALTH_PATH
+  local port=$1 i
   for i in $(seq 1 60); do
-    if curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$PORT$HEALTH_PATH" 2>/dev/null; then
+    if curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port$HEALTH_PATH" 2>/dev/null; then
       return 0
     fi
     sleep 0.5
   done
   return 1
+}
+
+# replica_base <public-port> — start of an app's private replica-port block.
+# Each app gets 20 slots; block N starts at 10000 + N*20, never overlapping
+# the public (8100+) or idle (9100+) ranges or another app's block.
+replica_base() { echo $((10000 + ($1 - BASE_PORT) * 20)); }
+
+# emit_service_body <port-expr> — the shared [Service] block. Relies on
+# bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from cmd_add.
+emit_service_body() {
+  cat <<EOF
+[Service]
+User=$user
+Group=$user
+WorkingDirectory=$HOMEPORT_ROOT/$app/current
+ExecStart=$HOMEPORT_ROOT/$app/current/bin
+EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=$1
+Environment=NBC_RUNTIME_DIR=$HOMEPORT_ROOT/$app/shared/runtime
+Environment=HOST=127.0.0.1
+Environment=STATE_DIR=$HOMEPORT_ROOT/$app/shared
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+TasksMax=512
+$limits
+# single-binary apps need exactly one writable directory — lock down the rest
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=$HOMEPORT_ROOT/$app/shared
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+EOF
+}
+
+_teardown_idle_units() { # remove socket/proxy when an app leaves idle mode
+  local app=$1
+  [[ -f "/etc/systemd/system/homeport-$app-proxy.socket" ]] || return 0
+  systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
+  systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
+  rm -f "/etc/systemd/system/homeport-$app-proxy.socket" \
+        "/etc/systemd/system/homeport-$app-proxy.service"
+  systemctl daemon-reload
 }
 
 prune_releases() { # keep the newest $KEEP releases, never the live one
@@ -204,7 +256,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -212,6 +264,7 @@ cmd_add() {
   [[ $cpu == - ]] && cpu=""
   [[ $idle == - ]] && idle=""
   [[ $idle_timeout == - ]] && idle_timeout=""
+  [[ $replicas == - || -z $replicas ]] && replicas=1
   # No domain => internal app: bound to 127.0.0.1, reachable only from other
   # apps on the box or through `homeport tunnel`. No Caddy fragment, no TLS,
   # nothing on 80/443.
@@ -222,11 +275,14 @@ cmd_add() {
   [[ -z $idle || $idle == true ]] || die "idle must be 'true' or unset"
   [[ -z $idle_timeout || $idle_timeout =~ ^[0-9]+[smh]$ ]] || die "invalid idle_timeout: '$idle_timeout' (e.g. 300s, 5m)"
   [[ -n $idle ]] && idle_timeout=${idle_timeout:-300s}
-  local user="homeport-$app" port keep=5
+  [[ $replicas =~ ^[0-9]+$ && $replicas -ge 1 && $replicas -le 20 ]] || die "replicas must be 1-20 (got '$replicas')"
+  [[ $replicas -gt 1 && -z $domain ]] && die "replicas>1 needs a domain (Caddy load-balances them)"
+  [[ $replicas -gt 1 && -n $idle ]] && die "replicas and idle are mutually exclusive (idle is 0<->1, replicas is 1<->N)"
+  local user="homeport-$app" port keep=5 old_replicas=1
 
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
     load_app "$app"
-    port=$PORT keep=$KEEP
+    port=$PORT keep=$KEEP old_replicas=${REPLICAS:-1}
   else
     port=$(next_port)
   fi
@@ -247,6 +303,7 @@ MEMORY=$memory
 CPU=$cpu
 IDLE=$idle
 IDLE_TIMEOUT=$idle_timeout
+REPLICAS=$replicas
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -277,57 +334,61 @@ EOF
   chown root:"$user" "$HOMEPORT_ROOT/$app/shared/env"
   chmod 640 "$HOMEPORT_ROOT/$app/shared/env"
 
-  # An idle app is pulled up by its socket-proxy (not started on boot) and
-  # stops with it (PartOf); an always-on app is enabled on boot as usual.
-  local idle_unit="" install_sec=$'[Install]\nWantedBy=multi-user.target'
-  if [[ -n $idle ]]; then
-    idle_unit="PartOf=homeport-$app-proxy.service"
-    install_sec=""
-  fi
+  # --- write the app's systemd unit(s) for its mode ---
+  local caddy_upstreams=""
+  if [[ $replicas -gt 1 ]]; then
+    # Horizontal replicas: a template unit, one instance per private port,
+    # Caddy load-balances across them. Instances are named by their port so
+    # the unit uses PORT=%i with no arithmetic. Started rolling in activate.
+    local rbase i p
+    rbase=$(replica_base "$port")
+    { echo "[Unit]"
+      echo "Description=homeport app: $app (replica %i)"
+      echo "After=network-online.target"
+      echo "Wants=network-online.target"
+      echo
+      emit_service_body '%i'
+      echo
+      echo "[Install]"
+      echo "WantedBy=multi-user.target"
+    } > "/etc/systemd/system/homeport-$app@.service"
+    rm -f "/etc/systemd/system/homeport-$app.service"   # drop single-instance unit if any
+    _teardown_idle_units "$app"
+    systemctl daemon-reload
+    for (( i = 1; i <= replicas; i++ )); do
+      p=$((rbase + i))
+      systemctl enable "homeport-$app@$p" >/dev/null 2>&1 || true
+      caddy_upstreams+=" 127.0.0.1:$p"
+    done
+    # scale-down: retire instances beyond the new count
+    for (( i = replicas + 1; i <= old_replicas; i++ )); do
+      systemctl disable --now "homeport-$app@$((rbase + i))" 2>/dev/null || true
+    done
+  else
+    # Single instance. Idle apps bind a private port (+1000) and are pulled
+    # up by their socket-proxy; always-on apps bind the public port directly.
+    local idle_unit="" install_sec=$'[Install]\nWantedBy=multi-user.target'
+    if [[ -n $idle ]]; then
+      idle_unit="PartOf=homeport-$app-proxy.service"
+      install_sec=""
+    fi
+    rm -f "/etc/systemd/system/homeport-$app@.service"   # drop template if this was a replica app
+    { echo "[Unit]"
+      echo "Description=homeport app: $app"
+      echo "After=network-online.target"
+      echo "Wants=network-online.target"
+      [[ -n $idle_unit ]] && echo "$idle_unit"
+      echo
+      emit_service_body "$internal_port"
+      echo
+      [[ -n $install_sec ]] && echo "$install_sec"
+    } > "/etc/systemd/system/homeport-$app.service"
 
-  cat > "/etc/systemd/system/homeport-$app.service" <<EOF
-[Unit]
-Description=homeport app: $app
-After=network-online.target
-Wants=network-online.target
-$idle_unit
-
-[Service]
-User=$user
-Group=$user
-WorkingDirectory=$HOMEPORT_ROOT/$app/current
-ExecStart=$HOMEPORT_ROOT/$app/current/bin
-EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env
-Environment=NODE_ENV=production
-Environment=HOSTNAME=127.0.0.1
-Environment=PORT=$internal_port
-Environment=NBC_RUNTIME_DIR=$HOMEPORT_ROOT/$app/shared/runtime
-Environment=HOST=127.0.0.1
-Environment=STATE_DIR=$HOMEPORT_ROOT/$app/shared
-Restart=on-failure
-RestartSec=2
-LimitNOFILE=65536
-TasksMax=512
-$limits
-# single-binary apps need exactly one writable directory — lock down the rest
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=$HOMEPORT_ROOT/$app/shared
-PrivateTmp=true
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-
-$install_sec
-EOF
-
-  if [[ -n $idle ]]; then
-    # Scale-to-zero: systemd holds the public port and starts the app on the
-    # first connection. systemd-socket-proxyd bridges to the app's private
-    # port and exits after $idle_timeout of no traffic, taking the app with
-    # it (PartOf). No process runs while idle — only the kernel socket.
-    cat > "/etc/systemd/system/homeport-$app-proxy.socket" <<EOF
+    if [[ -n $idle ]]; then
+      # Scale-to-zero: systemd holds the public port and starts the app on
+      # first connection. systemd-socket-proxyd bridges to the private port
+      # and exits after $idle_timeout, taking the app with it (PartOf).
+      cat > "/etc/systemd/system/homeport-$app-proxy.socket" <<EOF
 [Unit]
 Description=homeport socket: $app (scale-to-zero)
 
@@ -337,7 +398,7 @@ ListenStream=127.0.0.1:$port
 [Install]
 WantedBy=sockets.target
 EOF
-    cat > "/etc/systemd/system/homeport-$app-proxy.service" <<EOF
+      cat > "/etc/systemd/system/homeport-$app-proxy.service" <<EOF
 [Unit]
 Description=homeport proxy: $app
 Requires=homeport-$app.service
@@ -347,29 +408,31 @@ After=homeport-$app.service
 ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=$idle_timeout 127.0.0.1:$internal_port
 NoNewPrivileges=true
 EOF
-    systemctl daemon-reload
-    systemctl disable --now "homeport-$app" 2>/dev/null || true
-    systemctl enable --now "homeport-$app-proxy.socket" >/dev/null 2>&1 || true
-  else
-    systemctl daemon-reload
-    systemctl enable "homeport-$app" >/dev/null 2>&1 || true
-    # If this app was previously idle, tear the socket/proxy down.
-    if [[ -f "/etc/systemd/system/homeport-$app-proxy.socket" ]]; then
-      systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
-      systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
-      rm -f "/etc/systemd/system/homeport-$app-proxy.socket" \
-            "/etc/systemd/system/homeport-$app-proxy.service"
       systemctl daemon-reload
+      systemctl disable --now "homeport-$app" 2>/dev/null || true
+      systemctl enable --now "homeport-$app-proxy.socket" >/dev/null 2>&1 || true
+    else
+      systemctl daemon-reload
+      systemctl enable "homeport-$app" >/dev/null 2>&1 || true
+      _teardown_idle_units "$app"
     fi
+    caddy_upstreams=" 127.0.0.1:$port"
   fi
 
   if [[ -n $domain ]]; then
-    printf '%s {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:%s\n}\n' "$domain" "$port" \
-      > "$CADDY_DIR/$app.caddy"
+    { printf '%s {\n\tencode zstd gzip\n' "$domain"
+      if [[ $replicas -gt 1 ]]; then
+        printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tfail_duration 10s\n\t}\n' "$caddy_upstreams"
+      else
+        printf '\treverse_proxy%s\n' "$caddy_upstreams"
+      fi
+      printf '}\n'
+    } > "$CADDY_DIR/$app.caddy"
     caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
       || die "generated Caddy config failed validation"
     systemctl reload caddy
-    echo "app '$app' registered: https://$domain -> 127.0.0.1:$port"
+    local rmsg=""; [[ $replicas -gt 1 ]] && rmsg=" · $replicas replicas"
+    echo "app '$app' registered: https://$domain -> 127.0.0.1:$port$rmsg"
     echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
   else
     # Internal app: drop any Caddy fragment a previous public deploy left.
@@ -394,6 +457,34 @@ restart_app() { # restart respecting scale-to-zero (uses $IDLE from load_app)
   fi
 }
 
+rolling_restart() { # <app> — restart replicas one at a time, health-checking
+  # each before the next. Caddy keeps serving from the others (fail_duration
+  # pulls the restarting one out), so there's no downtime. Uses $PORT/$REPLICAS.
+  local app=$1 rbase i p
+  rbase=$(replica_base "$PORT")
+  for (( i = 1; i <= ${REPLICAS:-1}; i++ )); do
+    p=$((rbase + i))
+    systemctl restart "homeport-$app@$p"
+    if ! wait_healthy_port "$p"; then
+      echo "--- replica $i (:$p) last 20 log lines ---" >&2
+      journalctl -u "homeport-$app@$p" -n 20 --no-pager >&2 || true
+      return 1
+    fi
+  done
+  return 0
+}
+
+# restart+health for a whole app, respecting its mode. Returns 0 if healthy.
+activate_and_check() {
+  local app=$1
+  if [[ ${REPLICAS:-1} -gt 1 ]]; then
+    rolling_restart "$app"
+  else
+    restart_app "$app"
+    wait_healthy
+  fi
+}
+
 cmd_activate() {
   local app=${1:-} release=${2:-}
   valid_app "$app"; valid_release "$release"
@@ -407,23 +498,21 @@ cmd_activate() {
   [[ -L "$HOMEPORT_ROOT/$app/current" ]] && prev=$(readlink "$HOMEPORT_ROOT/$app/current")
 
   swap_current "$app" "releases/$release"
-  restart_app "$app"
 
-  if wait_healthy; then
+  if activate_and_check "$app"; then
     prune_releases "$app"
-    local sleeps=""
-    [[ -n ${IDLE:-} ]] && sleeps=" · sleeps after ${IDLE_TIMEOUT} idle"
+    local note=""
+    [[ -n ${IDLE:-} ]] && note=" · sleeps after ${IDLE_TIMEOUT} idle"
+    [[ ${REPLICAS:-1} -gt 1 ]] && note=" · $REPLICAS replicas (rolling)"
     if [[ -n ${DOMAIN:-} ]]; then
-      echo "live: $release (https://$DOMAIN)$sleeps"
+      echo "live: $release (https://$DOMAIN)$note"
     else
-      echo "live: $release (internal, 127.0.0.1:$PORT)$sleeps"
+      echo "live: $release (internal, 127.0.0.1:$PORT)$note"
     fi
   else
-    echo "--- last 20 log lines ---" >&2
-    journalctl -u "homeport-$app" -n 20 --no-pager >&2 || true
     if [[ -n $prev && $prev != "releases/$release" ]]; then
       swap_current "$app" "$prev"
-      restart_app "$app"
+      activate_and_check "$app" >/dev/null 2>&1 || true
       die "health check failed — reverted to ${prev#releases/}"
     fi
     systemctl stop "homeport-$app" 2>/dev/null || true
@@ -484,7 +573,15 @@ cmd_env() { # merge KEY=value lines from stdin into the app's env file
   install -o root -g "homeport-$app" -m 640 "$tmp" "$file"
   rm -f "$tmp"
   echo "env updated: $added value(s) set, ${#order[@]} total"
-  if systemctl is-active --quiet "homeport-$app"; then
+  # restart to pick up the new env (mode-aware; idle apps reload on next wake)
+  if [[ ${REPLICAS:-1} -gt 1 ]]; then
+    local rbase i
+    rbase=$(replica_base "$PORT")
+    for (( i = 1; i <= REPLICAS; i++ )); do
+      systemctl try-restart "homeport-$app@$((rbase + i))" 2>/dev/null || true
+    done
+    echo "restarted $REPLICAS replicas"
+  elif systemctl is-active --quiet "homeport-$app"; then
     systemctl restart "homeport-$app"
     echo "restarted homeport-$app"
   fi
@@ -515,17 +612,26 @@ cmd_env_list() { # keys only — values never leave the box
   done < "$file"
 }
 
+app_state() { # is-active for an app, whatever its mode (uses $PORT/$REPLICAS)
+  local app=$1
+  if [[ ${REPLICAS:-1} -gt 1 ]]; then
+    systemctl is-active "homeport-$app@$(( $(replica_base "$PORT") + 1 ))" 2>/dev/null || true
+  else
+    systemctl is-active "homeport-$app" 2>/dev/null || true
+  fi
+}
+
 status_json_one() { # caller must have run load_app for $1
   local app=$1 current state sep="" r
   current=$(readlink "$HOMEPORT_ROOT/$app/current" 2>/dev/null || true)
   current=${current#releases/}
-  state=$(systemctl is-active "homeport-$app" 2>/dev/null || true)
+  state=$(app_state "$app")
   # every field is charset-validated on the way in — safe to emit unescaped
   local internal=false idle=false
   [[ -z ${DOMAIN:-} ]] && internal=true
   [[ -n ${IDLE:-} ]] && idle=true
-  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"port":%d,"state":"%s","release":"%s","releases":[' \
-    "$app" "${DOMAIN:-}" "$internal" "$idle" "$PORT" "$state" "$current"
+  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"port":%d,"state":"%s","release":"%s","releases":[' \
+    "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$PORT" "$state" "$current"
   while IFS= read -r r; do
     [[ -n $r ]] || continue
     printf '%s"%s"' "$sep" "$r"
@@ -573,7 +679,7 @@ cmd_status() {
   fi
   local current state
   current=$(readlink "$HOMEPORT_ROOT/$app/current" 2>/dev/null || echo "(none)")
-  state=$(systemctl is-active "homeport-$app" 2>/dev/null || true)
+  state=$(app_state "$app")
   echo "app:      $app"
   if [[ -n ${DOMAIN:-} ]]; then
     echo "domain:   https://$DOMAIN  (127.0.0.1:$PORT)"
@@ -581,6 +687,7 @@ cmd_status() {
     echo "domain:   (internal — 127.0.0.1:$PORT, reach via homeport tunnel)"
   fi
   [[ -n ${IDLE:-} ]] && echo "mode:     scale-to-zero (sleeps after ${IDLE_TIMEOUT} idle)"
+  [[ ${REPLICAS:-1} -gt 1 ]] && echo "replicas: $REPLICAS (Caddy load-balanced, rolling deploys)"
   echo "state:    $state"
   echo "release:  ${current#releases/}"
   echo "releases: $(ls -1 "$HOMEPORT_ROOT/$app/releases" 2>/dev/null | sort -r | tr '\n' ' ')"
@@ -642,7 +749,8 @@ cmd_logs() {
   local app=${1:-}
   valid_app "$app"
   shift || true
-  local -a args=(-u "homeport-$app" --no-pager -n 100)
+  # glob matches the plain unit, replica instances (@N) and the idle proxy
+  local -a args=(-u "homeport-$app*" --no-pager -n 100)
   while (( $# )); do
     case $1 in
       -f) args+=(-f) ;;
@@ -658,11 +766,23 @@ cmd_remove() {
   local app=${1:-}
   valid_app "$app"
   [[ ${2:-} == --yes ]] || die "this deletes the app, its releases and env — re-run as: remove $app --yes"
+  # capture replica info before the config is deleted
+  local replicas=1 port=0
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] && { load_app "$app"; replicas=${REPLICAS:-1}; port=$PORT; }
   systemctl disable --now "homeport-$app" 2>/dev/null || true
   # scale-to-zero units, if this was an idle app
   systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
   systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
+  # replica instances, if this was a scaled app
+  if [[ $replicas -gt 1 ]]; then
+    local rbase i
+    rbase=$(replica_base "$port")
+    for (( i = 1; i <= replicas; i++ )); do
+      systemctl disable --now "homeport-$app@$((rbase + i))" 2>/dev/null || true
+    done
+  fi
   rm -f "/etc/systemd/system/homeport-$app.service" \
+        "/etc/systemd/system/homeport-$app@.service" \
         "/etc/systemd/system/homeport-$app-proxy.socket" \
         "/etc/systemd/system/homeport-$app-proxy.service" \
         "$CADDY_DIR/$app.caddy"
@@ -677,7 +797,7 @@ usage() {
   cat <<'EOF'
 homeportd — root-side homeport helper (run via sudo)
 
-  add <app> <domain|-> [health] [mem] [cpu] [idle] [timeout]  register an app (idle=scale-to-zero)
+  add <app> <domain|-> [health] [mem] [cpu] [idle] [timeout] [replicas]  register an app
   activate <app> <release>           flip symlink, restart, health-check, auto-revert
   rollback <app> [release]           activate the previous (or a given) release
   env <app>                          merge KEY=value lines from stdin into the app env
