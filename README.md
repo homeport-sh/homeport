@@ -154,9 +154,12 @@ Cross-compile with `GOOS`/`GOARCH` as usual.
 
 ## Roadmap
 
-- `ui/` — an optional dashboard (status, logs, env, rollback button): a
-  SvelteKit app compiled to a single binary, deployed *by homeport itself*,
-  localhost-only behind an SSH tunnel (`homeport ui`). It consumes the same
-  `homeportd --json` contract as the CLI. See `ui/README.md`.
 - Blue/green zero-downtime activation (current strategy is a 1–2s restart).
 - Per-app-scoped CI keys via forced commands.
+- Configurable health-check timeout (currently a fixed 30s).
+- Multi-server fan-out (`servers:` list) for the same app.
+
+A web dashboard is intentionally **not** on the near-term roadmap: for a
+single box the CLI plus `homeport mcp` (agent-driven ops) cover it, and a
+tunnel-only local UI would add friction over the CLI it wraps. A dashboard
+returns only as a future multi-server cloud control plane.
