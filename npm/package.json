@@ -1,0 +1,25 @@
+{
+  "name": "homeport",
+  "version": "0.0.1",
+  "description": "Homeport — the fastest way to ship binaries to production. Deploy single-binary web apps (Go, Rust, bun --compile) to your own VPS.",
+  "homepage": "https://homeport.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/homeport-sh/homeport.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deploy",
+    "deployment",
+    "vps",
+    "binary",
+    "hosting",
+    "caddy",
+    "self-hosted"
+  ],
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "main": "index.js"
+}
