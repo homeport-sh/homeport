@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -130,10 +131,19 @@ func cmdMCP(args []string) error {
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+// toolMu serializes tool execution. The MCP SDK dispatches tool calls
+// concurrently, but fleet operations must not interleave — a status racing
+// a rollback reads stale state, and parallel deploys would fight over the
+// release symlink. Agents get sequential, predictable ops.
+var toolMu sync.Mutex
+
 // selfExec runs this same binary with the given args, capturing everything.
 // Exit != 0 becomes an isError result carrying the CLI's own message —
 // which is already written to be actionable.
 func selfExec(ctx context.Context, timeout time.Duration, args ...string) (*mcp.CallToolResult, any, error) {
+	toolMu.Lock()
+	defer toolMu.Unlock()
+
 	self, err := os.Executable()
 	if err != nil {
 		return nil, nil, err

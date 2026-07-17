@@ -181,7 +181,7 @@ swap_current() { # swap_current <app> <target>  (atomic symlink flip)
 wait_healthy() { # uses $PORT and $HEALTH_PATH from load_app
   local i
   for i in $(seq 1 60); do
-    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT$HEALTH_PATH"; then
+    if curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$PORT$HEALTH_PATH" 2>/dev/null; then
       return 0
     fi
     sleep 0.5
@@ -589,9 +589,9 @@ main() {
   echo "  IMPORTANT: root SSH login is now disabled. Connect as:  ssh deploy@$ip"
   echo
   echo "  Next, on your laptop, inside your project:"
-  echo "    bunx homeport init                # answers: server = deploy@$ip, your domain"
-  echo "    bunx homeport secrets push .env   # upload your env/secrets"
-  echo "    bunx homeport deploy              # build, upload, go live"
+  echo "    homeport init                # answers: server = deploy@$ip, your domain"
+  echo "    homeport secrets push .env   # upload your env/secrets"
+  echo "    homeport deploy              # build, upload, go live"
 }
 
 main "$@"
