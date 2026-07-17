@@ -1,0 +1,24 @@
+# homeport deploy config — safe to commit (secrets go via `homeport secrets`)
+app: next-example
+server: deploy@your-server-ip
+# public app: set a domain (Caddy fronts it with automatic TLS).
+# private app: remove this line and set  internal: true  — the app binds to
+# loopback and is reached with  homeport tunnel , nothing on 80/443.
+domain: next.example.com
+
+build:
+  # next-bun-compile emits the binary for the machine it builds on.
+  # Building on macOS? Make the build target Linux, or deploy from CI
+  # (homeport ci setup github) where the runner is already Linux.
+  command: bun run build
+  # path to the single Linux executable the build produces
+  artifact: server
+
+health:
+  # a deploy is only promoted once this path returns 200 on the new binary
+  path: /
+
+# Optional cgroup limits (systemd — the same kernel mechanism as docker).
+# resources:
+#   memory: 512M   # hard cap; throttled at 90%, OOM-killed at 100%
+#   cpu: 150%      # 150% = 1.5 cores
