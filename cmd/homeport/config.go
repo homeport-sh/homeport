@@ -22,12 +22,18 @@ type healthConfig struct {
 	Path string `yaml:"path"`
 }
 
+type resourcesConfig struct {
+	Memory string `yaml:"memory"`
+	CPU    string `yaml:"cpu"`
+}
+
 type config struct {
-	App    string       `yaml:"app"`
-	Server string       `yaml:"server"`
-	Domain string       `yaml:"domain"`
-	Build  buildConfig  `yaml:"build"`
-	Health healthConfig `yaml:"health"`
+	App       string          `yaml:"app"`
+	Server    string          `yaml:"server"`
+	Domain    string          `yaml:"domain"`
+	Build     buildConfig     `yaml:"build"`
+	Health    healthConfig    `yaml:"health"`
+	Resources resourcesConfig `yaml:"resources"`
 }
 
 // These mirror homeportd's server-side validation — fail fast with a good
@@ -37,6 +43,8 @@ var (
 	domainRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$`)
 	healthRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
 	releaseRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$`)
+	memoryRe  = regexp.MustCompile(`^[0-9]+[KMG]$`)
+	cpuRe     = regexp.MustCompile(`^[0-9]+%$`)
 )
 
 func loadConfig() (*config, error) {
@@ -70,6 +78,10 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: %q doesn't look like a domain", configFile, cfg.Domain)
 	case !healthRe.MatchString(cfg.Health.Path):
 		return nil, fmt.Errorf("%s: health.path must start with / and contain no spaces", configFile)
+	case cfg.Resources.Memory != "" && !memoryRe.MatchString(cfg.Resources.Memory):
+		return nil, fmt.Errorf("%s: resources.memory must be a number with K/M/G suffix (e.g. 512M, 1G), got %q", configFile, cfg.Resources.Memory)
+	case cfg.Resources.CPU != "" && !cpuRe.MatchString(cfg.Resources.CPU):
+		return nil, fmt.Errorf("%s: resources.cpu must be a percentage (e.g. 150%% for 1.5 cores), got %q", configFile, cfg.Resources.CPU)
 	}
 	return cfg, nil
 }
@@ -82,6 +94,15 @@ func (c *config) homeportd(args ...string) string {
 
 func (c *config) host() string {
 	return c.Server[strings.Index(c.Server, "@")+1:]
+}
+
+// dashIfEmpty renders an optional positional arg: "-" is homeportd's
+// placeholder for "unset" so trailing optional args keep their position.
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // releaseID is sortable (UTC timestamp first) so homeportd can prune oldest

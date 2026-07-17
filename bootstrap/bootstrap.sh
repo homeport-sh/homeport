@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.2.0
+HOMEPORTD_VERSION=0.3.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -204,9 +204,14 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-}
   valid_app "$app"; valid_domain "$domain"
   [[ $health == /* ]] || die "health path must start with /"
+  # "-" means unset (positional placeholder from the CLI)
+  [[ $memory == - ]] && memory=""
+  [[ $cpu == - ]] && cpu=""
+  [[ -z $memory || $memory =~ ^[0-9]+[KMG]$ ]] || die "invalid memory limit: '$memory' (e.g. 512M, 1G)"
+  [[ -z $cpu || $cpu =~ ^[0-9]+%$ ]] || die "invalid cpu limit: '$cpu' (e.g. 150%)"
   local user="homeport-$app" port keep=5
 
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
@@ -223,7 +228,25 @@ PORT=$port
 DOMAIN=$domain
 HEALTH_PATH=$health
 KEEP=$keep
+MEMORY=$memory
+CPU=$cpu
 EOF
+
+  # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
+  # MemoryHigh (90% of the cap) throttles before MemoryMax OOM-kills.
+  local limits=""
+  if [[ -n $memory ]]; then
+    # convert to bytes for the 90% calc so e.g. 1G doesn't integer-floor to 0G.
+    local mem_num=${memory%[KMG]} mem_suffix=${memory: -1} bytes
+    case $mem_suffix in
+      K) bytes=$((mem_num * 1024)) ;;
+      M) bytes=$((mem_num * 1024 * 1024)) ;;
+      G) bytes=$((mem_num * 1024 * 1024 * 1024)) ;;
+    esac
+    limits+="MemoryMax=$memory"$'\n'
+    limits+="MemoryHigh=$((bytes * 9 / 10))"$'\n'
+  fi
+  [[ -n $cpu ]] && limits+="CPUQuota=$cpu"$'\n'
 
   id -u "$user" &>/dev/null \
     || useradd --system --home-dir "$HOMEPORT_ROOT/$app" --no-create-home --shell /usr/sbin/nologin "$user"
@@ -258,7 +281,8 @@ Environment=STATE_DIR=$HOMEPORT_ROOT/$app/shared
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
-
+TasksMax=512
+$limits
 # single-binary apps need exactly one writable directory — lock down the rest
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -548,7 +572,7 @@ usage() {
   cat <<'EOF'
 homeportd — root-side homeport helper (run via sudo)
 
-  add <app> <domain> [health-path]   register an app (idempotent)
+  add <app> <domain> [health] [mem] [cpu]  register an app (idempotent); limits e.g. 512M 150%
   activate <app> <release>           flip symlink, restart, health-check, auto-revert
   rollback <app> [release]           activate the previous (or a given) release
   env <app>                          merge KEY=value lines from stdin into the app env

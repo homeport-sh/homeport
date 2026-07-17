@@ -1,0 +1,15 @@
+# homeport deploy config — safe to commit (secrets go via `homeport secrets`)
+app: website
+server: deploy@178.105.67.23
+domain: website.178-105-67-23.sslip.io
+
+build:
+  # TODO: set build.command to whatever produces a single Linux
+  # executable at build.artifact.
+  command: bun --bun vite build
+  # path to the single Linux executable the build produces
+  artifact: dist/app
+
+health:
+  # a deploy is only promoted once this path returns 200 on the new binary
+  path: /

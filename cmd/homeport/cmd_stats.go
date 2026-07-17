@@ -18,7 +18,7 @@ func cmdStats(args []string) error {
 	unit := "homeport-" + cfg.App
 
 	remote := fmt.Sprintf(
-		"systemctl show %s --property=ActiveState,ActiveEnterTimestamp,MemoryCurrent,MemoryPeak,CPUUsageNSec,TasksCurrent"+
+		"systemctl show %s --property=ActiveState,ActiveEnterTimestamp,MemoryCurrent,MemoryPeak,MemoryMax,CPUUsageNSec,CPUQuotaPerSecUSec,TasksCurrent"+
 			" && echo ===host==="+
 			" && free -b | awk 'NR==2{print \"HOSTMEM=\"$3\"/\"$2}'"+
 			" && df -B1 --output=avail,size / | awk 'NR==2{print \"HOSTDISK=\"$1\"/\"$2}'"+
@@ -46,9 +46,19 @@ func cmdStats(args []string) error {
 	if peak := fmtBytes(props["MemoryPeak"]); peak != "?" {
 		fmt.Printf(" · %s peak", peak)
 	}
+	// MemoryMax is "infinity" (or unset) when no limit is configured.
+	if max := fmtBytes(props["MemoryMax"]); max != "?" {
+		fmt.Printf(" · %s max", max)
+	}
 	fmt.Println()
 	if ns, err := strconv.ParseUint(props["CPUUsageNSec"], 10, 64); err == nil {
-		fmt.Printf("cpu:      %.1fs total\n", float64(ns)/1e9)
+		fmt.Printf("cpu:      %.1fs total", float64(ns)/1e9)
+		// CPUQuotaPerSecUSec is "infinity" when uncapped; otherwise µs/sec,
+		// so 1500000 == 150% == 1.5 cores.
+		if q, err := strconv.ParseUint(props["CPUQuotaPerSecUSec"], 10, 64); err == nil && q > 0 {
+			fmt.Printf(" · %d%% quota", q/10000)
+		}
+		fmt.Println()
 	}
 	if t := props["TasksCurrent"]; t != "" && t != "[not set]" {
 		fmt.Printf("tasks:    %s\n", t)

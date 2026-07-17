@@ -181,6 +181,11 @@ build:
 health:
   # a deploy is only promoted once this path returns 200 on the new binary
   path: /
+
+# Optional cgroup limits (systemd — the same kernel mechanism as docker).
+# resources:
+#   memory: 512M   # hard cap; throttled at 90%%, OOM-killed at 100%%
+#   cpu: 150%%      # 150%% = 1.5 cores
 `, app, server, domain, indentComment(det.note), det.build, det.artifact)
 
 	if err := os.WriteFile(configFile, []byte(yaml), 0o644); err != nil {

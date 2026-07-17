@@ -32,8 +32,12 @@ func cmdDeploy(args []string) error {
 	id := releaseID()
 	dir := fmt.Sprintf("/opt/homeport/%s/releases/%s", cfg.App, id)
 
+	// homeportd add takes positional <app> <domain> <health> <mem> <cpu>;
+	// "-" is the unset placeholder for the optional resource limits.
+	mem := dashIfEmpty(cfg.Resources.Memory)
+	cpu := dashIfEmpty(cfg.Resources.CPU)
 	step("registering %s on %s", cfg.App, cfg.Server)
-	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, cfg.Domain, cfg.Health.Path)); err != nil {
+	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, cfg.Domain, cfg.Health.Path, mem, cpu)); err != nil {
 		return fmt.Errorf("app registration failed — did you run `homeport bootstrap` on this server? (%w)", err)
 	}
 
