@@ -30,9 +30,15 @@ func detectProject() projectInfo {
 			DevDependencies map[string]string `json:"devDependencies"`
 		}
 		if json.Unmarshal(data, &pkg) == nil {
-			_, dep := pkg.Dependencies["next-bun-compile"]
-			_, dev := pkg.DevDependencies["next-bun-compile"]
-			if dep || dev {
+			has := func(name string) bool {
+				_, dep := pkg.Dependencies[name]
+				_, dev := pkg.DevDependencies[name]
+				return dep || dev
+			}
+			bunCI := `      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile`
+
+			if has("next-bun-compile") {
 				return projectInfo{
 					kind:     "next-bun-compile",
 					app:      sanitizeAppName(pkg.Name),
@@ -41,8 +47,22 @@ func detectProject() projectInfo {
 					note: `# next-bun-compile emits the binary for the machine it builds on.
 # Building on macOS? Make the build target Linux, or deploy from CI
 # (homeport ci setup github) where the runner is already Linux.`,
-					ciToolchain: `      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile`,
+					ciToolchain: bunCI,
+				}
+			}
+
+			if has("svelte-bun-compile") {
+				return projectInfo{
+					kind:     "svelte-bun-compile",
+					app:      sanitizeAppName(pkg.Name),
+					// --bun is required: the adapter compiles via Bun.build.
+					build:    "bun --bun vite build",
+					artifact: "dist/app",
+					note: `# svelte-bun-compile builds for the machine it runs on. Deploying
+# from macOS to a Linux box? Set the adapter target in svelte.config.js:
+#   adapter({ target: 'bun-linux-x64' })   (or bun-linux-arm64 for ARM)
+# — or deploy from CI (homeport ci setup github), which is already Linux.`,
+					ciToolchain: bunCI,
 				}
 			}
 		}
