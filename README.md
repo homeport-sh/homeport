@@ -54,6 +54,7 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 | `homeport secrets push [file]` | upload a whole `.env` file |
 | `homeport secrets list` | list env keys; values never leave the server |
 | `homeport status [--json]` | state, live release, available releases |
+| `homeport stats` | live resource usage — app memory/cpu/tasks, releases disk, host headroom |
 | `homeport logs [-f] [-n N]` | app logs (journald) |
 | `homeport ci setup github` | dedicated CI deploy key + pinned host key + Actions workflow |
 | `homeport mcp` | serve these commands as MCP tools (stdio) for AI agents |

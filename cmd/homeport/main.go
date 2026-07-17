@@ -35,6 +35,8 @@ func main() {
 		err = cmdSecrets(rest)
 	case "status":
 		err = cmdStatus(rest)
+	case "stats":
+		err = cmdStats(rest)
 	case "logs":
 		err = cmdLogs(rest)
 	case "mcp":
@@ -86,6 +88,7 @@ everyday:
   homeport secrets push [file]     upload a whole .env file
   homeport secrets list            list env keys (values never leave the server)
   homeport status [--json]         app state, live release, available releases
+  homeport stats                live resource usage (memory, cpu, tasks, disk)
   homeport logs [-f] [-n N]        app logs (journald)
   homeport mcp                  serve the CLI as MCP tools (stdio) for AI agents
   homeport server update        push this CLI's bundled homeportd to the box

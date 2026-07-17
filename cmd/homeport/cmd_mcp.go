@@ -90,6 +90,14 @@ func cmdMCP(args []string) error {
 		return selfExec(ctx, 60*time.Second, cmdArgs...)
 	})
 
+	type statsArgs struct{}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "stats",
+		Description: "Live resource usage: app memory (current/peak), cpu time, tasks, releases disk, host memory and disk.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args statsArgs) (*mcp.CallToolResult, any, error) {
+		return selfExec(ctx, 60*time.Second, "stats")
+	})
+
 	type secretsListArgs struct{}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "secrets_list",

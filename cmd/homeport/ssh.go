@@ -52,3 +52,12 @@ func sshRunTTY(server, remote string) error {
 func scpFile(local, remoteTarget string) error {
 	return run(nil, "scp", append(muxOpts, local, remoteTarget)...)
 }
+
+// sshOutput runs a remote command and returns its stdout (stderr passes
+// through to the terminal) — for commands the CLI parses rather than shows.
+func sshOutput(server, remote string) (string, error) {
+	cmd := exec.Command("ssh", append(muxOpts, server, remote)...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	return string(out), err
+}
