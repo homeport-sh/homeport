@@ -1,0 +1,27 @@
+# homeport deploy config — safe to commit (secrets go via `homeport secrets`)
+app: tanstack-example
+server: deploy@your-server-ip
+# public app: set a domain (Caddy fronts it with automatic TLS).
+# private app: remove this line and set  internal: true  — the app binds to
+# loopback and is reached with  homeport tunnel , nothing on 80/443.
+domain: tanstack.example.com
+
+build:
+  # TanStack Start builds through Nitro. This compiles the Nitro server
+  # output into one binary, and REQUIRES the Nitro "bun" preset:
+  #   nitro({ preset: 'bun' })   // in vite.config.ts
+  # --target=bun-linux-x64 cross-compiles for a standard x86-64 Linux box;
+  # use bun-linux-arm64 for ARM servers, or drop --target when building on
+  # the same architecture as the server (e.g. in CI).
+  command: bun --bun run build && bun build --compile --bytecode --production --minify --sourcemap --target=bun-linux-x64 --outfile server .output/server/index.mjs
+  # path to the single Linux executable the build produces
+  artifact: server
+
+health:
+  # a deploy is only promoted once this path returns 200 on the new binary
+  path: /
+
+# Optional cgroup limits (systemd — the same kernel mechanism as docker).
+# resources:
+#   memory: 512M   # hard cap; throttled at 90%, OOM-killed at 100%
+#   cpu: 150%      # 150% = 1.5 cores

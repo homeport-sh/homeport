@@ -65,6 +65,47 @@ func detectProject() projectInfo {
 					ciToolchain: bunCI,
 				}
 			}
+
+			// Nuxt and TanStack Start both build through Nitro; with the "bun"
+			// preset the server lands at .output/server/index.mjs, which
+			// `bun build --compile` turns into one binary. Same recipe for both.
+			// --production is load-bearing, not cosmetic: it sets
+			// NODE_ENV=production so conditional requires (e.g. Vue's
+			// vue.cjs.js) take their self-contained prod path instead of
+			// dev branches that reference unbundled deps like @vue/shared.
+			nitroBuild := "bun --bun run build && " +
+				"bun build --compile --bytecode --production --minify --sourcemap " +
+				"--target=bun-linux-x64 --outfile server .output/server/index.mjs"
+			nitroNote := func(fw, presetHint string) string {
+				return `# ` + fw + ` builds through Nitro. This compiles the Nitro server
+# output into one binary, and REQUIRES the Nitro "bun" preset:
+#   ` + presetHint + `
+# --target=bun-linux-x64 cross-compiles for a standard x86-64 Linux box;
+# use bun-linux-arm64 for ARM servers, or drop --target when building on
+# the same architecture as the server (e.g. in CI).`
+			}
+
+			if has("nuxt") {
+				return projectInfo{
+					kind:        "nuxt",
+					app:         sanitizeAppName(pkg.Name),
+					build:       nitroBuild,
+					artifact:    "server",
+					note:        nitroNote("Nuxt", `nitro: { preset: 'bun' }   // in nuxt.config.ts`),
+					ciToolchain: bunCI,
+				}
+			}
+
+			if has("@tanstack/react-start") || has("@tanstack/solid-start") {
+				return projectInfo{
+					kind:        "tanstack-start",
+					app:         sanitizeAppName(pkg.Name),
+					build:       nitroBuild,
+					artifact:    "server",
+					note:        nitroNote("TanStack Start", `nitro({ preset: 'bun' })   // in vite.config.ts`),
+					ciToolchain: bunCI,
+				}
+			}
 		}
 	}
 
