@@ -56,6 +56,14 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 | `homeport status [--json]` | state, live release, available releases |
 | `homeport logs [-f] [-n N]` | app logs (journald) |
 | `homeport ci setup github` | dedicated CI deploy key + pinned host key + Actions workflow |
+| `homeport mcp` | serve these commands as MCP tools (stdio) for AI agents |
+| `homeport server update` | push this CLI's bundled homeportd to the box (post-hardening update path) |
+
+**Trust model note:** `server update` means a deploy key can replace the
+root-side helper — so a deploy key is an admin credential for its box.
+Treat deploy keys like root keys; scoped per-app CI keys are on the
+roadmap. (This is still stricter than Kamal or Coolify, which require root
+SSH / a root daemon outright.)
 
 ## Your binary's contract
 

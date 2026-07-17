@@ -39,6 +39,8 @@ func main() {
 		err = cmdLogs(rest)
 	case "mcp":
 		err = cmdMCP(rest)
+	case "server":
+		err = cmdServer(rest)
 	case "ci":
 		err = cmdCI(rest)
 	case "version", "-v", "--version":
@@ -86,6 +88,7 @@ everyday:
   homeport status [--json]         app state, live release, available releases
   homeport logs [-f] [-n N]        app logs (journald)
   homeport mcp                  serve the CLI as MCP tools (stdio) for AI agents
+  homeport server update        push this CLI's bundled homeportd to the box
 
 Your binary's contract: listen on $PORT (bind $HOST, 127.0.0.1); persist
 only under $STATE_DIR. Caddy terminates TLS in front of it.

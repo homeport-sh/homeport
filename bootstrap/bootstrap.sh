@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.1.0
+HOMEPORTD_VERSION=0.2.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -491,6 +491,30 @@ cmd_version() {
   fi
 }
 
+cmd_self_update() { # replace this script with a validated copy from stdin
+  # Trust model, stated plainly: anyone who can run this (the deploy user,
+  # via sudo) can make homeportd do anything — so the deploy key is an
+  # admin credential for this box. Scoped per-app CI keys are the future
+  # mitigation; until then, treat deploy keys like root keys.
+  local tmp
+  tmp=$(mktemp)
+  cat > "$tmp"
+  if ! head -5 "$tmp" | grep -q '^# homeportd '; then
+    rm -f "$tmp"
+    die "stdin does not look like a homeportd script"
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    die "new script failed the syntax check — not installed"
+  fi
+  local newver
+  newver=$(grep -m1 '^HOMEPORTD_VERSION=' "$tmp" | cut -d= -f2)
+  [[ -n $newver ]] || { rm -f "$tmp"; die "new script declares no HOMEPORTD_VERSION"; }
+  install -o root -g root -m 755 "$tmp" /usr/local/bin/homeportd
+  rm -f "$tmp"
+  echo "homeportd updated: $HOMEPORTD_VERSION -> $newver"
+}
+
 cmd_logs() {
   local app=${1:-}
   valid_app "$app"
@@ -533,6 +557,7 @@ homeportd — root-side homeport helper (run via sudo)
   logs <app> [-f] [-n N]             app journal
   key-add                            authorize SSH public key(s) from stdin (e.g. for CI)
   key-list                           fingerprints of authorized deploy keys
+  self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
   remove <app> --yes                 delete app, releases, env, user
 EOF
@@ -552,6 +577,7 @@ main() {
     logs)     cmd_logs "$@" ;;
     key-add)  cmd_key_add "$@" ;;
     key-list) cmd_key_list "$@" ;;
+    self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;
     ""|help|-h|--help) usage ;;
