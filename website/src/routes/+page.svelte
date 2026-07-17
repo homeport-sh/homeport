@@ -1,2 +1,416 @@
-<h1>Welcome to SvelteKit</h1>
-<p>Visit <a href="https://svelte.dev/docs/kit">svelte.dev/docs/kit</a> to read the documentation</p>
+<script lang="ts">
+	import { reveal } from '$lib/reveal';
+
+	const install = 'curl -fsSL homeport.sh/install | sh';
+	let copied = $state(false);
+
+	async function copyInstall() {
+		try {
+			await navigator.clipboard.writeText(install);
+			copied = true;
+			setTimeout(() => (copied = false), 1600);
+		} catch {
+			/* clipboard blocked — no-op */
+		}
+	}
+
+	// The real fleet deployed to one €6.49 box.
+	const fleet = [
+		{ app: 'hello', framework: 'Go', mem: '1 MB', port: 8100 },
+		{ app: 'website', framework: 'SvelteKit', mem: '13 MB', port: 8101 },
+		{ app: 'nuxt', framework: 'Nuxt', mem: '26 MB', port: 8102 },
+		{ app: 'tanstack', framework: 'TanStack Start', mem: '17 MB', port: 8103 },
+		{ app: 'next', framework: 'Next.js', mem: '81 MB', port: 8104 }
+	];
+
+	const stats = [
+		{ n: '5', label: 'apps docked' },
+		{ n: '4', label: 'frameworks' },
+		{ n: '€6.49', label: 'per month' },
+		{ n: '15%', label: 'memory used' },
+		{ n: '0', label: 'Docker daemons' }
+	];
+
+	const steps = [
+		{
+			k: '01',
+			cmd: 'homeport bootstrap <ip>',
+			title: 'Harden the box',
+			body: 'A fresh Ubuntu VPS becomes a locked-down host: firewall, key-only SSH, fail2ban, automatic security updates, Caddy for TLS. One command, idempotent.'
+		},
+		{
+			k: '02',
+			cmd: 'homeport init',
+			title: 'Point at your app',
+			body: 'Detects your framework — Go, Rust, Next, Nuxt, SvelteKit, TanStack Start — and writes a homeport.yaml with the right build command.'
+		},
+		{
+			k: '03',
+			cmd: 'homeport deploy',
+			title: 'Ship it',
+			body: 'Build the binary, upload it, health-check the new release, flip an atomic symlink. Bad deploy? It reverts itself. Good deploy? Live with HTTPS.'
+		}
+	];
+
+	const features = [
+		{
+			t: 'No Docker',
+			d: 'systemd + Caddy and nothing else. No daemon, no registry, no base-image CVE treadmill. The server runs your binary, not a container stack.'
+		},
+		{
+			t: 'Hardened on boot',
+			d: 'ufw firewall, key-only SSH, root login disabled, fail2ban, unattended security upgrades — the checklist a beginner would never assemble by hand.'
+		},
+		{
+			t: 'Automatic HTTPS',
+			d: 'Caddy fetches and renews a certificate per domain. Point an A record, deploy, and TLS is already on.'
+		},
+		{
+			t: 'Instant rollback',
+			d: 'Every release is an immutable binary kept on disk. Rollback is a symlink flip — sub-second, no rebuild.'
+		},
+		{
+			t: 'Agent-ready',
+			d: 'homeport mcp exposes deploy, rollback, logs and stats as MCP tools. Hand fleet ops to an AI agent — with the same health-gated safety you get.'
+		},
+		{
+			t: 'Resource limits',
+			d: 'memory and cpu caps in homeport.yaml become systemd cgroup limits — the same kernel mechanism Docker uses, without Docker.'
+		}
+	];
+
+	const compare = [
+		['On the server', 'systemd + Caddy + a bash helper', 'Docker + Postgres + Redis', 'Docker daemon'],
+		['Platform RAM', '~0', '~2 GB baseline', 'Docker overhead'],
+		['Ships to the box', 'one binary (scp)', 'containers (registry)', 'images (registry)'],
+		['Rollback', 'symlink flip, instant', 'redeploy container', 'redeploy image'],
+		['Access to deploy', 'SSH key', 'web UI + SSH', 'root SSH']
+	];
+</script>
+
+<svelte:head>
+	<title>Homeport — ship binaries to production</title>
+	<meta
+		name="description"
+		content="Deploy single-binary web apps — Go, Rust, Next, Nuxt, SvelteKit, TanStack Start — to your own VPS. No Docker, no registry, no runtime on the server. One command hardens the box, one command deploys."
+	/>
+</svelte:head>
+
+<!-- ================= NAV ================= -->
+<header class="fixed top-0 z-50 w-full">
+	<div
+		class="mx-auto flex max-w-[1200px] items-center justify-between px-5 py-4"
+		style="backdrop-filter: blur(8px); background: color-mix(in srgb, var(--color-ink) 55%, transparent); border-bottom: 1px solid var(--color-line);"
+	>
+		<a href="/" class="flex items-center gap-2.5">
+			<span class="beacon"></span>
+			<span class="display text-xl tracking-tight">Homeport</span>
+		</a>
+		<nav class="mono hidden items-center gap-7 text-sm text-mist md:flex">
+			<a href="#how" class="transition-colors hover:text-foam">how</a>
+			<a href="#fleet" class="transition-colors hover:text-foam">fleet</a>
+			<a href="#features" class="transition-colors hover:text-foam">features</a>
+			<a href="#compare" class="transition-colors hover:text-foam">vs</a>
+		</nav>
+		<div class="flex items-center gap-3">
+			<a
+				href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer"
+				class="mono hidden text-sm text-mist transition-colors hover:text-foam sm:block"
+			>
+				GitHub ↗
+			</a>
+			<a href="#install" class="btn btn-primary rounded-none">Deploy →</a>
+		</div>
+	</div>
+</header>
+
+<!-- ================= HERO ================= -->
+<section class="relative mx-auto max-w-[1200px] px-5 pt-36 pb-20 md:pt-44">
+	<p class="kicker hero-rise" style="--i: 0">Self-hosted · single binary · your VPS</p>
+
+	<h1 class="display hero-rise mt-5 text-[clamp(3.4rem,11vw,9rem)]" style="--i: 1">
+		Ship binaries<br />
+		<span style="color: var(--color-signal)">to production.</span>
+	</h1>
+
+	<p class="hero-rise mt-7 max-w-2xl text-lg leading-relaxed text-mist md:text-xl" style="--i: 2">
+		Deploy Go, Rust, Next, Nuxt, SvelteKit and TanStack Start apps to a plain VPS
+		as a single executable. No Docker. No registry. Nothing installed on the
+		server. One command hardens the box — one command deploys.
+	</p>
+
+	<div class="hero-rise mt-9 flex flex-wrap items-center gap-3" style="--i: 3">
+		<button
+			onclick={copyInstall}
+			class="btn btn-ghost rounded-none"
+			aria-label="Copy install command"
+		>
+			<span class="text-signal">$</span>
+			<span>{install}</span>
+			<span class="ml-1 text-mist-dim">{copied ? '✓ copied' : '⧉'}</span>
+		</button>
+		<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
+			Read the docs →
+		</a>
+	</div>
+
+	<!-- terminal -->
+	<div class="hero-rise mt-14" style="--i: 4">
+		<div class="panel ticked mx-auto max-w-3xl rounded-none">
+			<div class="hair-b flex items-center gap-2 px-4 py-2.5">
+				<span class="term-dot" style="background: var(--color-alarm)"></span>
+				<span class="term-dot" style="background: var(--color-flare)"></span>
+				<span class="term-dot" style="background: var(--color-signal)"></span>
+				<span class="mono ml-3 text-xs text-mist-dim">deploy — drydock</span>
+			</div>
+			<div class="mono overflow-x-auto p-5 text-sm leading-7">
+				<div><span class="text-mist-dim">$</span> homeport bootstrap 178.105.67.23</div>
+				<div class="text-mist">
+					<span class="text-signal">==&gt;</span> hardening · Caddy · homeportd ✓
+				</div>
+				<div class="mt-2"><span class="text-mist-dim">$</span> homeport init</div>
+				<div class="text-mist">
+					<span class="text-signal">==&gt;</span> detected sveltekit — wrote homeport.yaml
+				</div>
+				<div class="mt-2"><span class="text-mist-dim">$</span> homeport deploy</div>
+				<div class="text-mist">
+					<span class="text-signal">==&gt;</span> build → upload → health-checked activate
+				</div>
+				<div style="color: var(--color-signal)">
+					deployed → https://app.example.com<span class="caret"></span>
+				</div>
+			</div>
+		</div>
+	</div>
+</section>
+
+<!-- ================= STAT BAND ================= -->
+<section class="relative">
+	<div
+		class="mx-auto grid max-w-[1200px] grid-cols-2 md:grid-cols-5"
+		style="border-top: 1px solid var(--color-line); border-bottom: 1px solid var(--color-line);"
+	>
+		{#each stats as s, i (s.label)}
+			<div
+				use:reveal={i * 70}
+				class="rise flex flex-col gap-1 px-5 py-8"
+				style="border-right: 1px solid var(--color-line);"
+			>
+				<span class="display text-5xl md:text-6xl" style="color: var(--color-foam)">{s.n}</span>
+				<span class="mono text-xs tracking-wide text-mist-dim uppercase">{s.label}</span>
+			</div>
+		{/each}
+		<div
+			class="mono hidden items-center gap-2 px-5 py-8 text-xs text-mist md:col-span-5 md:flex"
+			style="border-top: 1px solid var(--color-line);"
+		>
+			<span class="beacon"></span>
+			Real numbers — five production apps across four frameworks, live on one €6.49
+			Hetzner box, 85% of it still idle.
+		</div>
+	</div>
+</section>
+
+<!-- ================= HOW ================= -->
+<section id="how" class="mx-auto max-w-[1200px] px-5 py-24 md:py-32">
+	<div use:reveal class="rise flex items-end justify-between gap-6">
+		<h2 class="display text-[clamp(2.4rem,6vw,4.5rem)]">Three commands<br />to a live app</h2>
+		<span class="mono mb-2 hidden text-xs text-mist-dim md:block">01 → 03</span>
+	</div>
+
+	<div class="mt-14 grid gap-5 md:grid-cols-3">
+		{#each steps as step, i (step.k)}
+			<div use:reveal={i * 90} class="rise panel ticked rounded-none p-7">
+				<div class="flex items-baseline justify-between">
+					<span class="display text-6xl" style="color: var(--color-line-bright)">{step.k}</span>
+					<span class="beacon"></span>
+				</div>
+				<div
+					class="mono mt-5 inline-block px-2.5 py-1.5 text-xs"
+					style="background: var(--color-ink); border: 1px solid var(--color-line); color: var(--color-signal);"
+				>
+					$ {step.cmd}
+				</div>
+				<h3 class="display mt-5 text-2xl">{step.title}</h3>
+				<p class="mt-3 text-sm leading-relaxed text-mist">{step.body}</p>
+			</div>
+		{/each}
+	</div>
+</section>
+
+<!-- ================= FLEET ================= -->
+<section id="fleet" class="relative">
+	<div class="mx-auto max-w-[1200px] px-5 py-24 md:py-32">
+		<div use:reveal class="rise">
+			<p class="kicker">The harbor</p>
+			<h2 class="display mt-4 text-[clamp(2.4rem,6vw,4.5rem)]">One box.<br />The whole fleet.</h2>
+			<p class="mt-5 max-w-xl text-mist">
+				Every vessel below is a real app compiled to a single binary and docked on
+				the same server — each in its own hardened systemd unit, served from memory
+				behind Caddy.
+			</p>
+		</div>
+
+		<div use:reveal class="rise panel ticked mt-12 rounded-none">
+			<div
+				class="mono hair-b hidden grid-cols-12 gap-4 px-6 py-3 text-xs tracking-wide text-mist-dim uppercase md:grid"
+			>
+				<span class="col-span-1"></span>
+				<span class="col-span-4">app</span>
+				<span class="col-span-4">framework</span>
+				<span class="col-span-2">memory</span>
+				<span class="col-span-1 text-right">port</span>
+			</div>
+			{#each fleet as v, i (v.app)}
+				<div
+					class="grid grid-cols-12 items-center gap-4 px-6 py-4 transition-colors"
+					style={i < fleet.length - 1 ? 'border-bottom: 1px solid var(--color-line);' : ''}
+				>
+					<span class="col-span-2 md:col-span-1"><span class="beacon"></span></span>
+					<span class="mono col-span-10 text-sm md:col-span-4" style="color: var(--color-foam)">
+						{v.app}
+					</span>
+					<span class="col-span-6 text-sm text-mist md:col-span-4">{v.framework}</span>
+					<span class="mono col-span-4 text-sm text-signal md:col-span-2">{v.mem}</span>
+					<span class="mono col-span-2 text-right text-sm text-mist-dim md:col-span-1">
+						:{v.port}
+					</span>
+				</div>
+			{/each}
+			<div
+				class="mono flex items-center justify-between px-6 py-3 text-xs text-mist-dim"
+				style="border-top: 1px solid var(--color-line);"
+			>
+				<span>5 active · 0 failed</span>
+				<span>host memory: 559 MB / 3.8 GB</span>
+			</div>
+		</div>
+	</div>
+</section>
+
+<!-- ================= FEATURES ================= -->
+<section id="features" class="mx-auto max-w-[1200px] px-5 py-24 md:py-32">
+	<div use:reveal class="rise">
+		<p class="kicker">Why it holds up</p>
+		<h2 class="display mt-4 text-[clamp(2.4rem,6vw,4.5rem)]">Batteries, no bloat</h2>
+	</div>
+	<div class="mt-14 grid gap-px md:grid-cols-3" style="background: var(--color-line);">
+		{#each features as f, i (f.t)}
+			<div
+				use:reveal={(i % 3) * 80}
+				class="rise p-8"
+				style="background: linear-gradient(180deg, var(--color-berth), var(--color-hull));"
+			>
+				<div class="flex items-center gap-2.5">
+					<span class="mono text-xs" style="color: var(--color-flare)"
+						>{String(i + 1).padStart(2, '0')}</span
+					>
+					<h3 class="display text-2xl">{f.t}</h3>
+				</div>
+				<p class="mt-3 text-sm leading-relaxed text-mist">{f.d}</p>
+			</div>
+		{/each}
+	</div>
+</section>
+
+<!-- ================= COMPARE ================= -->
+<section id="compare" class="mx-auto max-w-[1200px] px-5 py-24 md:py-32">
+	<div use:reveal class="rise mb-12">
+		<h2 class="display text-[clamp(2.4rem,6vw,4.5rem)]">The difference<br />is the server</h2>
+		<p class="mt-5 max-w-xl text-mist">
+			Everyone can deploy an app. The question is what's left running on the box
+			afterward — and how many apps fit before it fills up.
+		</p>
+	</div>
+
+	<div use:reveal class="rise panel ticked overflow-x-auto rounded-none">
+		<table class="w-full min-w-[640px] border-collapse text-left">
+			<thead>
+				<tr class="mono text-xs tracking-wide text-mist-dim uppercase">
+					<th class="hair-b px-6 py-4 font-medium"></th>
+					<th class="hair-b px-6 py-4 font-medium" style="color: var(--color-signal)">Homeport</th>
+					<th class="hair-b px-6 py-4 font-medium">Coolify</th>
+					<th class="hair-b px-6 py-4 font-medium">Kamal</th>
+				</tr>
+			</thead>
+			<tbody class="text-sm">
+				{#each compare as row (row[0])}
+					<tr>
+						<td class="px-6 py-4 text-mist-dim" style="border-bottom: 1px solid var(--color-line);">
+							{row[0]}
+						</td>
+						<td
+							class="mono px-6 py-4"
+							style="border-bottom: 1px solid var(--color-line); color: var(--color-foam);"
+						>
+							{row[1]}
+						</td>
+						<td class="px-6 py-4 text-mist" style="border-bottom: 1px solid var(--color-line);">
+							{row[2]}
+						</td>
+						<td class="px-6 py-4 text-mist" style="border-bottom: 1px solid var(--color-line);">
+							{row[3]}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	</div>
+</section>
+
+<!-- ================= FINAL CTA ================= -->
+<section id="install" class="relative mx-auto max-w-[1200px] px-5 py-28 md:py-40">
+	<div use:reveal class="rise flex flex-col items-center text-center">
+		<span class="beacon mb-8" style="width: 0.8rem; height: 0.8rem;"></span>
+		<h2 class="display text-[clamp(3rem,9vw,7rem)]">Dock your app.</h2>
+		<p class="mt-6 max-w-lg text-lg text-mist">
+			A €4 box, three commands, and your app is live with HTTPS. Your app, docked.
+		</p>
+
+		<button
+			onclick={copyInstall}
+			class="panel ticked mono mt-10 flex items-center gap-3 rounded-none px-6 py-4 text-left text-sm md:text-base"
+			aria-label="Copy install command"
+		>
+			<span class="text-signal">$</span>
+			<span style="color: var(--color-foam)">{install}</span>
+			<span class="ml-2 text-mist-dim">{copied ? '✓' : '⧉'}</span>
+		</button>
+
+		<div class="mt-8 flex flex-wrap justify-center gap-3">
+			<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
+				Get started →
+			</a>
+			<a href="#fleet" class="btn btn-ghost rounded-none">See the fleet</a>
+		</div>
+	</div>
+</section>
+
+<!-- ================= FOOTER ================= -->
+<footer style="border-top: 1px solid var(--color-line);">
+	<div
+		class="mx-auto flex max-w-[1200px] flex-col gap-6 px-5 py-12 md:flex-row md:items-center md:justify-between"
+	>
+		<div class="flex items-center gap-2.5">
+			<span class="beacon"></span>
+			<span class="display text-lg">Homeport</span>
+			<span class="mono ml-2 text-xs text-mist-dim">the fastest way to ship binaries</span>
+		</div>
+		<div class="mono flex flex-wrap gap-6 text-sm text-mist">
+			<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="hover:text-foam">GitHub</a>
+			<a href="https://www.npmjs.com/package/svelte-bun-compile" target="_blank" rel="noopener noreferrer" class="hover:text-foam">
+				svelte-bun-compile
+			</a>
+			<a href="https://www.npmjs.com/package/next-bun-compile" target="_blank" rel="noopener noreferrer" class="hover:text-foam">
+				next-bun-compile
+			</a>
+			<span class="text-mist-dim">MIT</span>
+		</div>
+	</div>
+	<div class="mx-auto max-w-[1200px] px-5 pb-8">
+		<p class="mono text-xs text-mist-dim">
+			This site is a SvelteKit app compiled to a single binary and deployed by
+			Homeport to a €4 VPS.
+		</p>
+	</div>
+</footer>

@@ -6,4 +6,8 @@
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
+
+<div class="chart" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
 {@render children()}
