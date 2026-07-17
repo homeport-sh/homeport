@@ -42,11 +42,13 @@ func detectProject() projectInfo {
 				return projectInfo{
 					kind:     "next-bun-compile",
 					app:      sanitizeAppName(pkg.Name),
-					build:    "bun run build",
+					// NBC_TARGET cross-compiles; default to a standard x86-64
+					// Linux box so a macOS build deploys as-is.
+					build:    "NBC_TARGET=bun-linux-x64 bun run build",
 					artifact: "server",
-					note: `# next-bun-compile emits the binary for the machine it builds on.
-# Building on macOS? Make the build target Linux, or deploy from CI
-# (homeport ci setup github) where the runner is already Linux.`,
+					note: `# NBC_TARGET cross-compiles the binary: bun-linux-x64 for a standard
+# x86-64 Linux box, bun-linux-arm64 for ARM. Drop it to build for the
+# current machine (e.g. in CI, which is already Linux).`,
 					ciToolchain: bunCI,
 				}
 			}

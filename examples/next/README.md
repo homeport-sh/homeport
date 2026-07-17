@@ -20,7 +20,7 @@ adapter.
 2. **`homeport.yaml`**:
    ```yaml
    build:
-     command: bun run build
+     command: NBC_TARGET=bun-linux-x64 bun run build
      artifact: server
    ```
 

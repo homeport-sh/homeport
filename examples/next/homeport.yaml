@@ -7,10 +7,10 @@ server: deploy@your-server-ip
 domain: next.example.com
 
 build:
-  # next-bun-compile emits the binary for the machine it builds on.
-  # Building on macOS? Make the build target Linux, or deploy from CI
-  # (homeport ci setup github) where the runner is already Linux.
-  command: bun run build
+  # NBC_TARGET cross-compiles the binary: bun-linux-x64 for a standard
+  # x86-64 Linux box, bun-linux-arm64 for ARM. Drop it to build for the
+  # current machine (e.g. in CI, which is already Linux).
+  command: NBC_TARGET=bun-linux-x64 bun run build
   # path to the single Linux executable the build produces
   artifact: server
 
