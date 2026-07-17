@@ -1,0 +1,5 @@
+app: worker
+server: deploy@178.105.67.23
+domain: ""
+build: {command: "x", artifact: app}
+health: {path: /}

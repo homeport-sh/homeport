@@ -31,6 +31,7 @@ type config struct {
 	App       string          `yaml:"app"`
 	Server    string          `yaml:"server"`
 	Domain    string          `yaml:"domain"`
+	Internal  bool            `yaml:"internal"`
 	Build     buildConfig     `yaml:"build"`
 	Health    healthConfig    `yaml:"health"`
 	Resources resourcesConfig `yaml:"resources"`
@@ -69,13 +70,20 @@ func loadConfig() (*config, error) {
 		cfg.Health.Path = "/"
 	}
 	cfg.Server = normalizeServer(cfg.Server)
+	// An empty domain implies internal, and vice versa — normalize so the
+	// rest of the CLI (and homeportd) can key on either.
+	if cfg.Domain == "" {
+		cfg.Internal = true
+	}
 	switch {
 	case !appRe.MatchString(cfg.App):
 		return nil, fmt.Errorf("%s: app %q must be lowercase letters, digits, dashes, max 20 chars", configFile, cfg.App)
 	case !strings.Contains(cfg.Server, "@"):
 		return nil, fmt.Errorf("%s: server should look like deploy@1.2.3.4 (got %q)", configFile, cfg.Server)
-	case !domainRe.MatchString(cfg.Domain):
-		return nil, fmt.Errorf("%s: %q doesn't look like a domain", configFile, cfg.Domain)
+	case cfg.Internal && cfg.Domain != "":
+		return nil, fmt.Errorf("%s: set either a domain (public) or internal: true, not both", configFile)
+	case !cfg.Internal && !domainRe.MatchString(cfg.Domain):
+		return nil, fmt.Errorf("%s: %q doesn't look like a domain (or set internal: true for a private app)", configFile, cfg.Domain)
 	case !healthRe.MatchString(cfg.Health.Path):
 		return nil, fmt.Errorf("%s: health.path must start with / and contain no spaces", configFile)
 	case cfg.Resources.Memory != "" && !memoryRe.MatchString(cfg.Resources.Memory):

@@ -37,6 +37,8 @@ func main() {
 		err = cmdStatus(rest)
 	case "stats":
 		err = cmdStats(rest)
+	case "tunnel":
+		err = cmdTunnel(rest)
 	case "logs":
 		err = cmdLogs(rest)
 	case "mcp":
@@ -90,6 +92,7 @@ everyday:
   homeport status [--json]         app state, live release, available releases
   homeport stats                live resource usage (memory, cpu, tasks, disk)
   homeport logs [-f] [-n N]        app logs (journald)
+  homeport tunnel [localPort]   forward a local port to the app (internal apps, or private access)
   homeport mcp                  serve the CLI as MCP tools (stdio) for AI agents
   homeport server update        push this CLI's bundled homeportd to the box
 

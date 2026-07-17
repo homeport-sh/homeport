@@ -170,6 +170,9 @@ func cmdInit(args []string) error {
 	yaml := fmt.Sprintf(`# homeport deploy config — safe to commit (secrets go via `+"`homeport secrets`"+`)
 app: %s
 server: %s
+# public app: set a domain (Caddy fronts it with automatic TLS).
+# private app: remove this line and set  internal: true  — the app binds to
+# loopback and is reached with  homeport tunnel , nothing on 80/443.
 domain: %s
 
 build:

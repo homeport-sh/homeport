@@ -56,6 +56,7 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 | `homeport status [--json]` | state, live release, available releases |
 | `homeport stats` | live resource usage — app memory/cpu/tasks, releases disk, host headroom |
 | `homeport logs [-f] [-n N]` | app logs (journald) |
+| `homeport tunnel [localPort]` | forward a local port to the app (private access / internal apps) |
 | `homeport ci setup github` | dedicated CI deploy key + pinned host key + Actions workflow |
 | `homeport mcp` | serve these commands as MCP tools (stdio) for AI agents |
 | `homeport server update` | push this CLI's bundled homeportd to the box (post-hardening update path) |
@@ -74,6 +75,27 @@ SSH / a root daemon outright.)
   next-bun-compile apps).
 - A deploy is promoted only after `health.path` returns 200; otherwise the
   previous release is restored automatically.
+
+## Private apps (no public URL)
+
+```yaml
+# homeport.yaml — omit `domain:` and set:
+internal: true
+```
+
+An internal app binds to `127.0.0.1` with **no Caddy fragment and nothing on
+80/443**. Reach it two ways:
+
+- **from other apps on the box** — `http://127.0.0.1:<port>` (service-to-service)
+- **from your laptop** — `homeport tunnel` forwards a local port over SSH:
+
+```
+homeport tunnel            # → http://localhost:<port>  (Ctrl-C to close)
+homeport tunnel 8080       # pick the local port
+```
+
+`homeport tunnel` works for public apps too, when you want private access
+without going through the internet.
 
 ## Resource limits (optional)
 

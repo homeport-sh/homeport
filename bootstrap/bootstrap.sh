@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.3.0
+HOMEPORTD_VERSION=0.4.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -205,11 +205,16 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 
 cmd_add() {
   local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-}
-  valid_app "$app"; valid_domain "$domain"
-  [[ $health == /* ]] || die "health path must start with /"
+  valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
+  [[ $domain == - ]] && domain=""
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""
+  # No domain => internal app: bound to 127.0.0.1, reachable only from other
+  # apps on the box or through `homeport tunnel`. No Caddy fragment, no TLS,
+  # nothing on 80/443.
+  [[ -z $domain ]] || valid_domain "$domain"
+  [[ $health == /* ]] || die "health path must start with /"
   [[ -z $memory || $memory =~ ^[0-9]+[KMG]$ ]] || die "invalid memory limit: '$memory' (e.g. 512M, 1G)"
   [[ -z $cpu || $cpu =~ ^[0-9]+%$ ]] || die "invalid cpu limit: '$cpu' (e.g. 150%)"
   local user="homeport-$app" port keep=5
@@ -299,14 +304,23 @@ EOF
   systemctl daemon-reload
   systemctl enable "homeport-$app" >/dev/null 2>&1 || true
 
-  printf '%s {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:%s\n}\n' "$domain" "$port" \
-    > "$CADDY_DIR/$app.caddy"
-  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
-    || die "generated Caddy config failed validation"
-  systemctl reload caddy
-
-  echo "app '$app' registered: https://$domain -> 127.0.0.1:$port"
-  echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
+  if [[ -n $domain ]]; then
+    printf '%s {\n\tencode zstd gzip\n\treverse_proxy 127.0.0.1:%s\n}\n' "$domain" "$port" \
+      > "$CADDY_DIR/$app.caddy"
+    caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+      || die "generated Caddy config failed validation"
+    systemctl reload caddy
+    echo "app '$app' registered: https://$domain -> 127.0.0.1:$port"
+    echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
+  else
+    # Internal app: drop any Caddy fragment a previous public deploy left.
+    if [[ -f "$CADDY_DIR/$app.caddy" ]]; then
+      rm -f "$CADDY_DIR/$app.caddy"
+      systemctl reload caddy 2>/dev/null || true
+    fi
+    echo "app '$app' registered (internal) -> 127.0.0.1:$port"
+    echo "not exposed publicly — reach it with: homeport tunnel"
+  fi
 }
 
 cmd_activate() {
@@ -326,7 +340,11 @@ cmd_activate() {
 
   if wait_healthy; then
     prune_releases "$app"
-    echo "live: $release (https://$DOMAIN)"
+    if [[ -n ${DOMAIN:-} ]]; then
+      echo "live: $release (https://$DOMAIN)"
+    else
+      echo "live: $release (internal, 127.0.0.1:$PORT)"
+    fi
   else
     echo "--- last 20 log lines ---" >&2
     journalctl -u "homeport-$app" -n 20 --no-pager >&2 || true
@@ -430,8 +448,10 @@ status_json_one() { # caller must have run load_app for $1
   current=${current#releases/}
   state=$(systemctl is-active "homeport-$app" 2>/dev/null || true)
   # every field is charset-validated on the way in — safe to emit unescaped
-  printf '{"app":"%s","domain":"%s","port":%d,"state":"%s","release":"%s","releases":[' \
-    "$app" "$DOMAIN" "$PORT" "$state" "$current"
+  local internal=false
+  [[ -z ${DOMAIN:-} ]] && internal=true
+  printf '{"app":"%s","domain":"%s","internal":%s,"port":%d,"state":"%s","release":"%s","releases":[' \
+    "$app" "${DOMAIN:-}" "$internal" "$PORT" "$state" "$current"
   while IFS= read -r r; do
     [[ -n $r ]] || continue
     printf '%s"%s"' "$sep" "$r"
@@ -481,7 +501,11 @@ cmd_status() {
   current=$(readlink "$HOMEPORT_ROOT/$app/current" 2>/dev/null || echo "(none)")
   state=$(systemctl is-active "homeport-$app" 2>/dev/null || true)
   echo "app:      $app"
-  echo "domain:   https://$DOMAIN  (127.0.0.1:$PORT)"
+  if [[ -n ${DOMAIN:-} ]]; then
+    echo "domain:   https://$DOMAIN  (127.0.0.1:$PORT)"
+  else
+    echo "domain:   (internal — 127.0.0.1:$PORT, reach via homeport tunnel)"
+  fi
   echo "state:    $state"
   echo "release:  ${current#releases/}"
   echo "releases: $(ls -1 "$HOMEPORT_ROOT/$app/releases" 2>/dev/null | sort -r | tr '\n' ' ')"
@@ -572,7 +596,7 @@ usage() {
   cat <<'EOF'
 homeportd — root-side homeport helper (run via sudo)
 
-  add <app> <domain> [health] [mem] [cpu]  register an app (idempotent); limits e.g. 512M 150%
+  add <app> <domain|-> [health] [mem] [cpu]  register an app; domain "-" = internal (no Caddy)
   activate <app> <release>           flip symlink, restart, health-check, auto-revert
   rollback <app> [release]           activate the previous (or a given) release
   env <app>                          merge KEY=value lines from stdin into the app env
