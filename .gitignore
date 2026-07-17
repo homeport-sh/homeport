@@ -8,3 +8,6 @@ examples/**/index.js
 examples/**/*.js.map
 examples/**/*.bun-build
 examples/**/.tanstack
+
+# personal scratchpad
+todo.MD
