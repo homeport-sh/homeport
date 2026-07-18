@@ -46,6 +46,7 @@ type config struct {
 	Run         string          `yaml:"run"`
 	Release     string          `yaml:"release"`
 	PostRelease string          `yaml:"post_release"`
+	Sandbox     string          `yaml:"sandbox"`
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -150,6 +151,8 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: release must be a single line (chain steps with && )", configFile)
 	case strings.ContainsAny(cfg.PostRelease, "\n\r"):
 		return nil, fmt.Errorf("%s: post_release must be a single line (chain steps with && )", configFile)
+	case cfg.Sandbox != "" && cfg.Sandbox != "strict" && cfg.Sandbox != "relaxed":
+		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default) or 'relaxed' (for binaries that run their own sandbox, e.g. a browser), got %q", configFile, cfg.Sandbox)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -205,6 +208,7 @@ func (c *config) addArgs() []string {
 		release,
 		postRelease,
 		dashIfEmpty(c.Path),
+		dashIfEmpty(c.Sandbox),
 	}
 }
 

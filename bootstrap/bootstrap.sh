@@ -96,6 +96,30 @@ APT::Periodic::Unattended-Upgrade "1";
 EOF
 }
 
+setup_sysctl() {
+  log "Applying kernel hardening (sysctl)"
+  cat > /etc/sysctl.d/99-homeport.conf <<'EOF'
+# ptrace: stop one app user from reading another running app's memory
+kernel.yama.ptrace_scope = 1
+# hide kernel pointers / dmesg from unprivileged users (defeats infoleaks)
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+# network: reverse-path filter, ignore ICMP redirects, no source routing
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv4.tcp_syncookies = 1
+EOF
+  # apply now; ignore keys the kernel/LSM doesn't expose (e.g. yama absent)
+  sysctl --system >/dev/null 2>&1 || true
+}
+
 setup_caddy() {
   if ! command -v caddy >/dev/null; then
     log "Installing Caddy"
@@ -140,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.5
+HOMEPORTD_VERSION=0.8.6
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -246,6 +270,31 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 EOF
+  # Extra sandbox (default). Shrinks what a compromised binary — including a
+  # third-party one — can reach. Skipped for `sandbox: relaxed`, which a binary
+  # running its OWN sandbox needs: Chromium/Lightpanda use user namespaces +
+  # seccomp, which RestrictNamespaces / SystemCallFilter would break. Note we
+  # deliberately do NOT set MemoryDenyWriteExecute — it breaks JIT (Bun/Node).
+  if [[ ${SANDBOX:-} != relaxed ]]; then
+    cat <<'EOF'
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+LockPersonality=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+PrivateDevices=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+EOF
+  fi
 }
 
 _teardown_idle_units() { # remove socket/proxy when an app leaves idle mode
@@ -377,11 +426,13 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
+  [[ $sandbox == - ]] && sandbox=""
+  [[ -z $sandbox || $sandbox == strict || $sandbox == relaxed ]] || die "sandbox must be 'strict' (default) or 'relaxed'"
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""
   [[ $idle == - ]] && idle=""
@@ -471,6 +522,9 @@ cmd_add() {
   else
     port=$(next_port)
   fi
+  # load_app (above) may have sourced an old SANDBOX from the config; the value
+  # for THIS add is the freshly-parsed arg. Shadow it locally for the unit body.
+  local SANDBOX=$sandbox
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
   # from colliding (public 8100.., internal 9100..).
@@ -496,6 +550,7 @@ RUN_B64=$run_b64
 RELEASE_B64=$release_b64
 POST_RELEASE_B64=$post_release_b64
 PATH_PREFIX=$path
+SANDBOX=$sandbox
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -1324,6 +1379,7 @@ main() {
   setup_ssh_hardening
   setup_fail2ban
   setup_auto_upgrades
+  setup_sysctl
   setup_caddy
   install_homeportd
   setup_dirs_and_sudo

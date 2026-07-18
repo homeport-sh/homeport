@@ -346,6 +346,37 @@ your laptop / CI                     the VPS
 - **Secrets** live on the server (`shared/env`, root-owned, mode 640),
   loaded via systemd `EnvironmentFile` — CI needs no app secrets at all.
 
+## Security & hardening
+
+`homeport bootstrap` and each app's systemd unit apply defense in depth:
+
+**The box** — non-root `deploy` user whose *only* privilege is running
+`homeportd` (a single sudo grant); ufw default-deny with just 22/80/443 and
+SSH rate-limited; key-only SSH, root login off, `MaxAuthTries` capped;
+fail2ban; automatic security upgrades; and kernel `sysctl` hardening
+(`ptrace_scope=1` so one app can't read another's memory, restricted
+kptr/dmesg, reverse-path filtering, no ICMP redirects / source routing).
+
+**Each app** runs under a tight systemd sandbox: a dedicated non-login user,
+`ProtectSystem=strict` with exactly one writable directory, `NoNewPrivileges`,
+**all Linux capabilities dropped**, a **seccomp syscall filter**
+(`@system-service`), no namespaces, `PrivateDevices`, `ProtectProc=invisible`,
+and hardened kernel/clock/hostname protections. So a compromised binary —
+including a third-party one — can touch very little.
+
+```yaml
+# a binary that runs its OWN sandbox (e.g. a Chromium-based browser) needs the
+# aggressive filters relaxed — it uses user namespaces + seccomp itself:
+sandbox: relaxed
+```
+
+`relaxed` keeps the baseline (strict filesystem, no-new-privileges, dedicated
+user) but drops the capability/namespace/syscall restrictions the nested
+sandbox needs. We deliberately **don't** set `MemoryDenyWriteExecute` — it
+would break JIT runtimes (Bun/Node). Existing boxes pick up the box-level
+`sysctl`/SSH changes by re-running `homeport bootstrap` (idempotent); the
+per-app sandbox ships with `homeport server update` and applies on next deploy.
+
 ## Deploying from CI
 
 ```
@@ -445,6 +476,7 @@ app: lightpanda
 server: deploy@1.2.3.4
 internal: true                          # a backend service, not public
 run: serve --host $HOST --port $PORT    # $PORT/$HOST substituted at launch
+sandbox: relaxed                        # Chromium-based: runs its own sandbox
 build:
   command: >
     curl -fsSL https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux
@@ -453,6 +485,10 @@ build:
 health:
   path: /json/version
 ```
+
+(`sandbox: relaxed` because a Chromium-based browser needs user namespaces +
+seccomp for its *own* sandbox, which the default strict profile blocks. A
+plain Go/Rust/Bun binary needs no such line — leave it on the strict default.)
 
 `homeport deploy` uploads the binary and systemd runs it as
 `server serve --host 127.0.0.1 --port <port>`. Your app connects on

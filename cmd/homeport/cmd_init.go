@@ -294,6 +294,12 @@ health:
 # but does NOT roll back, so keep hard gates in release: or the health check.
 # post_release: ./bin warm-cache
 
+# Optional sandbox level. Default (strict) locks the app down with a tight
+# systemd profile (dropped capabilities, seccomp syscall filter, no namespaces).
+# Set 'relaxed' only for a binary that runs its OWN sandbox and needs those
+# back — e.g. a Chromium-based browser like Lightpanda.
+# sandbox: relaxed
+
 # Optional cgroup limits (systemd — the same kernel mechanism as docker).
 # resources:
 #   memory: 512M   # hard cap; throttled at 90%%, OOM-killed at 100%%
