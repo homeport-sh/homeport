@@ -44,6 +44,7 @@ type config struct {
 	Domain      string          `yaml:"domain"`
 	Run         string          `yaml:"run"`
 	Release     string          `yaml:"release"`
+	PostRelease string          `yaml:"post_release"`
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -137,6 +138,8 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: run may only reference $PORT and $HOST, no other variables", configFile)
 	case strings.ContainsAny(cfg.Release, "\n\r"):
 		return nil, fmt.Errorf("%s: release must be a single line (chain steps with && )", configFile)
+	case strings.ContainsAny(cfg.PostRelease, "\n\r"):
+		return nil, fmt.Errorf("%s: post_release must be a single line (chain steps with && )", configFile)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -166,14 +169,17 @@ func (c *config) addArgs() []string {
 	if c.Autoscale.on() {
 		autoscale = fmt.Sprintf("%d:%d:%d", c.Autoscale.Min, c.Autoscale.Max, c.Autoscale.TargetCPU)
 	}
-	// run/release args carry spaces, so they travel base64-encoded as a
-	// single positional token
-	run, release := "-", "-"
+	// run/release/post_release args carry spaces, so they travel base64-encoded
+	// as single positional tokens
+	run, release, postRelease := "-", "-", "-"
 	if c.Run != "" {
 		run = base64.StdEncoding.EncodeToString([]byte(c.Run))
 	}
 	if c.Release != "" {
 		release = base64.StdEncoding.EncodeToString([]byte(c.Release))
+	}
+	if c.PostRelease != "" {
+		postRelease = base64.StdEncoding.EncodeToString([]byte(c.PostRelease))
 	}
 	return []string{
 		"add", c.App,
@@ -187,6 +193,7 @@ func (c *config) addArgs() []string {
 		autoscale,
 		run,
 		release,
+		postRelease,
 	}
 }
 

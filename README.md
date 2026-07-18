@@ -251,10 +251,36 @@ hook apply it, then the new code goes live on top of it. Avoid destructive
 changes (dropping a column the running release still reads) in the same deploy
 that ships the code removing that read — split it across two.
 
-Only need it in one environment, or want notifications *after* a deploy? A
-release hook is pre-activate by design (so it can gate the deploy); post-deploy
-side effects (cache warm, Slack ping) belong in your CI job after `homeport
-deploy` returns success.
+### After it's live: `post_release`
+
+A `post_release:` command runs **after** the app is promoted and passing its
+health check, reachable at `$HOST:$PORT`:
+
+```yaml
+release: ./bin migrate          # before promotion — gates the deploy
+post_release: ./bin warm-cache  # after it's live — best-effort
+```
+
+It's for side effects that need the *new* release actually serving — cache
+warming, a smoke test, a CDN purge, a deploy notification. It's **best-effort
+by design**: by the time it runs the release is already live and a migration
+may have run, so a failure **can't safely auto-revert**. A failed
+`post_release` therefore only warns (the deploy still counts as success); if
+you need a hard gate, put the check in `release:` or the health endpoint. On a
+laptop/no-CI deploy it's the only place to hang after-live work; in CI you can
+equally use a step after `homeport deploy` returns.
+
+There's deliberately **no on-failure hook**: a failed deploy already surfaces
+itself (non-zero exit in CI, the error in your terminal) and homeport
+auto-reverts on a health-check failure. For alerting on a failed deploy, use
+CI's `if: failure()` step — don't run arbitrary code on the box in a
+known-broken state.
+
+**Not on homeport?** The same idea maps to your platform: on Kubernetes this is
+an **init container** (or a pre-deploy `Job`) running `migrate` against the
+remote DB before the app pods start — same expand→migrate→contract ordering,
+same "gate the rollout on it," just k8s-native. The release hook is homeport's
+equivalent for the runtimeless single-binary box.
 
 ## How it works
 

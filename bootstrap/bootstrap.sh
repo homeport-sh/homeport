@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.3
+HOMEPORTD_VERSION=0.8.4
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -310,7 +310,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -322,7 +322,9 @@ cmd_add() {
   [[ $autoscale == - ]] && autoscale=""
   [[ $run_b64 == - ]] && run_b64=""
   [[ $release_b64 == - ]] && release_b64=""
+  [[ $post_release_b64 == - ]] && post_release_b64=""
   [[ -z $release_b64 ]] || printf %s "$release_b64" | base64 -d >/dev/null 2>&1 || die "release: invalid encoding"
+  [[ -z $post_release_b64 ]] || printf %s "$post_release_b64" | base64 -d >/dev/null 2>&1 || die "post_release: invalid encoding"
 
   # run: optional launch args for the binary (base64 to survive spaces).
   # exec (no shell), only $PORT/$HOST substituted — validated to block
@@ -400,6 +402,7 @@ AUTOSCALE_MAX=$AUTOSCALE_MAX
 AUTOSCALE_TARGET=$AUTOSCALE_TARGET
 RUN_B64=$run_b64
 RELEASE_B64=$release_b64
+POST_RELEASE_B64=$post_release_b64
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -700,23 +703,24 @@ activate_and_check() {
   fi
 }
 
-# run_release_hook <app> — run the app's release: command (migrations, cache
-# priming, etc.) on the box as the app user, with the app's env, against the
-# release now symlinked at current/. Returns the command's exit status; a
-# non-zero result aborts the deploy before anything is promoted.
-run_release_hook() {
-  local app=$1 user="homeport-$app"
+# run_deploy_hook <app> <command> [with_port] — run a deploy hook (release: or
+# post_release:) on the box as the app user, with the app's env, against the
+# release symlinked at current/. Returns the command's exit status. Pass a
+# non-empty with_port to also export PORT (the post-hook can reach the now-live
+# app at $HOST:$PORT; the pre-hook gets no PORT — nothing is listening yet).
+run_deploy_hook() {
+  local app=$1 cmd=$2 with_port=${3:-} user="homeport-$app"
   local dir="$HOMEPORT_ROOT/$app/current" envf="$HOMEPORT_ROOT/$app/shared/env"
-  # the same env the service gets, minus a listening PORT — a release task is a
-  # one-shot, not a server: app secrets from the env file (DATABASE_URL, …)
-  # plus STATE_DIR so an embedded SQLite lives beside the running app's copy.
+  # the same env the service gets: app secrets from the env file (DATABASE_URL,
+  # …) plus STATE_DIR so an embedded SQLite lives beside the running app's copy.
   local script="export STATE_DIR='$HOMEPORT_ROOT/$app/shared'"
   script+=" NBC_RUNTIME_DIR='$HOMEPORT_ROOT/$app/shared/runtime'"
   script+=" NODE_ENV=production HOST=127.0.0.1"
+  [[ -n $with_port ]] && script+=" PORT=$PORT"
   script+="; set -a; [ -f '$envf' ] && . '$envf'; set +a"
-  script+="; cd '$dir' || exit 1; $RELEASE"
-  # binary is root-owned (app user can exec, not modify); RELEASE runs as the
-  # unprivileged app user, so a hook can't reach beyond the app's own data.
+  script+="; cd '$dir' || exit 1; $cmd"
+  # binary is root-owned (app user can exec, not modify); the hook runs as the
+  # unprivileged app user, so it can't reach beyond the app's own data.
   sudo -u "$user" -H bash -c "$script"
 }
 
@@ -740,7 +744,7 @@ cmd_activate() {
     local RELEASE
     RELEASE=$(printf %s "$RELEASE_B64" | base64 -d 2>/dev/null) || die "release: invalid encoding"
     echo "release hook: $RELEASE"
-    if ! run_release_hook "$app"; then
+    if ! run_deploy_hook "$app" "$RELEASE"; then
       if [[ -n $prev && $prev != "releases/$release" ]]; then
         swap_current "$app" "$prev"
         die "release hook failed — deploy aborted (still on ${prev#releases/})"
@@ -751,6 +755,19 @@ cmd_activate() {
 
   if activate_and_check "$app"; then
     prune_releases "$app"
+    # post_release hook runs after the app is live and healthy — best-effort
+    # side effects (cache warm, smoke test, notify). It CANNOT auto-revert (the
+    # release is already promoted, a migration may have run), so a failure only
+    # warns; put hard gates in release: or the health check instead.
+    if [[ -n ${POST_RELEASE_B64:-} && $POST_RELEASE_B64 != - ]]; then
+      local POST_RELEASE
+      POST_RELEASE=$(printf %s "$POST_RELEASE_B64" | base64 -d 2>/dev/null) || POST_RELEASE=""
+      if [[ -n $POST_RELEASE ]]; then
+        echo "post-release hook: $POST_RELEASE"
+        run_deploy_hook "$app" "$POST_RELEASE" withport \
+          || echo "homeportd: warning — post-release hook failed; release is live, investigate and 'homeport rollback' if needed" >&2
+      fi
+    fi
     local note=""
     [[ -n ${IDLE:-} ]] && note=" · sleeps after ${IDLE_TIMEOUT} idle"
     is_template && note=" · $REPLICAS replicas (rolling)"

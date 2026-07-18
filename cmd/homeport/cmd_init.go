@@ -284,6 +284,11 @@ health:
 # migrations. Chain steps with &&.
 # release: ./bin migrate
 
+# Optional post-release hook: runs AFTER the app is live and healthy, at
+# $HOST:$PORT. Best-effort (cache warm, smoke test, notify) — a failure warns
+# but does NOT roll back, so keep hard gates in release: or the health check.
+# post_release: ./bin warm-cache
+
 # Optional cgroup limits (systemd — the same kernel mechanism as docker).
 # resources:
 #   memory: 512M   # hard cap; throttled at 90%%, OOM-killed at 100%%
