@@ -58,12 +58,28 @@
 			d: 'systemd + Caddy and nothing else. No daemon, no registry, no base-image CVE treadmill. The server runs your binary, not a container stack.'
 		},
 		{
-			t: 'Hardened on boot',
-			d: 'ufw firewall, key-only SSH, root login disabled, fail2ban, unattended security upgrades — the checklist a beginner would never assemble by hand.'
+			t: 'Zero-downtime deploys',
+			d: 'The new release proves itself on a private port before Caddy flips traffic to it — blue/green for a single app, rolling for replicas. A failed build never reaches a user; the old one keeps serving.'
+		},
+		{
+			t: 'Scale to zero, then out',
+			d: 'Quiet apps sleep to near-zero RAM and wake on the first request in about half a second. Busy ones autoscale on CPU between a floor and a ceiling. Serverless economics on a box you rent for €4.'
+		},
+		{
+			t: 'Zero-downtime migrations',
+			d: 'A release hook runs your migration on the box before the new code goes live — and aborts the deploy if it fails. Heroku’s release phase, without Heroku.'
+		},
+		{
+			t: 'Many apps, one domain',
+			d: 'Mount services at paths behind a single host and certificate, or load-balance an internal service on loopback. An API gateway with nothing to install.'
+		},
+		{
+			t: 'Hardened, per app',
+			d: 'The box gets a firewall, key-only SSH and fail2ban on boot. Each app then runs in a locked-down systemd sandbox — dropped capabilities, a seccomp filter, memory and CPU caps, one writable directory.'
 		},
 		{
 			t: 'Automatic HTTPS',
-			d: 'Caddy fetches and renews a certificate per domain. Point an A record, deploy, and TLS is already on.'
+			d: 'Caddy fetches and renews a certificate per domain. Point an A record, deploy, and TLS is already on — sslip.io works if you don’t have a domain yet.'
 		},
 		{
 			t: 'Instant rollback',
@@ -71,11 +87,7 @@
 		},
 		{
 			t: 'Agent-ready',
-			d: 'homeport mcp exposes deploy, rollback, logs and stats as MCP tools. Hand fleet ops to an AI agent — with the same health-gated safety you get.'
-		},
-		{
-			t: 'Resource limits',
-			d: 'memory and cpu caps in homeport.yaml become systemd cgroup limits — the same kernel mechanism Docker uses, without Docker.'
+			d: 'homeport mcp exposes deploy, rollback, status and the whole fleet view as MCP tools. Hand ops to an AI agent — with the same health-gated, auto-reverting safety you get.'
 		}
 	];
 
@@ -83,6 +95,8 @@
 		['On the server', 'systemd + Caddy + a bash helper', 'Docker + Postgres + Redis', 'Docker daemon'],
 		['Platform RAM', '~0', '~2 GB baseline', 'Docker overhead'],
 		['Ships to the box', 'one binary (scp)', 'containers (registry)', 'images (registry)'],
+		['Zero-downtime deploys', 'blue/green + rolling, default', 'per-service config', 'rolling via proxy'],
+		['Scale to zero', 'built in, socket-activated', 'no', 'no'],
 		['Rollback', 'symlink flip, instant', 'redeploy container', 'redeploy image'],
 		['Access to deploy', 'SSH key', 'web UI + SSH', 'root SSH']
 	];
@@ -92,7 +106,7 @@
 	<title>Homeport — ship binaries to production</title>
 	<meta
 		name="description"
-		content="Deploy single-binary web apps — Go, Rust, Next, Nuxt, SvelteKit, TanStack Start — to your own VPS. No Docker, no registry, no runtime on the server. One command hardens the box, one command deploys."
+		content="Deploy single-binary web apps — Go, Rust, Next, Nuxt, SvelteKit, TanStack Start — to your own VPS. No Docker, no registry, no runtime on the server. Zero-downtime blue/green deploys, scale-to-zero, autoscaling and migrations — without Kubernetes."
 	/>
 </svelte:head>
 
@@ -136,7 +150,8 @@
 	<p class="hero-rise mt-7 max-w-2xl text-lg leading-relaxed text-mist md:text-xl" style="--i: 2">
 		Deploy Go, Rust, Next, Nuxt, SvelteKit and TanStack Start apps to a plain VPS
 		as a single executable. No Docker. No registry. Nothing installed on the
-		server. One command hardens the box — one command deploys.
+		server. One command hardens the box — one command deploys. Zero-downtime
+		releases, scale-to-zero and migrations come standard.
 	</p>
 
 	<div class="hero-rise mt-9 flex flex-wrap items-center gap-3" style="--i: 3">
