@@ -266,6 +266,8 @@ server: %s
 # get a real domain for production (sslip.io is a shared public resolver).
 # private app: remove this line and set  internal: true  — the app binds to
 # loopback and is reached with  homeport tunnel , nothing on 80/443.
+# tip: server/domain/app/path/resources expand ${VAR} from the environment, so
+# one file can serve staging & prod from CI (an unset var is a hard error).
 domain: %s
 
 # Optional path mount: put several apps behind ONE domain, each at a prefix

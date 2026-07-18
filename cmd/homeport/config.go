@@ -87,6 +87,29 @@ func loadConfig() (*config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("%s: %w", configFile, err)
 	}
+	// Expand ${VAR}/$VAR from the environment in the parameterizable fields, so
+	// one committed homeport.yaml serves staging/prod via CI env. Command fields
+	// (run/release/post_release/build) are left literal on purpose — run: uses
+	// $PORT/$HOST for homeport's own server-side substitution, which env
+	// expansion must not clobber. A referenced-but-unset var is a hard error.
+	for _, f := range []struct {
+		name string
+		ptr  *string
+	}{
+		{"server", &cfg.Server},
+		{"domain", &cfg.Domain},
+		{"app", &cfg.App},
+		{"path", &cfg.Path},
+		{"idle_timeout", &cfg.IdleTimeout},
+		{"resources.memory", &cfg.Resources.Memory},
+		{"resources.cpu", &cfg.Resources.CPU},
+	} {
+		v, err := expandEnvStrict(f.name, *f.ptr)
+		if err != nil {
+			return nil, err
+		}
+		*f.ptr = v
+	}
 	if cfg.Build.Command == "" {
 		cfg.Build.Command = "bun run build"
 	}
@@ -157,6 +180,32 @@ func loadConfig() (*config, error) {
 		cfg.Autoscale.TargetCPU = 70
 	}
 	return cfg, nil
+}
+
+// expandEnvStrict expands ${VAR}/$VAR in a config field from the process
+// environment and errors if any referenced variable is unset — so a missing CI
+// variable fails the deploy loudly instead of silently producing an empty
+// value. A set-but-empty variable is allowed (it expands to ""). A literal "$"
+// not forming a variable is preserved.
+func expandEnvStrict(field, s string) (string, error) {
+	if !strings.Contains(s, "$") {
+		return s, nil
+	}
+	var missing []string
+	out := os.Expand(s, func(name string) string {
+		if name == "" {
+			return "$" // a lone "$" — nothing to expand
+		}
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		missing = append(missing, name)
+		return ""
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("%s: %s references unset environment variable(s): %s", configFile, field, strings.Join(missing, ", "))
+	}
+	return out, nil
 }
 
 // homeportd builds the remote command line for the root-side helper. Every

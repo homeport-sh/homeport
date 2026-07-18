@@ -412,6 +412,39 @@ available.
 Either way, secrets sync **before** deploy so the app boots with the right
 env, and values travel over SSH stdin — never argv, never logs, never git.
 
+### Per-environment values (`${VAR}` in `homeport.yaml`)
+
+One committed `homeport.yaml` can serve staging and production: the
+parameterizable fields — `server`, `domain`, `app`, `path`, `resources`,
+`idle_timeout` — expand `${VAR}`/`$VAR` from the environment at load time.
+
+```yaml
+# homeport.yaml — committed once
+app: web-${ENV}
+server: deploy@${DEPLOY_HOST}
+domain: ${DOMAIN}
+```
+```yaml
+# workflow — set the env; homeport expands it
+- run: homeport deploy
+  env:
+    ENV: production
+    DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+    DOMAIN: ${{ vars.DOMAIN }}
+```
+
+A **referenced-but-unset variable is a hard error** — a missing CI variable
+fails the deploy loudly instead of shipping an empty domain. Domain/server are
+*config*, not secrets, so put them in GitHub **Variables** (`vars.`) and scope
+them per **Environment** (staging/production) — not in `secrets.`. The command
+fields (`run`, `release`, `post_release`, `build`) are **not** expanded, so
+`run:`'s `$PORT`/`$HOST` keep their homeport meaning.
+
+Because *unset* errors but *set-but-empty* is allowed, `domain: ${DOMAIN}` also
+lets you flip an app **public ↔ internal per environment**: an empty `DOMAIN`
+makes it internal (loopback, no TLS), a real host makes it public, and a
+missing one is a loud error rather than an accidental exposure change.
+
 ## Driving deploys from an AI agent (MCP)
 
 `homeport mcp` serves the CLI as a stdio [MCP](https://modelcontextprotocol.io)
