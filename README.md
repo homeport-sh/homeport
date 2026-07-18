@@ -80,7 +80,8 @@ SSH / a root daemon outright.)
   view otherwise; `NBC_RUNTIME_DIR` is set to a writable dir for
   next-bun-compile apps).
 - A deploy is promoted only after `health.path` returns 200; otherwise the
-  previous release is restored automatically.
+  previous release is restored automatically. The wait defaults to 30s — raise
+  it for slow-booting apps with `health.timeout: 60s` (accepts `s`/`m`/`h`).
 
 ## Private apps (no public URL)
 

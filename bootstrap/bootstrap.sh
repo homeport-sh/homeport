@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.9
+HOMEPORTD_VERSION=0.8.10
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -206,9 +206,27 @@ wait_healthy() { # uses $PORT and $HEALTH_PATH from load_app
   wait_healthy_port "$PORT"
 }
 
+# seconds for a duration like 30s/2m/1h (default 30 for empty/garbage). The
+# split local declarations are deliberate: n/u must reference t AFTER it's set.
+timeout_secs() {
+  local t=${1:-30s}
+  local n=${t%[smh]}
+  local u=${t: -1}
+  [[ $n =~ ^[0-9]+$ ]] || { echo 30; return; }
+  case $u in
+    s) echo "$n" ;;
+    m) echo $((n * 60)) ;;
+    h) echo $((n * 3600)) ;;
+    *) echo 30 ;;
+  esac
+}
+
 wait_healthy_port() { # <port> — polls http://127.0.0.1:<port>$HEALTH_PATH
-  local port=$1 i
-  for i in $(seq 1 60); do
+  # up to $HEALTH_TIMEOUT (default 30s), one probe every 0.5s
+  local port=$1 i iters
+  iters=$(( $(timeout_secs "${HEALTH_TIMEOUT:-30s}") * 2 ))
+  (( iters < 1 )) && iters=1
+  for (( i = 1; i <= iters; i++ )); do
     if curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port$HEALTH_PATH" 2>/dev/null; then
       return 0
     fi
@@ -459,13 +477,15 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
   [[ $sandbox == - ]] && sandbox=""
   [[ $strategy == - ]] && strategy=""
+  [[ $health_timeout == - ]] && health_timeout=""
+  [[ -z $health_timeout || $health_timeout =~ ^[0-9]+[smh]$ ]] || die "health timeout must be a number with s/m/h suffix (e.g. 30s, 2m)"
   [[ -z $sandbox || $sandbox == strict || $sandbox == relaxed ]] || die "sandbox must be 'strict' (default) or 'relaxed'"
   [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
   [[ $memory == - ]] && memory=""
@@ -588,6 +608,7 @@ POST_RELEASE_B64=$post_release_b64
 PATH_PREFIX=$path
 SANDBOX=$sandbox
 STRATEGY=$strategy
+HEALTH_TIMEOUT=$health_timeout
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.

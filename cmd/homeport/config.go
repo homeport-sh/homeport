@@ -21,7 +21,8 @@ type buildConfig struct {
 }
 
 type healthConfig struct {
-	Path string `yaml:"path"`
+	Path    string `yaml:"path"`
+	Timeout string `yaml:"timeout"`
 }
 
 type resourcesConfig struct {
@@ -143,6 +144,8 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: path must look like /geo-api (leading slash, no trailing slash, no spaces), got %q", configFile, cfg.Path)
 	case !healthRe.MatchString(cfg.Health.Path):
 		return nil, fmt.Errorf("%s: health.path must start with / and contain no spaces", configFile)
+	case cfg.Health.Timeout != "" && !timeoutRe.MatchString(cfg.Health.Timeout):
+		return nil, fmt.Errorf("%s: health.timeout must be a number with s/m/h suffix (e.g. 30s, 2m), got %q", configFile, cfg.Health.Timeout)
 	case cfg.Resources.Memory != "" && !memoryRe.MatchString(cfg.Resources.Memory):
 		return nil, fmt.Errorf("%s: resources.memory must be a number with K/M/G suffix (e.g. 512M, 1G), got %q", configFile, cfg.Resources.Memory)
 	case cfg.Resources.CPU != "" && !cpuRe.MatchString(cfg.Resources.CPU):
@@ -258,6 +261,7 @@ func (c *config) addArgs() []string {
 		dashIfEmpty(c.Path),
 		dashIfEmpty(c.Sandbox),
 		dashIfEmpty(c.Strategy),
+		dashIfEmpty(c.Health.Timeout),
 	}
 }
 

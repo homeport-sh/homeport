@@ -284,6 +284,9 @@ build:
 health:
   # a deploy is only promoted once this path returns 200 on the new binary
   path: /
+  # how long to wait for that 200 before failing the deploy (default 30s).
+  # Raise it for apps that boot slowly (JIT warm-up, cache load).
+  # timeout: 60s
 
 # Optional release hook: a command run on the box (as the app user, with your
 # secrets in the env) against the NEW binary, BEFORE it goes live. If it fails
