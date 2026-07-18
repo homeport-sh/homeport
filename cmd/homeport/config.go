@@ -42,6 +42,7 @@ type config struct {
 	App         string          `yaml:"app"`
 	Server      string          `yaml:"server"`
 	Domain      string          `yaml:"domain"`
+	Path        string          `yaml:"path"`
 	Run         string          `yaml:"run"`
 	Release     string          `yaml:"release"`
 	PostRelease string          `yaml:"post_release"`
@@ -61,6 +62,9 @@ var (
 	appRe     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,19}$`)
 	domainRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$`)
 	healthRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
+	// path: mount prefix under a shared domain — leading slash, one or more
+	// segments, no trailing slash, no spaces (Caddy handle_path matcher).
+	pathRe = regexp.MustCompile(`^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*$`)
 	releaseRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$`)
 	memoryRe  = regexp.MustCompile(`^[0-9]+[KMG]$`)
 	cpuRe     = regexp.MustCompile(`^[0-9]+%$`)
@@ -106,6 +110,12 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: set either a domain (public) or internal: true, not both", configFile)
 	case !cfg.Internal && !domainRe.MatchString(cfg.Domain):
 		return nil, fmt.Errorf("%s: %q doesn't look like a domain (or set internal: true for a private app)", configFile, cfg.Domain)
+	case cfg.Path != "" && cfg.Internal:
+		return nil, fmt.Errorf("%s: path mounts under a shared public domain — remove internal", configFile)
+	case cfg.Path != "" && cfg.Domain == "":
+		return nil, fmt.Errorf("%s: path is set but domain is not — path mounts an app under a shared domain (e.g. domain: api.example.com, path: /geo-api)", configFile)
+	case cfg.Path != "" && !pathRe.MatchString(cfg.Path):
+		return nil, fmt.Errorf("%s: path must look like /geo-api (leading slash, no trailing slash, no spaces), got %q", configFile, cfg.Path)
 	case !healthRe.MatchString(cfg.Health.Path):
 		return nil, fmt.Errorf("%s: health.path must start with / and contain no spaces", configFile)
 	case cfg.Resources.Memory != "" && !memoryRe.MatchString(cfg.Resources.Memory):
@@ -194,6 +204,7 @@ func (c *config) addArgs() []string {
 		run,
 		release,
 		postRelease,
+		dashIfEmpty(c.Path),
 	}
 }
 

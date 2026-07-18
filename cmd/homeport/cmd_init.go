@@ -268,6 +268,11 @@ server: %s
 # loopback and is reached with  homeport tunnel , nothing on 80/443.
 domain: %s
 
+# Optional path mount: put several apps behind ONE domain, each at a prefix
+# (an API gateway). Give each app the same domain: and a distinct path:.
+# Caddy strips the prefix, so the app sees /users, not /api/users.
+# path: /geo-api    # -> https://<domain>/geo-api/* reaches this app
+
 build:
 %s
   command: %s

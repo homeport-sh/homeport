@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.4
+HOMEPORTD_VERSION=0.8.5
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -267,32 +267,99 @@ _teardown_autoscale_timer() { # remove the autoscaler when an app stops autoscal
   systemctl daemon-reload
 }
 
-# write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
-# fragment. mode: template (N replica-port upstreams, load-balanced with
-# retry) | idle (single, keepalive off so scale-to-zero works) | plain.
-# Used by cmd_add and the autoscaler (which rewrites on every scale event).
-write_caddy() {
-  local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams="" rbase i
+# app_upstreams <port> <mode> <count> — echo the space-prefixed upstream list
+# for an app (replica ports for a template, else the single loopback port).
+app_upstreams() {
+  local port=$1 mode=$2 count=${3:-1} upstreams="" rbase i
   if [[ $mode == template ]]; then
     rbase=$(replica_base "$port")
     for (( i = 1; i <= count; i++ )); do upstreams+=" 127.0.0.1:$((rbase + i))"; done
   else
     upstreams=" 127.0.0.1:$port"
   fi
+  echo "$upstreams"
+}
+
+# emit_reverse_proxy <indent> <mode> <upstreams> — print a reverse_proxy
+# directive indented by <indent> (a literal tab string), respecting the app's
+# mode. Shared by a plain site block (write_caddy) and a gateway handle_path
+# block (write_gateway).
+emit_reverse_proxy() {
+  local ind=$1 mode=$2 upstreams=$3
+  case $mode in
+    template)
+      # lb_try_duration retries a request that hit a down/restarting replica on
+      # a live upstream — what makes rolling deploys/scaling zero-downtime.
+      printf '%sreverse_proxy%s {\n%s\tlb_policy least_conn\n%s\tlb_try_duration 4s\n%s\tlb_try_interval 250ms\n%s\tfail_duration 10s\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" "$ind" "$ind" "$ind" ;;
+    idle)
+      # keepalive off so Caddy doesn't hold socket-proxyd open past idle.
+      printf '%sreverse_proxy%s {\n%s\ttransport http {\n%s\t\tkeepalive off\n%s\t}\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" "$ind" "$ind" ;;
+    *)
+      printf '%sreverse_proxy%s\n' "$ind" "$upstreams" ;;
+  esac
+}
+
+# app_mode — echo the Caddy proxy mode for the loaded app's config vars.
+app_mode() {
+  if [[ ${REPLICAS:-1} -gt 1 || -n ${AUTOSCALE_MAX:-} ]]; then echo template
+  elif [[ -n ${IDLE:-} ]]; then echo idle
+  else echo plain; fi
+}
+
+# write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
+# fragment (a whole-host site block). mode: template | idle | plain.
+# Used by cmd_add and the autoscaler (which rewrites on every scale event).
+write_caddy() {
+  local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams
+  upstreams=$(app_upstreams "$port" "$mode" "$count")
   { printf '%s {\n\tencode zstd gzip\n' "$domain"
-    case $mode in
-      template)
-        # lb_try_duration retries a request that hit a down/restarting replica
-        # on a live upstream — what makes rolling deploys/scaling zero-downtime.
-        printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tlb_try_duration 4s\n\t\tlb_try_interval 250ms\n\t\tfail_duration 10s\n\t}\n' "$upstreams" ;;
-      idle)
-        # keepalive off so Caddy doesn't hold socket-proxyd open past idle.
-        printf '\treverse_proxy%s {\n\t\ttransport http {\n\t\t\tkeepalive off\n\t\t}\n\t}\n' "$upstreams" ;;
-      *)
-        printf '\treverse_proxy%s\n' "$upstreams" ;;
-    esac
+    emit_reverse_proxy $'\t' "$mode" "$upstreams"
     printf '}\n'
   } > "$CADDY_DIR/$app.caddy"
+}
+
+# gateway_slug <domain> — filesystem-safe token for a shared-host fragment.
+gateway_slug() { echo "$1" | tr -c 'a-zA-Z0-9' '-'; }
+
+# write_gateway <domain> — (re)generate the merged Caddy block for a host that
+# has one or more path-mounted apps. Scans every app config sharing <domain>
+# with a PATH_PREFIX and emits a handle_path per prefix (longest first, so a
+# more specific prefix wins). Removes the fragment when no path-apps remain.
+write_gateway() {
+  local domain=$1 slug frag cfg
+  slug=$(gateway_slug "$domain")
+  frag="$CADDY_DIR/_gw_$slug.caddy"
+  local -a rows=()
+  for cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $cfg ]] || continue
+    local row
+    row=$(
+      # shellcheck disable=SC1090
+      source "$cfg"
+      [[ ${DOMAIN:-} == "$domain" && -n ${PATH_PREFIX:-} ]] || exit 1
+      printf '%s\t%s\t%s' "$PATH_PREFIX" "$(app_mode)" "$(app_upstreams "$PORT" "$(app_mode)" "${REPLICAS:-1}")"
+    ) || continue
+    rows+=("$row")
+  done
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    rm -f "$frag"
+    return 0
+  fi
+  # longest path prefix first — Caddy tries handle_path blocks in written order.
+  local -a sorted
+  mapfile -t sorted < <(printf '%s\n' "${rows[@]}" | awk -F'\t' '{ print length($1), $0 }' | sort -rn | cut -d' ' -f2-)
+  {
+    printf '%s {\n\tencode zstd gzip\n' "$domain"
+    local r path mode ups
+    for r in "${sorted[@]}"; do
+      IFS=$'\t' read -r path mode ups <<<"$r"
+      printf '\thandle_path %s/* {\n' "$path"
+      emit_reverse_proxy $'\t\t' "$mode" "$ups"
+      printf '\t}\n'
+    done
+    printf '\thandle {\n\t\trespond "no route for this path" 404\n\t}\n'
+    printf '}\n'
+  } > "$frag"
 }
 
 prune_releases() { # keep the newest $KEEP releases, never the live one
@@ -310,10 +377,11 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
+  [[ $path == - ]] && path=""
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""
   [[ $idle == - ]] && idle=""
@@ -344,6 +412,29 @@ cmd_add() {
   # apps on the box or through `homeport tunnel`. No Caddy fragment, no TLS,
   # nothing on 80/443.
   [[ -z $domain ]] || valid_domain "$domain"
+  # path: mount this app under a shared domain (a gateway host). Needs a domain,
+  # can't be internal, must be a clean prefix.
+  if [[ -n $path ]]; then
+    [[ -n $domain ]] || die "path needs a domain (path mounts an app under a shared host)"
+    [[ $path =~ ^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*$ ]] || die "invalid path '$path' (leading slash, no trailing slash, no spaces — e.g. /geo-api)"
+  fi
+  # host-ownership conflicts: a domain is either a single-app host or a gateway
+  # host (every app on it path-mounted), never both — and two apps can't claim
+  # the same prefix. Read siblings with sed (not source) to avoid clobbering.
+  if [[ -n $domain ]]; then
+    local _cfg _odom _opath _oapp
+    for _cfg in "$HOMEPORT_ETC"/*/config; do
+      [[ -f $_cfg && $_cfg != "$HOMEPORT_ETC/$app/config" ]] || continue
+      _odom=$(sed -n 's/^DOMAIN=//p' "$_cfg"); [[ $_odom == "$domain" ]] || continue
+      _opath=$(sed -n 's/^PATH_PREFIX=//p' "$_cfg"); _oapp=$(basename "$(dirname "$_cfg")")
+      if [[ -n $path ]]; then
+        [[ -z $_opath ]] && die "domain $domain is already a single-app host (app '$_oapp') — can't path-mount onto it"
+        [[ $_opath == "$path" ]] && die "path $path on $domain is already used by app '$_oapp'"
+      else
+        [[ -n $_opath ]] && die "domain $domain is a gateway host (app '$_oapp' mounts $_opath) — give this app a path: too"
+      fi
+    done
+  fi
   [[ $health == /* ]] || die "health path must start with /"
   [[ -z $memory || $memory =~ ^[0-9]+[KMG]$ ]] || die "invalid memory limit: '$memory' (e.g. 512M, 1G)"
   [[ -z $cpu || $cpu =~ ^[0-9]+%$ ]] || die "invalid cpu limit: '$cpu' (e.g. 150%)"
@@ -371,11 +462,12 @@ cmd_add() {
   # template unit (per-instance) is used for fixed replicas>1 AND autoscale
   local use_template=0
   [[ $replicas -gt 1 || -n $autoscale ]] && use_template=1
-  local user="homeport-$app" port keep=5 old_replicas=1
+  local user="homeport-$app" port keep=5 old_replicas=1 old_domain="" old_path=""
 
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
     load_app "$app"
     port=$PORT keep=$KEEP old_replicas=${REPLICAS:-1}
+    old_domain=${DOMAIN:-} old_path=${PATH_PREFIX:-}
   else
     port=$(next_port)
   fi
@@ -403,6 +495,7 @@ AUTOSCALE_TARGET=$AUTOSCALE_TARGET
 RUN_B64=$run_b64
 RELEASE_B64=$release_b64
 POST_RELEASE_B64=$post_release_b64
+PATH_PREFIX=$path
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -562,25 +655,42 @@ EOF
     caddy_upstreams=" 127.0.0.1:$port"
   fi
 
-  if [[ -n $domain ]]; then
+  # --- Caddy routing ---
+  if [[ -n $domain && -n $path ]]; then
+    # path-mounted: contributes a handle_path to the shared host's gateway
+    # block instead of owning a whole-host site block.
+    rm -f "$CADDY_DIR/$app.caddy"
+    write_gateway "$domain"
+  elif [[ -n $domain ]]; then
     local cmode=plain
     [[ $use_template -eq 1 ]] && cmode=template
     [[ -n $idle ]] && cmode=idle
     write_caddy "$app" "$domain" "$port" "$cmode" "$replicas"
+  else
+    # Internal app: drop any Caddy fragment a previous public deploy left.
+    rm -f "$CADDY_DIR/$app.caddy"
+  fi
+
+  # If this app used to be path-mounted on a host it no longer contributes to
+  # (domain changed, path changed, or it went internal), regenerate that host's
+  # gateway to drop the stale prefix. Must precede validation, or a leftover
+  # gateway block could collide with a new whole-host block for the same domain.
+  if [[ -n $old_path && ( $old_domain != "$domain" || $path != "$old_path" ) ]]; then
+    write_gateway "$old_domain"
+  fi
+
+  if [[ -n $domain ]]; then
     caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
       || die "generated Caddy config failed validation"
     systemctl reload caddy
     local rmsg=""
     [[ -n $autoscale ]] && rmsg=" · autoscale $AUTOSCALE_MIN-$AUTOSCALE_MAX @ ${AUTOSCALE_TARGET}%"
     [[ -z $autoscale && $replicas -gt 1 ]] && rmsg=" · $replicas replicas"
-    echo "app '$app' registered: https://$domain -> 127.0.0.1:$port$rmsg"
+    echo "app '$app' registered: https://$domain$path -> 127.0.0.1:$port$rmsg"
     echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
   else
-    # Internal app: drop any Caddy fragment a previous public deploy left.
-    if [[ -f "$CADDY_DIR/$app.caddy" ]]; then
-      rm -f "$CADDY_DIR/$app.caddy"
-      systemctl reload caddy 2>/dev/null || true
-    fi
+    # reload only if we just tore down a public/gateway fragment
+    [[ -n $old_domain ]] && systemctl reload caddy 2>/dev/null || true
     echo "app '$app' registered (internal) -> 127.0.0.1:$port"
     echo "not exposed publicly — reach it with: homeport tunnel"
   fi
@@ -657,7 +767,13 @@ cmd_autoscale() {
   fi
 
   sed -i "s/^REPLICAS=.*/REPLICAS=$target/" "$HOMEPORT_ETC/$app/config"
-  write_caddy "$app" "$DOMAIN" "$PORT" template "$target"
+  # rewrite this app's upstreams at the new replica count — a path-mounted app
+  # lives in its host's gateway block, a normal one in its own site block.
+  if [[ -n ${PATH_PREFIX:-} ]]; then
+    write_gateway "$DOMAIN"
+  else
+    write_caddy "$app" "$DOMAIN" "$PORT" template "$target"
+  fi
   systemctl reload caddy 2>/dev/null || true
   sed -i "s/^AS_LAST_SCALE=.*/AS_LAST_SCALE=$((now_ns / 1000000000))/" "$state"
   echo "autoscale $app: $n -> $target replicas (cpu ${pct}% / target ${AUTOSCALE_TARGET}%)"
@@ -960,8 +1076,8 @@ status_json_one() { # caller must have run load_app for $1
   local as_min=${AUTOSCALE_MIN:-0} as_max=${AUTOSCALE_MAX:-0} as_target=${AUTOSCALE_TARGET:-0} as_cpu=""
   [[ -n ${AUTOSCALE_MAX:-} && -f "$HOMEPORT_ROOT/$app/.autoscale" ]] &&
     as_cpu=$(grep -m1 '^AS_CPU_PCT=' "$HOMEPORT_ROOT/$app/.autoscale" | cut -d= -f2)
-  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"autoscale_min":%d,"autoscale_max":%d,"autoscale_target":%d,"cpu_pct":"%s","port":%d,"app_port":%d,"state":"%s","release":"%s","releases":[' \
-    "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$as_min" "$as_max" "$as_target" "${as_cpu}" "$PORT" "$app_port" "$state" "$current"
+  printf '{"app":"%s","domain":"%s","path":"%s","internal":%s,"idle":%s,"replicas":%d,"autoscale_min":%d,"autoscale_max":%d,"autoscale_target":%d,"cpu_pct":"%s","port":%d,"app_port":%d,"state":"%s","release":"%s","releases":[' \
+    "$app" "${DOMAIN:-}" "${PATH_PREFIX:-}" "$internal" "$idle" "${REPLICAS:-1}" "$as_min" "$as_max" "$as_target" "${as_cpu}" "$PORT" "$app_port" "$state" "$current"
   while IFS= read -r r; do
     [[ -n $r ]] || continue
     printf '%s"%s"' "$sep" "$r"
@@ -1012,7 +1128,7 @@ cmd_status() {
   state=$(app_state "$app")
   echo "app:      $app"
   if [[ -n ${DOMAIN:-} ]]; then
-    echo "domain:   https://$DOMAIN  (127.0.0.1:$PORT)"
+    echo "domain:   https://$DOMAIN${PATH_PREFIX:-}  (127.0.0.1:$PORT)"
   else
     echo "domain:   (internal — 127.0.0.1:$PORT, reach via homeport tunnel)"
   fi
@@ -1106,10 +1222,10 @@ cmd_remove() {
   local app=${1:-}
   valid_app "$app"
   [[ ${2:-} == --yes ]] || die "this deletes the app, its releases and env — re-run as: remove $app --yes"
-  # capture replica info before the config is deleted
+  # capture replica + gateway info before the config is deleted
   local replicas=1 port=0
-  local as_max=0
-  [[ -f "$HOMEPORT_ETC/$app/config" ]] && { load_app "$app"; replicas=${REPLICAS:-1}; port=$PORT; as_max=${AUTOSCALE_MAX:-0}; }
+  local as_max=0 gwdom="" gwpath=""
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] && { load_app "$app"; replicas=${REPLICAS:-1}; port=$PORT; as_max=${AUTOSCALE_MAX:-0}; gwdom=${DOMAIN:-}; gwpath=${PATH_PREFIX:-}; }
   systemctl disable --now "homeport-$app" 2>/dev/null || true
   # scale-to-zero units, if this was an idle app
   systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
@@ -1134,6 +1250,12 @@ cmd_remove() {
   systemctl daemon-reload
   systemctl reload caddy 2>/dev/null || true
   rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}"
+  # if this was a path-mounted app, rebuild its host's gateway without it (the
+  # config is gone now, so the scan naturally excludes it).
+  if [[ -n $gwpath && -n $gwdom ]]; then
+    write_gateway "$gwdom"
+    systemctl reload caddy 2>/dev/null || true
+  fi
   if id -u "homeport-$app" &>/dev/null; then userdel "homeport-$app"; fi
   echo "removed app '$app'"
 }

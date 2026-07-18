@@ -103,6 +103,48 @@ homeport tunnel 8080       # pick the local port
 `homeport tunnel` works for public apps too, when you want private access
 without going through the internet.
 
+## Many apps, one domain: path routing (optional)
+
+Put several apps behind a **single hostname**, each mounted at a path prefix —
+an API gateway, one cert, one DNS record:
+
+```yaml
+# geo-api/homeport.yaml
+domain: api.example.com
+path: /geo-api
+
+# users/homeport.yaml
+domain: api.example.com
+path: /users
+```
+
+```
+https://api.example.com/geo-api/*  → the geo-api app
+https://api.example.com/users/*    → the users app
+```
+
+Each app still gets its own loopback port, systemd unit, secrets, and
+health-checked/rolling deploys — **only its routing changes**. homeport merges
+every app sharing a domain into one Caddy site block (a `handle_path` per
+prefix, longest-first so `/users/admin` wins over `/users`), regenerating it on
+each add/remove. TLS for the shared host is issued automatically.
+
+Things to know:
+
+- **The prefix is stripped.** `GET /geo-api/lookup` reaches the app as
+  `/lookup` — the app doesn't need to know its mount point. (Health checks run
+  against the app's own port, so `health.path` stays app-relative too.)
+- **A host is one or the other.** A domain is either a single whole-host app
+  *or* a gateway of path-mounted apps — homeport rejects mixing them, and
+  rejects two apps claiming the same prefix, with a clear message.
+- **Unmatched paths 404** on the shared host.
+- Path apps compose with **replicas / autoscale / idle** — each contributes its
+  own load-balanced (or scale-to-zero) upstream to the gateway block.
+
+For deeper fan-out (per-path rate limits, auth, header rewrites) you can still
+drop a hand-written Caddy fragment in `/etc/caddy/homeport.d/`; `path:` covers
+the common "several services under one host" case without touching Caddy.
+
 ## Resource limits (optional)
 
 ```yaml
