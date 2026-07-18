@@ -28,11 +28,18 @@ func cmdTunnel(args []string) error {
 	}
 	var st struct {
 		Port     int    `json:"port"`
+		AppPort  int    `json:"app_port"`
 		State    string `json:"state"`
 		Internal bool   `json:"internal"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &st); err != nil {
 		return fmt.Errorf("unexpected status output (is homeportd up to date?): %w", err)
+	}
+	// app_port (0.6.1+) is the port that actually reaches the app — for
+	// replica apps nothing binds the public port (Caddy talks straight to
+	// the instances). Older homeportd omits it; fall back to the public port.
+	if st.AppPort != 0 {
+		st.Port = st.AppPort
 	}
 	if st.Port == 0 {
 		return fmt.Errorf("app %q has no port yet — deploy it first", cfg.App)

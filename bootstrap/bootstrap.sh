@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.6.0
+HOMEPORTD_VERSION=0.6.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -352,7 +352,12 @@ EOF
       echo "[Install]"
       echo "WantedBy=multi-user.target"
     } > "/etc/systemd/system/homeport-$app@.service"
-    rm -f "/etc/systemd/system/homeport-$app.service"   # drop single-instance unit if any
+    # leaving single-instance (or idle) mode: STOP the old service before its
+    # unit file goes — otherwise the process runs on as an orphan.
+    if [[ -f "/etc/systemd/system/homeport-$app.service" ]]; then
+      systemctl disable --now "homeport-$app" 2>/dev/null || true
+      rm -f "/etc/systemd/system/homeport-$app.service"
+    fi
     _teardown_idle_units "$app"
     systemctl daemon-reload
     for (( i = 1; i <= replicas; i++ )); do
@@ -372,7 +377,16 @@ EOF
       idle_unit="PartOf=homeport-$app-proxy.service"
       install_sec=""
     fi
-    rm -f "/etc/systemd/system/homeport-$app@.service"   # drop template if this was a replica app
+    # leaving replica mode: stop every old instance before the template goes —
+    # otherwise the processes run on as orphans.
+    if [[ $old_replicas -gt 1 ]]; then
+      local orb oi
+      orb=$(replica_base "$port")
+      for (( oi = 1; oi <= old_replicas; oi++ )); do
+        systemctl disable --now "homeport-$app@$((orb + oi))" 2>/dev/null || true
+      done
+    fi
+    rm -f "/etc/systemd/system/homeport-$app@.service"
     { echo "[Unit]"
       echo "Description=homeport app: $app"
       echo "After=network-online.target"
@@ -422,7 +436,11 @@ EOF
   if [[ -n $domain ]]; then
     { printf '%s {\n\tencode zstd gzip\n' "$domain"
       if [[ $replicas -gt 1 ]]; then
-        printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tfail_duration 10s\n\t}\n' "$caddy_upstreams"
+        # lb_try_duration: a request that hits a down/restarting replica is
+        # retried on another upstream instead of 502ing — this is what makes
+        # rolling deploys actually zero-downtime (fail_duration is passive
+        # and only marks an upstream down after a failure).
+        printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tlb_try_duration 4s\n\t\tlb_try_interval 250ms\n\t\tfail_duration 10s\n\t}\n' "$caddy_upstreams"
       else
         printf '\treverse_proxy%s\n' "$caddy_upstreams"
       fi
@@ -575,12 +593,13 @@ cmd_env() { # merge KEY=value lines from stdin into the app's env file
   echo "env updated: $added value(s) set, ${#order[@]} total"
   # restart to pick up the new env (mode-aware; idle apps reload on next wake)
   if [[ ${REPLICAS:-1} -gt 1 ]]; then
-    local rbase i
-    rbase=$(replica_base "$PORT")
-    for (( i = 1; i <= REPLICAS; i++ )); do
-      systemctl try-restart "homeport-$app@$((rbase + i))" 2>/dev/null || true
-    done
-    echo "restarted $REPLICAS replicas"
+    # same health-gated one-at-a-time roll as deploys — a blind restart loop
+    # could briefly take every instance down on a slow-booting app
+    if rolling_restart "$app"; then
+      echo "rolled $REPLICAS replicas with new env"
+    else
+      die "replica failed health check after env change — check logs"
+    fi
   elif systemctl is-active --quiet "homeport-$app"; then
     systemctl restart "homeport-$app"
     echo "restarted homeport-$app"
@@ -630,8 +649,13 @@ status_json_one() { # caller must have run load_app for $1
   local internal=false idle=false
   [[ -z ${DOMAIN:-} ]] && internal=true
   [[ -n ${IDLE:-} ]] && idle=true
-  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"port":%d,"state":"%s","release":"%s","releases":[' \
-    "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$PORT" "$state" "$current"
+  # app_port = a port that reaches the app directly (tunnel target): idle
+  # apps are woken via the public socket, replicas expose no public port so
+  # point at instance 1, plain apps listen on the public port itself.
+  local app_port=$PORT
+  [[ ${REPLICAS:-1} -gt 1 ]] && app_port=$(( $(replica_base "$PORT") + 1 ))
+  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"port":%d,"app_port":%d,"state":"%s","release":"%s","releases":[' \
+    "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$PORT" "$app_port" "$state" "$current"
   while IFS= read -r r; do
     [[ -n $r ]] || continue
     printf '%s"%s"' "$sep" "$r"
@@ -749,8 +773,9 @@ cmd_logs() {
   local app=${1:-}
   valid_app "$app"
   shift || true
-  # glob matches the plain unit, replica instances (@N) and the idle proxy
-  local -a args=(-u "homeport-$app*" --no-pager -n 100)
+  # exact units only — a bare "homeport-$app*" glob would also match a
+  # sibling app whose name shares the prefix (web vs webshop)
+  local -a args=(-u "homeport-$app.service" -u "homeport-$app@*" -u "homeport-$app-proxy.service" --no-pager -n 100)
   while (( $# )); do
     case $1 in
       -f) args+=(-f) ;;
