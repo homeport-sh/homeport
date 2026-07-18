@@ -85,6 +85,13 @@ func loadConfig() (*config, error) {
 		}
 		return nil, err
 	}
+	return parseConfig(data)
+}
+
+// parseConfig turns raw homeport.yaml bytes into a validated config. Split from
+// loadConfig (which only adds file I/O) so the whole parse/expand/validate path
+// is unit-testable without touching the filesystem.
+func parseConfig(data []byte) (*config, error) {
 	cfg := &config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("%s: %w", configFile, err)

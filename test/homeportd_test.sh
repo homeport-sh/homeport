@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Unit tests for homeportd's pure helper functions. Extracts the embedded
+# homeportd from bootstrap/bootstrap.sh and sources it — `main` is source-guarded
+# so nothing executes. No root, no systemd, no network: just the pure logic that
+# has bitten us before (timeout_secs, replica math, Caddy generation, limits).
+set -uo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+root=$(dirname "$here")
+hd=$(mktemp)
+trap 'rm -f "$hd"' EXIT
+awk "/<<'HOMEPORTD_SCRIPT'/{f=1;next} /^HOMEPORTD_SCRIPT\$/{f=0} f" "$root/bootstrap/bootstrap.sh" > "$hd"
+
+# shellcheck disable=SC1090
+source "$hd"          # defines the helpers; guarded main does not run
+set +eu               # some assertions intentionally probe unset/edge inputs
+
+fails=0
+eq() { # eq <label> <got> <want>
+  if [[ "$2" == "$3" ]]; then printf 'ok   %s\n' "$1"
+  else printf 'FAIL %s: got [%s] want [%s]\n' "$1" "$2" "$3"; fails=$((fails + 1)); fi
+}
+has() { # has <label> <haystack> <needle>
+  if [[ "$2" == *"$3"* ]]; then printf 'ok   %s\n' "$1"
+  else printf 'FAIL %s: [%s] missing [%s]\n' "$1" "$2" "$3"; fails=$((fails + 1)); fi
+}
+
+# --- timeout_secs (the single-line-local bug lived here) ---
+eq "timeout_secs 30s"   "$(timeout_secs 30s)"  "30"
+eq "timeout_secs 2m"    "$(timeout_secs 2m)"   "120"
+eq "timeout_secs 1h"    "$(timeout_secs 1h)"   "3600"
+eq "timeout_secs empty" "$(timeout_secs '')"   "30"
+eq "timeout_secs junk"  "$(timeout_secs abc)"  "30"
+
+# --- replica_base: each app gets a unique 20-slot block ---
+eq "replica_base 8100" "$(replica_base 8100)" "10000"
+eq "replica_base 8101" "$(replica_base 8101)" "10020"
+
+# --- gateway_slug ---
+eq "gateway_slug" "$(gateway_slug api.example.com)" "api-example-com"
+
+# --- app_upstreams: plain single port vs template replica ports ---
+eq "upstreams plain"    "$(app_upstreams 8101 plain 1)"    " 127.0.0.1:8101"
+eq "upstreams template" "$(app_upstreams 8101 template 2)" " 127.0.0.1:10021 127.0.0.1:10022"
+
+# --- app_mode (reads REPLICAS / AUTOSCALE_MAX / IDLE) ---
+REPLICAS=1 AUTOSCALE_MAX="" IDLE="";  eq "app_mode plain"     "$(app_mode)" "plain"
+REPLICAS=3 AUTOSCALE_MAX="" IDLE="";  eq "app_mode replicas"  "$(app_mode)" "template"
+REPLICAS=1 AUTOSCALE_MAX=4 IDLE="";   eq "app_mode autoscale" "$(app_mode)" "template"
+REPLICAS=1 AUTOSCALE_MAX="" IDLE=1;   eq "app_mode idle"      "$(app_mode)" "idle"
+unset REPLICAS AUTOSCALE_MAX IDLE
+
+# --- compute_limits (the 1G->MemoryHigh=0 integer-floor bug lived here) ---
+eq "limits none" "$(compute_limits '' '')" ""
+lim=$(compute_limits 1G 150%)
+has "limits MemoryMax"  "$lim" "MemoryMax=1G"
+has "limits CPUQuota"   "$lim" "CPUQuota=150%"
+has "limits high bytes" "$lim" "MemoryHigh=966367641"   # not floored to 0G
+
+# --- Caddy fragment generation ---
+CADDY_DIR=$(mktemp -d); trap 'rm -f "$hd"; rm -rf "$CADDY_DIR"' EXIT
+write_caddy web web.example.com 8101 plain 1
+has "write_caddy site"  "$(cat "$CADDY_DIR/web.caddy")" "web.example.com {"
+has "write_caddy proxy" "$(cat "$CADDY_DIR/web.caddy")" "reverse_proxy 127.0.0.1:8101"
+write_caddy_internal svc 8102 3
+has "internal LB addr" "$(cat "$CADDY_DIR/svc.caddy")" "http://127.0.0.1:8102 {"
+has "internal LB pol"  "$(cat "$CADDY_DIR/svc.caddy")" "lb_policy least_conn"
+
+# --- write_gateway merges path apps, longest prefix first ---
+# write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
+if ! command -v mapfile >/dev/null 2>&1; then
+  printf 'skip write_gateway (needs bash 4+, this is %s)\n' "$BASH_VERSION"
+else
+HOMEPORT_ETC=$(mktemp -d)
+mkdir -p "$HOMEPORT_ETC/geo" "$HOMEPORT_ETC/users"
+printf 'DOMAIN=api.example.com\nPATH_PREFIX=/users\nPORT=8103\nREPLICAS=1\n'      > "$HOMEPORT_ETC/users/config"
+printf 'DOMAIN=api.example.com\nPATH_PREFIX=/users/admin\nPORT=8104\nREPLICAS=1\n' > "$HOMEPORT_ETC/geo/config"
+write_gateway api.example.com
+gw=$(cat "$CADDY_DIR/_gw_api-example-com.caddy")
+has "gateway host"  "$gw" "api.example.com {"
+has "gateway users" "$gw" "handle_path /users/*"
+has "gateway admin" "$gw" "handle_path /users/admin/*"
+# longest-first: /users/admin must appear before the shorter /users
+if [[ $(grep -n 'handle_path /users/admin' <<<"$gw" | cut -d: -f1) -lt $(grep -n 'handle_path /users/\*' <<<"$gw" | head -1 | cut -d: -f1) ]]; then
+  printf 'ok   gateway longest-prefix-first\n'
+else printf 'FAIL gateway ordering\n%s\n' "$gw"; fails=$((fails + 1)); fi
+rm -rf "$HOMEPORT_ETC"
+fi
+
+echo "----"
+if (( fails > 0 )); then echo "$fails bash test(s) FAILED"; exit 1; fi
+echo "all bash tests passed"

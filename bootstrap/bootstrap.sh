@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.10
+HOMEPORTD_VERSION=0.8.11
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -419,7 +419,8 @@ write_caddy_internal() {
 }
 
 # gateway_slug <domain> — filesystem-safe token for a shared-host fragment.
-gateway_slug() { echo "$1" | tr -c 'a-zA-Z0-9' '-'; }
+# printf (not echo) so a trailing newline doesn't become a trailing '-'.
+gateway_slug() { printf %s "$1" | tr -c 'a-zA-Z0-9' '-'; }
 
 # write_gateway <domain> — (re)generate the merged Caddy block for a host that
 # has one or more path-mounted apps. Scans every app config sharing <domain>
@@ -1482,7 +1483,10 @@ main() {
     *) die "unknown command: $cmd (try: homeportd help)" ;;
   esac
 }
-main "$@"
+# run main only when executed, not when sourced (so tests can source the pure
+# helpers). BASH_SOURCE[0]==$0 exactly when this file is the running program.
+# An `if` (not `&&`) so a sourced load ends on exit 0, not a stray non-zero.
+if [[ ${BASH_SOURCE[0]:-} == "${0}" ]]; then main "$@"; fi
 HOMEPORTD_SCRIPT
   chmod 755 /usr/local/bin/homeportd
 }
