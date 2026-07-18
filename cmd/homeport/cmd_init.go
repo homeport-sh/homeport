@@ -149,6 +149,25 @@ func detectProject() projectInfo {
 	}
 
 	cwd, _ := os.Getwd()
+	// A package.json with no framework we compile for = a plain Node/Bun app.
+	// homeport needs a single binary — point at `bun build --compile`, but be
+	// honest that it doesn't fit every app (native addons, dynamic requires).
+	if _, err := os.Stat("package.json"); err == nil {
+		return projectInfo{
+			kind:     "generic",
+			app:      sanitizeAppName(filepath.Base(cwd)),
+			build:    "bun build --compile --target=bun-linux-x64 ./src/index.ts --outfile server",
+			artifact: "server",
+			note: `# Node/Bun app: homeport deploys a single binary, so this compiles your
+# server entrypoint with 'bun build --compile'. EDIT the entrypoint path.
+# Works for most pure-JS servers (Hono, Express, plain HTTP). If your app
+# uses native addons (better-sqlite3, sharp, bcrypt...), dynamic require(),
+# or reads files by path at runtime, compilation may need flags or won't
+# work — see the "plain Node/Bun app" note in the homeport README.`,
+			ciToolchain: `      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile`,
+		}
+	}
 	return projectInfo{
 		kind:     "generic",
 		app:      sanitizeAppName(filepath.Base(cwd)),

@@ -245,6 +245,39 @@ Setup commands (`bootstrap`, `init`, `ci`) and `secrets sync` (a destructive
 full-replace) are deliberately **not** exposed — those stay human-run. The
 MCP server operates on the app in its working directory, same as the CLI.
 
+## Deploying a plain Node/Bun app
+
+homeport deploys a **single binary** — that's the whole model (no runtime on
+the server, atomic swaps, high density). Go, Rust, and the framework adapters
+(Next, Nuxt, SvelteKit, TanStack) already produce one. A plain Node/Bun server
+usually can too, with `bun build --compile`:
+
+```yaml
+# homeport.yaml
+build:
+  command: bun build --compile --target=bun-linux-x64 ./src/index.ts --outfile server
+  artifact: server
+```
+
+```bash
+PORT=3000 ./server   # test locally (drop --target to build for your machine)
+```
+
+**It doesn't fit every app — be honest with yourself first.** `bun --compile`
+bundles your JS into one executable, so it breaks when the app reaches outside
+that bundle:
+
+- **native addons** — `better-sqlite3`, `sharp`, `bcrypt`, anything node-gyp —
+  don't bundle into the binary
+- **dynamic `require()` / plugin systems** — the bundler can't see them
+- **reading files by path at runtime** (`__dirname`-relative assets, templates)
+  — those aren't embedded
+
+If your app hits one of those, it isn't a good fit for homeport today — a tool
+that reliably does one thing (binaries) beats one that half-supports
+everything. Pick a managed platform with a Node runtime for that app, or
+refactor the offending dependency out.
+
 ## Building a release binary
 
 ```
