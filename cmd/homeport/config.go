@@ -43,6 +43,7 @@ type config struct {
 	Server      string          `yaml:"server"`
 	Domain      string          `yaml:"domain"`
 	Run         string          `yaml:"run"`
+	Release     string          `yaml:"release"`
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -134,6 +135,8 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: run has unsupported characters (letters, digits, spaces, . _ : / = @ , + - ${} only)", configFile)
 	case cfg.Run != "" && strings.Contains(stripRunVars(cfg.Run), "$"):
 		return nil, fmt.Errorf("%s: run may only reference $PORT and $HOST, no other variables", configFile)
+	case strings.ContainsAny(cfg.Release, "\n\r"):
+		return nil, fmt.Errorf("%s: release must be a single line (chain steps with && )", configFile)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -163,10 +166,14 @@ func (c *config) addArgs() []string {
 	if c.Autoscale.on() {
 		autoscale = fmt.Sprintf("%d:%d:%d", c.Autoscale.Min, c.Autoscale.Max, c.Autoscale.TargetCPU)
 	}
-	// run args carry spaces, so they travel base64-encoded as a single token
-	run := "-"
+	// run/release args carry spaces, so they travel base64-encoded as a
+	// single positional token
+	run, release := "-", "-"
 	if c.Run != "" {
 		run = base64.StdEncoding.EncodeToString([]byte(c.Run))
+	}
+	if c.Release != "" {
+		release = base64.StdEncoding.EncodeToString([]byte(c.Release))
 	}
 	return []string{
 		"add", c.App,
@@ -179,6 +186,7 @@ func (c *config) addArgs() []string {
 		strconv.Itoa(c.Replicas),
 		autoscale,
 		run,
+		release,
 	}
 }
 

@@ -36,6 +36,11 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
    field at creation and the box sets itself up on first boot.
 3. **Point DNS** — an A record for your domain to the server IP. TLS
    certificates are issued automatically once it resolves.
+   *No domain handy?* Use `<app>.<your-ip-with-dashes>.sslip.io` as the
+   domain (e.g. `web.203-0-113-9.sslip.io` for `203.0.113.9`) — [sslip.io](https://sslip.io)
+   resolves it to your IP with zero DNS setup, and Caddy still gets a real
+   Let's Encrypt cert. Great for a first try; use your own domain for
+   production (sslip.io is a shared public resolver).
 4. **In your project**:
    ```
    homeport init            # writes homeport.yaml (auto-detects Go / Rust / next-bun-compile)
@@ -197,8 +202,9 @@ connection-string-as-secret *is* the integration.
 - **On DigitalOcean:** if you use a DO managed DB, run homeport on a DO
   droplet in the same VPC — then the app can reach the DB's **private**
   endpoint (a different cloud can't), low-latency and unexposed.
-- **Migrations:** run them from CI (or a build step) with the same
-  `DATABASE_URL`, before `homeport deploy` promotes the release.
+- **Migrations:** use a [release hook](#release-hooks-migrations) — `release:
+  ./bin migrate` runs on the box against the new binary before it goes live,
+  and aborts the deploy if it fails.
 
 **Cheapest options:**
 
@@ -214,6 +220,41 @@ connection-string-as-secret *is* the integration.
 service next to your binaries (backups, tuning, OOM contention) and breaks
 the binaries-only model. If you want self-hosted Postgres, give it its own
 box.
+
+## Release hooks (migrations)
+
+A `release:` command runs **on the box, against the new binary, before it goes
+live** — the place for database migrations and other one-shot pre-flight work:
+
+```yaml
+# homeport.yaml
+release: ./bin migrate      # chain steps with &&
+```
+
+On each deploy, after the new release is staged but before any instance
+restarts onto it, homeport runs the hook:
+
+- as the **app user**, with the app's **secrets in the env** (`DATABASE_URL`,
+  …) plus `STATE_DIR` — the same environment the app itself gets;
+- in the new release's directory, so `./bin` is the **new** binary;
+- **before promotion** — the old release keeps serving until it succeeds.
+
+If the hook exits non-zero the **deploy aborts**: nothing is promoted, the
+previous release stays live, and `homeport deploy` returns an error (so CI
+fails loudly). This is the [Heroku release-phase](https://devcenter.heroku.com/articles/release-phase)
+pattern — engine-agnostic, so it works for a Go `migrate` subcommand, `bunx
+drizzle-kit migrate`, `atlas migrate apply`, a `psql -f` script, anything.
+
+The safe ordering for zero-downtime migrations is **expand → migrate →
+deploy → contract**: ship a migration the *current* code tolerates, let the
+hook apply it, then the new code goes live on top of it. Avoid destructive
+changes (dropping a column the running release still reads) in the same deploy
+that ships the code removing that read — split it across two.
+
+Only need it in one environment, or want notifications *after* a deploy? A
+release hook is pre-activate by design (so it can gate the deploy); post-deploy
+side effects (cache warm, Slack ping) belong in your CI job after `homeport
+deploy` returns success.
 
 ## How it works
 

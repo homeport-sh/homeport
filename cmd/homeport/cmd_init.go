@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -237,7 +238,14 @@ func cmdInit(args []string) error {
 	server = normalizeServer(server)
 	domain := flagVal("domain")
 	if domain == "" {
-		domain = ask("Domain (e.g. app.example.com)", "")
+		// No domain yet? sslip.io resolves <anything>.<ip-with-dashes>.sslip.io
+		// to that IP with zero DNS setup, and Caddy still gets real TLS for it.
+		host := server[strings.Index(server, "@")+1:]
+		hint := "e.g. app.example.com"
+		if net.ParseIP(host) != nil {
+			hint = fmt.Sprintf("e.g. %s.%s.sslip.io for instant TLS, no DNS", app, strings.ReplaceAll(host, ".", "-"))
+		}
+		domain = ask("Domain ("+hint+")", "")
 	}
 
 	switch {
@@ -253,6 +261,9 @@ func cmdInit(args []string) error {
 app: %s
 server: %s
 # public app: set a domain (Caddy fronts it with automatic TLS).
+# no domain yet? use  <app>.<your-ip-with-dashes>.sslip.io  — it resolves to
+# your IP with zero DNS setup and still gets real TLS. Great for trying things;
+# get a real domain for production (sslip.io is a shared public resolver).
 # private app: remove this line and set  internal: true  — the app binds to
 # loopback and is reached with  homeport tunnel , nothing on 80/443.
 domain: %s
@@ -266,6 +277,12 @@ build:
 health:
   # a deploy is only promoted once this path returns 200 on the new binary
   path: /
+
+# Optional release hook: a command run on the box (as the app user, with your
+# secrets in the env) against the NEW binary, BEFORE it goes live. If it fails
+# the deploy aborts and the old release keeps serving — the place for DB
+# migrations. Chain steps with &&.
+# release: ./bin migrate
 
 # Optional cgroup limits (systemd — the same kernel mechanism as docker).
 # resources:

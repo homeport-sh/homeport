@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.2
+HOMEPORTD_VERSION=0.8.3
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -310,7 +310,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -321,6 +321,8 @@ cmd_add() {
   [[ $replicas == - || -z $replicas ]] && replicas=1
   [[ $autoscale == - ]] && autoscale=""
   [[ $run_b64 == - ]] && run_b64=""
+  [[ $release_b64 == - ]] && release_b64=""
+  [[ -z $release_b64 ]] || printf %s "$release_b64" | base64 -d >/dev/null 2>&1 || die "release: invalid encoding"
 
   # run: optional launch args for the binary (base64 to survive spaces).
   # exec (no shell), only $PORT/$HOST substituted — validated to block
@@ -397,6 +399,7 @@ AUTOSCALE_MIN=$AUTOSCALE_MIN
 AUTOSCALE_MAX=$AUTOSCALE_MAX
 AUTOSCALE_TARGET=$AUTOSCALE_TARGET
 RUN_B64=$run_b64
+RELEASE_B64=$release_b64
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -697,6 +700,26 @@ activate_and_check() {
   fi
 }
 
+# run_release_hook <app> — run the app's release: command (migrations, cache
+# priming, etc.) on the box as the app user, with the app's env, against the
+# release now symlinked at current/. Returns the command's exit status; a
+# non-zero result aborts the deploy before anything is promoted.
+run_release_hook() {
+  local app=$1 user="homeport-$app"
+  local dir="$HOMEPORT_ROOT/$app/current" envf="$HOMEPORT_ROOT/$app/shared/env"
+  # the same env the service gets, minus a listening PORT — a release task is a
+  # one-shot, not a server: app secrets from the env file (DATABASE_URL, …)
+  # plus STATE_DIR so an embedded SQLite lives beside the running app's copy.
+  local script="export STATE_DIR='$HOMEPORT_ROOT/$app/shared'"
+  script+=" NBC_RUNTIME_DIR='$HOMEPORT_ROOT/$app/shared/runtime'"
+  script+=" NODE_ENV=production HOST=127.0.0.1"
+  script+="; set -a; [ -f '$envf' ] && . '$envf'; set +a"
+  script+="; cd '$dir' || exit 1; $RELEASE"
+  # binary is root-owned (app user can exec, not modify); RELEASE runs as the
+  # unprivileged app user, so a hook can't reach beyond the app's own data.
+  sudo -u "$user" -H bash -c "$script"
+}
+
 cmd_activate() {
   local app=${1:-} release=${2:-}
   valid_app "$app"; valid_release "$release"
@@ -710,6 +733,21 @@ cmd_activate() {
   [[ -L "$HOMEPORT_ROOT/$app/current" ]] && prev=$(readlink "$HOMEPORT_ROOT/$app/current")
 
   swap_current "$app" "releases/$release"
+
+  # release hook runs against the new binary while old instances keep serving
+  # the previous one — a failed migration aborts the deploy with no disruption.
+  if [[ -n ${RELEASE_B64:-} && $RELEASE_B64 != - ]]; then
+    local RELEASE
+    RELEASE=$(printf %s "$RELEASE_B64" | base64 -d 2>/dev/null) || die "release: invalid encoding"
+    echo "release hook: $RELEASE"
+    if ! run_release_hook "$app"; then
+      if [[ -n $prev && $prev != "releases/$release" ]]; then
+        swap_current "$app" "$prev"
+        die "release hook failed — deploy aborted (still on ${prev#releases/})"
+      fi
+      die "release hook failed — deploy aborted (nothing was activated)"
+    fi
+  fi
 
   if activate_and_check "$app"; then
     prune_releases "$app"
