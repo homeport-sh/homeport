@@ -201,8 +201,49 @@ homeport ci setup github
 Generates a dedicated ed25519 deploy key, authorizes it on the server, pins
 the server's host key (no `StrictHostKeyChecking=no`), writes
 `.github/workflows/homeport-deploy.yml` with the right toolchain step for your
-project type, and sets the two repo secrets via `gh` if available. The
-pipeline's only secrets are the SSH key and host key.
+project type, and sets the SSH-key + host-key repo secrets via `gh` if
+available.
+
+**Secrets — two patterns** (the generated workflow uses B by default):
+
+- **A — managed on the server.** You set them once by hand
+  (`homeport secrets push .env`); they persist across deploys and **CI never
+  sees them**. Smallest blast radius. Delete the "Sync secrets" step from the
+  workflow if you use this.
+- **B — managed as CI secrets, synced every deploy.** Your env lives as
+  GitHub Actions secrets and the workflow runs `homeport secrets sync -`
+  before deploy, so the box's env matches CI exactly (declarative — a secret
+  you delete in GitHub is dropped on the box). List **all** your keys and add
+  each as a repo secret first. Use `push -` instead of `sync -` for additive
+  (never-delete) behaviour.
+
+Either way, secrets sync **before** deploy so the app boots with the right
+env, and values travel over SSH stdin — never argv, never logs, never git.
+
+## Driving deploys from an AI agent (MCP)
+
+`homeport mcp` serves the CLI as a stdio [MCP](https://modelcontextprotocol.io)
+server, so an agent (Claude Code, etc.) can operate your fleet — with the same
+health-gated, auto-reverting safety you get.
+
+Register it (once, from a project with a `homeport.yaml`):
+
+```
+claude mcp add homeport -- homeport mcp
+```
+
+Then ask the agent things like *"roll back the api", "show me the logs for
+web", "how much memory is the fleet using"*. Exposed tools:
+
+| Tool | |
+|---|---|
+| `status` · `stats` · `logs` | observe the app |
+| `deploy` · `rollback` | ship / revert (health-gated, auto-revert) |
+| `secrets_list` · `secrets_set` · `secrets_rm` | manage env |
+
+Setup commands (`bootstrap`, `init`, `ci`) and `secrets sync` (a destructive
+full-replace) are deliberately **not** exposed — those stay human-run. The
+MCP server operates on the app in its working directory, same as the CLI.
 
 ## Building a release binary
 
