@@ -27,6 +27,15 @@ type resourcesConfig struct {
 	CPU    string `yaml:"cpu"`
 }
 
+type autoscaleConfig struct {
+	Min       int `yaml:"min"`
+	Max       int `yaml:"max"`
+	TargetCPU int `yaml:"target_cpu"`
+}
+
+// on reports whether autoscaling is configured (max set).
+func (a autoscaleConfig) on() bool { return a.Max > 0 }
+
 type config struct {
 	App         string          `yaml:"app"`
 	Server      string          `yaml:"server"`
@@ -35,6 +44,7 @@ type config struct {
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
 	Replicas    int             `yaml:"replicas"`
+	Autoscale   autoscaleConfig `yaml:"autoscale"`
 	Build       buildConfig     `yaml:"build"`
 	Health      healthConfig    `yaml:"health"`
 	Resources   resourcesConfig `yaml:"resources"`
@@ -104,9 +114,22 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: replicas>1 needs a domain (Caddy load-balances them) — remove internal", configFile)
 	case cfg.Replicas > 1 && cfg.Idle:
 		return nil, fmt.Errorf("%s: replicas and idle are mutually exclusive (idle is 0<->1, replicas is 1<->N)", configFile)
+	case cfg.Autoscale.on() && cfg.Idle:
+		return nil, fmt.Errorf("%s: autoscale and idle are mutually exclusive", configFile)
+	case cfg.Autoscale.on() && cfg.Internal:
+		return nil, fmt.Errorf("%s: autoscale needs a domain (Caddy load-balances the replicas)", configFile)
+	case cfg.Autoscale.on() && cfg.Replicas > 1:
+		return nil, fmt.Errorf("%s: set either replicas (fixed) or autoscale (min/max), not both", configFile)
+	case cfg.Autoscale.on() && (cfg.Autoscale.Min < 1 || cfg.Autoscale.Max > 20 || cfg.Autoscale.Min > cfg.Autoscale.Max):
+		return nil, fmt.Errorf("%s: autoscale needs 1 <= min <= max <= 20 (got min=%d max=%d)", configFile, cfg.Autoscale.Min, cfg.Autoscale.Max)
+	case cfg.Autoscale.on() && cfg.Autoscale.TargetCPU != 0 && (cfg.Autoscale.TargetCPU < 1 || cfg.Autoscale.TargetCPU > 100):
+		return nil, fmt.Errorf("%s: autoscale.target_cpu must be 1-100 (got %d)", configFile, cfg.Autoscale.TargetCPU)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
+	}
+	if cfg.Autoscale.on() && cfg.Autoscale.TargetCPU == 0 {
+		cfg.Autoscale.TargetCPU = 70
 	}
 	return cfg, nil
 }

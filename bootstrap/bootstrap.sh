@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.6.3
+HOMEPORTD_VERSION=0.7.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -198,6 +198,12 @@ wait_healthy_port() { # <port> — polls http://127.0.0.1:<port>$HEALTH_PATH
 # the public (8100+) or idle (9100+) ranges or another app's block.
 replica_base() { echo $((10000 + ($1 - BASE_PORT) * 20)); }
 
+# is_template — does the loaded app run as per-instance template units?
+# True for fixed replicas>1 AND autoscale (even at 1 instance). Callers must
+# have run load_app. This is what most runtime commands branch on, not a bare
+# REPLICAS>1, because an autoscale app at min=1 is still a template instance.
+is_template() { [[ ${REPLICAS:-1} -gt 1 || -n ${AUTOSCALE_MAX:-} ]]; }
+
 # emit_service_body <port-expr> — the shared [Service] block. Relies on
 # bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from cmd_add.
 emit_service_body() {
@@ -241,6 +247,43 @@ _teardown_idle_units() { # remove socket/proxy when an app leaves idle mode
   systemctl daemon-reload
 }
 
+_teardown_autoscale_timer() { # remove the autoscaler when an app stops autoscaling
+  local app=$1
+  [[ -f "/etc/systemd/system/homeport-$app-autoscale.timer" ]] || return 0
+  systemctl disable --now "homeport-$app-autoscale.timer" 2>/dev/null || true
+  rm -f "/etc/systemd/system/homeport-$app-autoscale.timer" \
+        "/etc/systemd/system/homeport-$app-autoscale.service"
+  systemctl daemon-reload
+}
+
+# write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
+# fragment. mode: template (N replica-port upstreams, load-balanced with
+# retry) | idle (single, keepalive off so scale-to-zero works) | plain.
+# Used by cmd_add and the autoscaler (which rewrites on every scale event).
+write_caddy() {
+  local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams="" rbase i
+  if [[ $mode == template ]]; then
+    rbase=$(replica_base "$port")
+    for (( i = 1; i <= count; i++ )); do upstreams+=" 127.0.0.1:$((rbase + i))"; done
+  else
+    upstreams=" 127.0.0.1:$port"
+  fi
+  { printf '%s {\n\tencode zstd gzip\n' "$domain"
+    case $mode in
+      template)
+        # lb_try_duration retries a request that hit a down/restarting replica
+        # on a live upstream — what makes rolling deploys/scaling zero-downtime.
+        printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tlb_try_duration 4s\n\t\tlb_try_interval 250ms\n\t\tfail_duration 10s\n\t}\n' "$upstreams" ;;
+      idle)
+        # keepalive off so Caddy doesn't hold socket-proxyd open past idle.
+        printf '\treverse_proxy%s {\n\t\ttransport http {\n\t\t\tkeepalive off\n\t\t}\n\t}\n' "$upstreams" ;;
+      *)
+        printf '\treverse_proxy%s\n' "$upstreams" ;;
+    esac
+    printf '}\n'
+  } > "$CADDY_DIR/$app.caddy"
+}
+
 prune_releases() { # keep the newest $KEEP releases, never the live one
   local app=$1 current
   current=$(readlink "$HOMEPORT_ROOT/$app/current" 2>/dev/null || true)
@@ -256,7 +299,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -265,6 +308,7 @@ cmd_add() {
   [[ $idle == - ]] && idle=""
   [[ $idle_timeout == - ]] && idle_timeout=""
   [[ $replicas == - || -z $replicas ]] && replicas=1
+  [[ $autoscale == - ]] && autoscale=""
   # No domain => internal app: bound to 127.0.0.1, reachable only from other
   # apps on the box or through `homeport tunnel`. No Caddy fragment, no TLS,
   # nothing on 80/443.
@@ -278,6 +322,24 @@ cmd_add() {
   [[ $replicas =~ ^[0-9]+$ && $replicas -ge 1 && $replicas -le 20 ]] || die "replicas must be 1-20 (got '$replicas')"
   [[ $replicas -gt 1 && -z $domain ]] && die "replicas>1 needs a domain (Caddy load-balances them)"
   [[ $replicas -gt 1 && -n $idle ]] && die "replicas and idle are mutually exclusive (idle is 0<->1, replicas is 1<->N)"
+
+  # autoscale = "min:max:target" — dynamic replica count driven by a systemd
+  # timer. Parsed here into AUTOSCALE_* used throughout cmd_add.
+  local AUTOSCALE_MIN="" AUTOSCALE_MAX="" AUTOSCALE_TARGET=""
+  if [[ -n $autoscale ]]; then
+    [[ $autoscale =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]] || die "autoscale must be min:max:target (got '$autoscale')"
+    AUTOSCALE_MIN=${BASH_REMATCH[1]} AUTOSCALE_MAX=${BASH_REMATCH[2]} AUTOSCALE_TARGET=${BASH_REMATCH[3]}
+    [[ -n $domain ]] || die "autoscale needs a domain"
+    [[ -z $idle ]] || die "autoscale and idle are mutually exclusive"
+    (( AUTOSCALE_MIN >= 1 && AUTOSCALE_MAX <= 20 && AUTOSCALE_MIN <= AUTOSCALE_MAX )) || die "autoscale needs 1<=min<=max<=20"
+    (( AUTOSCALE_TARGET >= 1 && AUTOSCALE_TARGET <= 100 )) || die "autoscale target must be 1-100"
+    # start at min unless the app already has more instances running
+    replicas=$AUTOSCALE_MIN
+    [[ -f "$HOMEPORT_ETC/$app/config" ]] && { local _r; _r=$(grep -m1 '^REPLICAS=' "$HOMEPORT_ETC/$app/config" | cut -d= -f2); [[ $_r =~ ^[0-9]+$ && $_r -ge $AUTOSCALE_MIN && $_r -le $AUTOSCALE_MAX ]] && replicas=$_r; }
+  fi
+  # template unit (per-instance) is used for fixed replicas>1 AND autoscale
+  local use_template=0
+  [[ $replicas -gt 1 || -n $autoscale ]] && use_template=1
   local user="homeport-$app" port keep=5 old_replicas=1
 
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
@@ -304,6 +366,9 @@ CPU=$cpu
 IDLE=$idle
 IDLE_TIMEOUT=$idle_timeout
 REPLICAS=$replicas
+AUTOSCALE_MIN=$AUTOSCALE_MIN
+AUTOSCALE_MAX=$AUTOSCALE_MAX
+AUTOSCALE_TARGET=$AUTOSCALE_TARGET
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -336,10 +401,10 @@ EOF
 
   # --- write the app's systemd unit(s) for its mode ---
   local caddy_upstreams=""
-  if [[ $replicas -gt 1 ]]; then
-    # Horizontal replicas: a template unit, one instance per private port,
-    # Caddy load-balances across them. Instances are named by their port so
-    # the unit uses PORT=%i with no arithmetic. Started rolling in activate.
+  if [[ $use_template -eq 1 ]]; then
+    # Template unit (fixed replicas>1 OR autoscale): one instance per private
+    # port, Caddy load-balances. Instances are named by their port so the
+    # unit uses PORT=%i with no arithmetic. Started rolling in activate.
     local rbase i p
     rbase=$(replica_base "$port")
     { echo "[Unit]"
@@ -369,6 +434,30 @@ EOF
     for (( i = replicas + 1; i <= old_replicas; i++ )); do
       systemctl disable --now "homeport-$app@$((rbase + i))" 2>/dev/null || true
     done
+    # autoscale: a systemd timer nudges the count between min and max; a fixed
+    # replica app has no timer (tear one down if the app used to autoscale).
+    if [[ -n $autoscale ]]; then
+      cat > "/etc/systemd/system/homeport-$app-autoscale.service" <<EOF
+[Unit]
+Description=homeport autoscaler: $app
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/homeportd autoscale $app
+EOF
+      cat > "/etc/systemd/system/homeport-$app-autoscale.timer" <<EOF
+[Unit]
+Description=homeport autoscaler tick: $app
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=20s
+[Install]
+WantedBy=timers.target
+EOF
+      systemctl daemon-reload
+      systemctl enable --now "homeport-$app-autoscale.timer" >/dev/null 2>&1 || true
+    else
+      _teardown_autoscale_timer "$app"
+    fi
   else
     # Single instance. Idle apps bind a private port (+1000) and are pulled
     # up by their socket-proxy; always-on apps bind the public port directly.
@@ -382,8 +471,8 @@ EOF
       idle_unit="StopWhenUnneeded=true"
       install_sec=""
     fi
-    # leaving replica mode: stop every old instance before the template goes —
-    # otherwise the processes run on as orphans.
+    # leaving replica/autoscale mode: stop every old instance before the
+    # template goes, and remove the autoscaler timer.
     if [[ $old_replicas -gt 1 ]]; then
       local orb oi
       orb=$(replica_base "$port")
@@ -391,6 +480,7 @@ EOF
         systemctl disable --now "homeport-$app@$((orb + oi))" 2>/dev/null || true
       done
     fi
+    _teardown_autoscale_timer "$app"
     rm -f "/etc/systemd/system/homeport-$app@.service"
     { echo "[Unit]"
       echo "Description=homeport app: $app"
@@ -439,29 +529,16 @@ EOF
   fi
 
   if [[ -n $domain ]]; then
-    { printf '%s {\n\tencode zstd gzip\n' "$domain"
-      if [[ $replicas -gt 1 ]]; then
-        # lb_try_duration: a request that hits a down/restarting replica is
-        # retried on another upstream instead of 502ing — this is what makes
-        # rolling deploys actually zero-downtime (fail_duration is passive
-        # and only marks an upstream down after a failure).
-        printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tlb_try_duration 4s\n\t\tlb_try_interval 250ms\n\t\tfail_duration 10s\n\t}\n' "$caddy_upstreams"
-      elif [[ -n $idle ]]; then
-        # keepalive off is what lets scale-to-zero actually reach zero:
-        # Caddy's idle keepalive connection would otherwise hold
-        # socket-proxyd open forever and --exit-idle-time never fires
-        # (found live on the first 0.6.1 box). Costs a loopback TCP
-        # handshake per request — noise for a low-traffic idle app.
-        printf '\treverse_proxy%s {\n\t\ttransport http {\n\t\t\tkeepalive off\n\t\t}\n\t}\n' "$caddy_upstreams"
-      else
-        printf '\treverse_proxy%s\n' "$caddy_upstreams"
-      fi
-      printf '}\n'
-    } > "$CADDY_DIR/$app.caddy"
+    local cmode=plain
+    [[ $use_template -eq 1 ]] && cmode=template
+    [[ -n $idle ]] && cmode=idle
+    write_caddy "$app" "$domain" "$port" "$cmode" "$replicas"
     caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
       || die "generated Caddy config failed validation"
     systemctl reload caddy
-    local rmsg=""; [[ $replicas -gt 1 ]] && rmsg=" · $replicas replicas"
+    local rmsg=""
+    [[ -n $autoscale ]] && rmsg=" · autoscale $AUTOSCALE_MIN-$AUTOSCALE_MAX @ ${AUTOSCALE_TARGET}%"
+    [[ -z $autoscale && $replicas -gt 1 ]] && rmsg=" · $replicas replicas"
     echo "app '$app' registered: https://$domain -> 127.0.0.1:$port$rmsg"
     echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
   else
@@ -473,6 +550,75 @@ EOF
     echo "app '$app' registered (internal) -> 127.0.0.1:$port"
     echo "not exposed publicly — reach it with: homeport tunnel"
   fi
+}
+
+# cmd_autoscale <app> — one autoscaler tick, run by the app's systemd timer.
+# Reads per-instance CPU% over the interval and nudges the running replica
+# count between AUTOSCALE_MIN and AUTOSCALE_MAX, with hysteresis + a cooldown
+# so it can't flap. Rewrites the Caddy upstream list on every change.
+cmd_autoscale() {
+  local app=${1:-}
+  valid_app "$app"; load_app "$app"
+  [[ -n ${AUTOSCALE_MAX:-} ]] || return 0     # not an autoscale app
+  local rbase; rbase=$(replica_base "$PORT")
+
+  # current running instance count (instances are contiguous 1..n)
+  local n=0 i
+  for (( i = 1; i <= AUTOSCALE_MAX; i++ )); do
+    systemctl is-active --quiet "homeport-$app@$((rbase + i))" || break
+    n=$i
+  done
+  (( n < 1 )) && n=${REPLICAS:-$AUTOSCALE_MIN}
+
+  # total CPU-nanoseconds consumed across the running instances
+  local cpu_now=0 v
+  for (( i = 1; i <= n; i++ )); do
+    v=$(systemctl show "homeport-$app@$((rbase + i))" --property=CPUUsageNSec --value 2>/dev/null)
+    [[ $v =~ ^[0-9]+$ ]] && cpu_now=$((cpu_now + v))
+  done
+  local now_ns; now_ns=$(date +%s%N)
+
+  # load the previous reading; first tick just records and returns (no delta)
+  local state="$HOMEPORT_ROOT/$app/.autoscale" prev_cpu=0 prev_ns=0 last_scale=0
+  if [[ -f $state ]]; then
+    # shellcheck disable=SC1090
+    source "$state"; prev_cpu=${AS_CPU:-0} prev_ns=${AS_NS:-0} last_scale=${AS_LAST_SCALE:-0}
+  fi
+  printf 'AS_CPU=%s\nAS_NS=%s\nAS_LAST_SCALE=%s\n' "$cpu_now" "$now_ns" "$last_scale" > "$state"
+  (( prev_ns == 0 || now_ns <= prev_ns )) && return 0
+
+  # per-instance CPU% = (Δcpu_ns / Δwall_ns) / n * 100
+  local dcpu=$((cpu_now - prev_cpu)) dt=$((now_ns - prev_ns))
+  (( dcpu < 0 )) && dcpu=0
+  local pct=$(( dcpu * 100 / (dt * n) ))
+
+  # cooldown: no second scale within 60s of the last one
+  (( $((now_ns / 1000000000)) - last_scale < 60 )) && return 0
+
+  local target=$n
+  if (( pct > AUTOSCALE_TARGET && n < AUTOSCALE_MAX )); then
+    target=$((n + 1))
+  elif (( pct < AUTOSCALE_TARGET / 2 && n > AUTOSCALE_MIN )); then
+    target=$((n - 1))         # scale down only well under target (hysteresis)
+  fi
+  (( target == n )) && return 0
+
+  if (( target > n )); then
+    local p=$((rbase + target))
+    systemctl enable --now "homeport-$app@$p" >/dev/null 2>&1
+    if ! wait_healthy_port "$p"; then
+      systemctl disable --now "homeport-$app@$p" 2>/dev/null || true
+      return 0                # new instance unhealthy — abort this tick
+    fi
+  else
+    systemctl disable --now "homeport-$app@$((rbase + n))" 2>/dev/null || true
+  fi
+
+  sed -i "s/^REPLICAS=.*/REPLICAS=$target/" "$HOMEPORT_ETC/$app/config"
+  write_caddy "$app" "$DOMAIN" "$PORT" template "$target"
+  systemctl reload caddy 2>/dev/null || true
+  sed -i "s/^AS_LAST_SCALE=.*/AS_LAST_SCALE=$((now_ns / 1000000000))/" "$state"
+  echo "autoscale $app: $n -> $target replicas (cpu ${pct}% / target ${AUTOSCALE_TARGET}%)"
 }
 
 restart_app() { # restart respecting scale-to-zero (uses $IDLE from load_app)
@@ -507,7 +653,7 @@ rolling_restart() { # <app> — restart replicas one at a time, health-checking
 # restart+health for a whole app, respecting its mode. Returns 0 if healthy.
 activate_and_check() {
   local app=$1
-  if [[ ${REPLICAS:-1} -gt 1 ]]; then
+  if is_template; then
     rolling_restart "$app"
   else
     restart_app "$app"
@@ -533,7 +679,7 @@ cmd_activate() {
     prune_releases "$app"
     local note=""
     [[ -n ${IDLE:-} ]] && note=" · sleeps after ${IDLE_TIMEOUT} idle"
-    [[ ${REPLICAS:-1} -gt 1 ]] && note=" · $REPLICAS replicas (rolling)"
+    is_template && note=" · $REPLICAS replicas (rolling)"
     if [[ -n ${DOMAIN:-} ]]; then
       echo "live: $release (https://$DOMAIN)$note"
     else
@@ -604,7 +750,7 @@ cmd_env() { # merge KEY=value lines from stdin into the app's env file
   rm -f "$tmp"
   echo "env updated: $added value(s) set, ${#order[@]} total"
   # restart to pick up the new env (mode-aware; idle apps reload on next wake)
-  if [[ ${REPLICAS:-1} -gt 1 ]]; then
+  if is_template; then
     # same health-gated one-at-a-time roll as deploys — a blind restart loop
     # could briefly take every instance down on a slow-booting app
     if rolling_restart "$app"; then
@@ -645,7 +791,7 @@ cmd_env_list() { # keys only — values never leave the box
 
 app_state() { # is-active for an app, whatever its mode (uses $PORT/$REPLICAS)
   local app=$1
-  if [[ ${REPLICAS:-1} -gt 1 ]]; then
+  if is_template; then
     systemctl is-active "homeport-$app@$(( $(replica_base "$PORT") + 1 ))" 2>/dev/null || true
   else
     systemctl is-active "homeport-$app" 2>/dev/null || true
@@ -665,7 +811,7 @@ status_json_one() { # caller must have run load_app for $1
   # apps are woken via the public socket, replicas expose no public port so
   # point at instance 1, plain apps listen on the public port itself.
   local app_port=$PORT
-  [[ ${REPLICAS:-1} -gt 1 ]] && app_port=$(( $(replica_base "$PORT") + 1 ))
+  is_template && app_port=$(( $(replica_base "$PORT") + 1 ))
   printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"port":%d,"app_port":%d,"state":"%s","release":"%s","releases":[' \
     "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$PORT" "$app_port" "$state" "$current"
   while IFS= read -r r; do
@@ -723,7 +869,11 @@ cmd_status() {
     echo "domain:   (internal — 127.0.0.1:$PORT, reach via homeport tunnel)"
   fi
   [[ -n ${IDLE:-} ]] && echo "mode:     scale-to-zero (sleeps after ${IDLE_TIMEOUT} idle)"
-  [[ ${REPLICAS:-1} -gt 1 ]] && echo "replicas: $REPLICAS (Caddy load-balanced, rolling deploys)"
+  if [[ -n ${AUTOSCALE_MAX:-} ]]; then
+    echo "replicas: $REPLICAS (autoscale $AUTOSCALE_MIN-$AUTOSCALE_MAX @ ${AUTOSCALE_TARGET}% cpu)"
+  elif [[ ${REPLICAS:-1} -gt 1 ]]; then
+    echo "replicas: $REPLICAS (Caddy load-balanced, rolling deploys)"
+  fi
   echo "state:    $state"
   echo "release:  ${current#releases/}"
   echo "releases: $(ls -1 "$HOMEPORT_ROOT/$app/releases" 2>/dev/null | sort -r | tr '\n' ' ')"
@@ -805,16 +955,21 @@ cmd_remove() {
   [[ ${2:-} == --yes ]] || die "this deletes the app, its releases and env — re-run as: remove $app --yes"
   # capture replica info before the config is deleted
   local replicas=1 port=0
-  [[ -f "$HOMEPORT_ETC/$app/config" ]] && { load_app "$app"; replicas=${REPLICAS:-1}; port=$PORT; }
+  local as_max=0
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] && { load_app "$app"; replicas=${REPLICAS:-1}; port=$PORT; as_max=${AUTOSCALE_MAX:-0}; }
   systemctl disable --now "homeport-$app" 2>/dev/null || true
   # scale-to-zero units, if this was an idle app
   systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
   systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
-  # replica instances, if this was a scaled app
-  if [[ $replicas -gt 1 ]]; then
+  _teardown_autoscale_timer "$app"
+  # replica/autoscale instances — tear down every slot the app could have used
+  # (autoscale may sit at 1 but still be a template instance; max bounds it)
+  local top=$replicas
+  (( as_max > top )) && top=$as_max
+  if [[ $top -gt 1 || $as_max -gt 0 ]]; then
     local rbase i
     rbase=$(replica_base "$port")
-    for (( i = 1; i <= replicas; i++ )); do
+    for (( i = 1; i <= top; i++ )); do
       systemctl disable --now "homeport-$app@$((rbase + i))" 2>/dev/null || true
     done
   fi
@@ -856,6 +1011,7 @@ main() {
   case $cmd in
     add)      cmd_add "$@" ;;
     activate) cmd_activate "$@" ;;
+    autoscale) cmd_autoscale "$@" ;;
     rollback) cmd_rollback "$@" ;;
     env)      cmd_env "$@" ;;
     env-list) cmd_env_list "$@" ;;

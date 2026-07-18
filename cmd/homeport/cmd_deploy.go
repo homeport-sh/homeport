@@ -45,8 +45,13 @@ func cmdDeploy(args []string) error {
 	}
 	idleTimeout := dashIfEmpty(cfg.IdleTimeout)
 	replicas := strconv.Itoa(cfg.Replicas)
+	// autoscale spec: "min:max:target" or "-"
+	autoscale := "-"
+	if cfg.Autoscale.on() {
+		autoscale = fmt.Sprintf("%d:%d:%d", cfg.Autoscale.Min, cfg.Autoscale.Max, cfg.Autoscale.TargetCPU)
+	}
 	step("registering %s on %s", cfg.App, cfg.Server)
-	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, domain, cfg.Health.Path, mem, cpu, idle, idleTimeout, replicas)); err != nil {
+	if err := sshRun(cfg.Server, cfg.homeportd("add", cfg.App, domain, cfg.Health.Path, mem, cpu, idle, idleTimeout, replicas, autoscale)); err != nil {
 		return fmt.Errorf("app registration failed — did you run `homeport bootstrap` on this server? (%w)", err)
 	}
 

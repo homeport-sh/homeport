@@ -147,6 +147,29 @@ capacity the box doesn't have; they mainly help single-process runtimes
 (Node/Bun) use more cores. Mutually exclusive with `idle`. `replicas: 1`
 (default) is a plain single service, unchanged.
 
+## Autoscaling (optional)
+
+```yaml
+# homeport.yaml (public apps)
+autoscale:
+  min: 1
+  max: 4
+  target_cpu: 70   # scale up above, down below; default 70
+```
+
+A systemd timer samples each replica's CPU every 20s and adjusts the running
+count between `min` and `max`, with hysteresis and a 60s cooldown so it can't
+flap. **Scales on CPU, not memory** — replicas add CPU capacity (cores), so
+CPU is the signal scaling actually relieves; adding replicas would only make
+memory pressure worse (each needs its own RAM). Memory is a *limit*
+(`resources.memory`), not a trigger.
+
+Most useful for single-process runtimes (Node/Bun — so Next/Nuxt/SvelteKit/
+TanStack binaries), which use one core per instance: idle runs `min` replicas
+(saving the rest's RAM), load bursts to `max` to use more cores. Ceiling is
+the box's cores — true capacity autoscaling (add machines) is multi-server.
+Mutually exclusive with `idle` and fixed `replicas`.
+
 ## How it works
 
 ```
