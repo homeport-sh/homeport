@@ -33,6 +33,8 @@ func main() {
 		err = cmdRollback(rest)
 	case "secrets":
 		err = cmdSecrets(rest)
+	case "apps":
+		err = cmdApps(rest)
 	case "status":
 		err = cmdStatus(rest)
 	case "stats":
@@ -90,6 +92,7 @@ everyday:
   homeport secrets push [file]     upload a whole .env file
   homeport secrets list            list env keys (values never leave the server)
   homeport status [--json]         app state, live release, available releases
+  homeport apps [server] [--json]  every app on a server (no project dir needed)
   homeport stats                live resource usage (memory, cpu, tasks, disk)
   homeport logs [-f] [-n N]        app logs (journald)
   homeport tunnel [localPort]   forward a local port to the app (internal apps, or private access)
