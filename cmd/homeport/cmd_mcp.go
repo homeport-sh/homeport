@@ -130,6 +130,19 @@ func cmdMCP(args []string) error {
 		return selfExec(ctx, 60*time.Second, cmdArgs...)
 	})
 
+	type secretsRmArgs struct {
+		Keys []string `json:"keys" jsonschema:"env keys to remove, e.g. [\"OLD_FLAG\"]"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "secrets_rm",
+		Description: "Remove env keys from the server (restarts the app if running).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args secretsRmArgs) (*mcp.CallToolResult, any, error) {
+		if len(args.Keys) == 0 {
+			return errResult("no keys given"), nil, nil
+		}
+		return selfExec(ctx, 60*time.Second, append([]string{"secrets", "rm"}, args.Keys...)...)
+	})
+
 	// EOF on stdin is the normal client-initiated shutdown, not a failure.
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil && !errors.Is(err, io.EOF) {
 		return err

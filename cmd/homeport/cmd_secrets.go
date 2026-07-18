@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -36,38 +37,75 @@ func cmdSecrets(args []string) error {
 		// values travel over ssh stdin — never argv, never shell history
 		return sshRunIn(cfg.Server, cfg.homeportd("env", cfg.App), strings.Join(pairs, "\n")+"\n")
 
-	case "push":
-		file := ""
-		if len(args) > 1 {
-			file = args[1]
-		} else {
-			for _, f := range []string{".env.production", ".env"} {
-				if _, err := os.Stat(f); err == nil {
-					file = f
-					break
-				}
-			}
-		}
-		if file == "" {
-			return fmt.Errorf("usage: homeport secrets push [env-file]   (no .env.production or .env found)")
-		}
-		data, err := os.ReadFile(file)
+	case "push", "sync":
+		data, src, err := readEnvArg(args)
 		if err != nil {
 			return err
 		}
-		step("pushing %s to %s", file, cfg.App)
+		verb := "env" // merge
+		if args[0] == "sync" {
+			verb = "env-sync" // declarative full replace
+		}
+		step("%sing %s to %s", args[0], src, cfg.App)
 		// register first so secrets can be seeded before the first deploy
 		if err := cfg.register(); err != nil {
 			return fmt.Errorf("could not register %s: %w", cfg.App, err)
 		}
-		return sshRunIn(cfg.Server, cfg.homeportd("env", cfg.App), string(data))
+		return sshRunIn(cfg.Server, cfg.homeportd(verb, cfg.App), data)
+
+	case "rm", "unset":
+		keys := args[1:]
+		if len(keys) == 0 {
+			return fmt.Errorf("usage: homeport secrets rm KEY [KEY ...]")
+		}
+		for _, k := range keys {
+			if !keyRe.MatchString(k) {
+				return fmt.Errorf("invalid key %q", k)
+			}
+		}
+		return sshRun(cfg.Server, cfg.homeportd(append([]string{"env-rm", cfg.App}, keys...)...))
 
 	case "list":
 		return sshRun(cfg.Server, cfg.homeportd("env-list", cfg.App))
 
 	default:
-		return fmt.Errorf("usage: homeport secrets <set KEY=value ... | push [env-file] | list>")
+		return fmt.Errorf("usage: homeport secrets <set K=V… | rm KEY… | push [file|-] | sync [file|-] | list>")
 	}
+}
+
+var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// readEnvArg resolves the env source for push/sync: "-" (or piped stdin) reads
+// stdin; a path reads that file; otherwise it auto-detects .env.production/.env.
+// Returns the content and a label for messages.
+func readEnvArg(args []string) (data, src string, err error) {
+	arg := ""
+	if len(args) > 1 {
+		arg = args[1]
+	}
+	if arg == "-" {
+		b, e := io.ReadAll(os.Stdin)
+		return string(b), "stdin", e
+	}
+	file := arg
+	if file == "" {
+		// no arg: piped stdin if present, else auto-detect a dotenv file
+		if fi, _ := os.Stdin.Stat(); fi != nil && fi.Mode()&os.ModeCharDevice == 0 {
+			b, e := io.ReadAll(os.Stdin)
+			return string(b), "stdin", e
+		}
+		for _, f := range []string{".env.production", ".env"} {
+			if _, e := os.Stat(f); e == nil {
+				file = f
+				break
+			}
+		}
+		if file == "" {
+			return "", "", fmt.Errorf("no env file given and no .env.production/.env found (use - for stdin)")
+		}
+	}
+	b, e := os.ReadFile(file)
+	return string(b), file, e
 }
 
 func cmdStatus(args []string) error {

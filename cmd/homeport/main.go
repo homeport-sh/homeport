@@ -88,8 +88,10 @@ setup (once per project):
 everyday:
   homeport deploy [--no-build]     build → upload → health-checked activate (auto-reverts)
   homeport rollback [release]      instant rollback to the previous (or given) release
-  homeport secrets set K=V ...     set env values (sent over ssh stdin, never argv)
-  homeport secrets push [file]     upload a whole .env file
+  homeport secrets set K=V ...     set/update env values (merge)
+  homeport secrets rm KEY ...      remove env values
+  homeport secrets push [file|-]   merge a .env file or stdin (CI-friendly)
+  homeport secrets sync [file|-]   declarative: server env = exactly this file/stdin
   homeport secrets list            list env keys (values never leave the server)
   homeport status [--json]         app state, live release, available releases
   homeport apps [server] [--json]  every app on a server (no project dir needed)

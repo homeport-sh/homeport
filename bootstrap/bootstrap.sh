@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.7.1
+HOMEPORTD_VERSION=0.8.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -749,19 +749,72 @@ cmd_env() { # merge KEY=value lines from stdin into the app's env file
   install -o root -g "homeport-$app" -m 640 "$tmp" "$file"
   rm -f "$tmp"
   echo "env updated: $added value(s) set, ${#order[@]} total"
-  # restart to pick up the new env (mode-aware; idle apps reload on next wake)
+  _env_restart "$app"
+}
+
+_env_restart() { # restart to pick up new env (mode-aware; idle reloads on wake)
+  local app=$1
   if is_template; then
-    # same health-gated one-at-a-time roll as deploys — a blind restart loop
-    # could briefly take every instance down on a slow-booting app
-    if rolling_restart "$app"; then
-      echo "rolled $REPLICAS replicas with new env"
-    else
-      die "replica failed health check after env change — check logs"
-    fi
+    # health-gated one-at-a-time roll — a blind restart loop could briefly
+    # take every instance down on a slow-booting app
+    rolling_restart "$app" && echo "rolled $REPLICAS replicas with new env" \
+      || die "replica failed health check after env change — check logs"
   elif systemctl is-active --quiet "homeport-$app"; then
     systemctl restart "homeport-$app"
     echo "restarted homeport-$app"
   fi
+}
+
+cmd_env_sync() { # DECLARATIVE: replace the env file entirely with stdin
+  local app=${1:-}
+  valid_app "$app"; load_app "$app"
+  local file="$HOMEPORT_ROOT/$app/shared/env" line key
+  local -A newvars=(); local -a order=()
+  while IFS= read -r line; do
+    [[ -z $line || $line == \#* ]] && continue
+    [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "invalid env line (expected KEY=value): '${line%%=*}'"
+    key=${line%%=*}
+    [[ -n ${newvars[$key]+x} ]] || order+=("$key")
+    newvars[$key]=${line#*=}
+  done
+  # report keys being dropped (present before, absent now) — never silent
+  local -a removed=(); local k
+  if [[ -f $file ]]; then
+    while IFS= read -r line; do
+      [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+      k=${line%%=*}; [[ -n ${newvars[$k]+x} ]] || removed+=("$k")
+    done < "$file"
+  fi
+  local tmp; tmp=$(mktemp)
+  for key in "${order[@]}"; do printf '%s=%s\n' "$key" "${newvars[$key]}" >> "$tmp"; done
+  install -o root -g "homeport-$app" -m 640 "$tmp" "$file"; rm -f "$tmp"
+  echo "env synced: ${#order[@]} value(s) (full replace)"
+  (( ${#removed[@]} )) && echo "dropped: ${removed[*]}"
+  _env_restart "$app"
+}
+
+cmd_env_rm() { # remove specific keys (given as args)
+  local app=${1:-}; shift || true
+  valid_app "$app"; load_app "$app"
+  local file="$HOMEPORT_ROOT/$app/shared/env" line k
+  [[ -f $file ]] || { echo "(no env set)"; return; }
+  (( $# )) || die "no keys given to remove"
+  local -A drop=()
+  for k in "$@"; do
+    [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid key: '$k'"
+    drop[$k]=1
+  done
+  local tmp removed=0; tmp=$(mktemp)
+  while IFS= read -r line; do
+    if [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && [[ -n ${drop[${line%%=*}]+x} ]]; then
+      removed=$((removed + 1))
+    else
+      printf '%s\n' "$line" >> "$tmp"
+    fi
+  done < "$file"
+  install -o root -g "homeport-$app" -m 640 "$tmp" "$file"; rm -f "$tmp"
+  echo "removed $removed key(s)"
+  (( removed > 0 )) && _env_restart "$app"
 }
 
 cmd_env_list() { # keys only — values never leave the box
@@ -993,6 +1046,8 @@ homeportd — root-side homeport helper (run via sudo)
   activate <app> <release>           flip symlink, restart, health-check, auto-revert
   rollback <app> [release]           activate the previous (or a given) release
   env <app>                          merge KEY=value lines from stdin into the app env
+  env-sync <app>                     replace the app env entirely with stdin (declarative)
+  env-rm <app> <key>...              remove keys from the app env
   env-list <app> [--json]            list env keys (values never printed)
   status [app] [--json]              show one app, or all
   logs <app> [-f] [-n N]             app journal
@@ -1014,6 +1069,8 @@ main() {
     autoscale) cmd_autoscale "$@" ;;
     rollback) cmd_rollback "$@" ;;
     env)      cmd_env "$@" ;;
+    env-sync) cmd_env_sync "$@" ;;
+    env-rm)   cmd_env_rm "$@" ;;
     env-list) cmd_env_list "$@" ;;
     status)   cmd_status "$@" ;;
     logs)     cmd_logs "$@" ;;
