@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,6 +139,39 @@ func loadConfig() (*config, error) {
 // argument that reaches here is charset-validated, so plain joining is safe.
 func (c *config) homeportd(args ...string) string {
 	return "sudo /usr/local/bin/homeportd " + strings.Join(args, " ")
+}
+
+// addArgs builds the positional `homeportd add` command line from the config.
+// Shared by deploy and secrets so registration is identical either way. "-"
+// is the unset placeholder; add is idempotent, so calling it repeatedly is
+// safe (it rewrites units/config without restarting a running app).
+func (c *config) addArgs() []string {
+	idle := "-"
+	if c.Idle {
+		idle = "true"
+	}
+	autoscale := "-"
+	if c.Autoscale.on() {
+		autoscale = fmt.Sprintf("%d:%d:%d", c.Autoscale.Min, c.Autoscale.Max, c.Autoscale.TargetCPU)
+	}
+	return []string{
+		"add", c.App,
+		dashIfEmpty(c.Domain),
+		c.Health.Path,
+		dashIfEmpty(c.Resources.Memory),
+		dashIfEmpty(c.Resources.CPU),
+		idle,
+		dashIfEmpty(c.IdleTimeout),
+		strconv.Itoa(c.Replicas),
+		autoscale,
+	}
+}
+
+// register ensures the app exists on the server (idempotent). Lets `secrets
+// push` seed env before the first deploy — the app must be registered for its
+// env file to exist.
+func (c *config) register() error {
+	return sshRun(c.Server, c.homeportd(c.addArgs()...))
 }
 
 func (c *config) host() string {

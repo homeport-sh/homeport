@@ -29,6 +29,10 @@ func cmdSecrets(args []string) error {
 				return fmt.Errorf("expected KEY=value, got %q", p)
 			}
 		}
+		// register first so secrets can be seeded before the first deploy
+		if err := cfg.register(); err != nil {
+			return fmt.Errorf("could not register %s: %w", cfg.App, err)
+		}
 		// values travel over ssh stdin — never argv, never shell history
 		return sshRunIn(cfg.Server, cfg.homeportd("env", cfg.App), strings.Join(pairs, "\n")+"\n")
 
@@ -52,6 +56,10 @@ func cmdSecrets(args []string) error {
 			return err
 		}
 		step("pushing %s to %s", file, cfg.App)
+		// register first so secrets can be seeded before the first deploy
+		if err := cfg.register(); err != nil {
+			return fmt.Errorf("could not register %s: %w", cfg.App, err)
+		}
 		return sshRunIn(cfg.Server, cfg.homeportd("env", cfg.App), string(data))
 
 	case "list":
