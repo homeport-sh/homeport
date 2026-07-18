@@ -170,6 +170,51 @@ TanStack binaries), which use one core per instance: idle runs `min` replicas
 the box's cores — true capacity autoscaling (add machines) is multi-server.
 Mutually exclusive with `idle` and fixed `replicas`.
 
+## Databases
+
+homeport is **app-tier only** — it deploys your binary; the database lives
+elsewhere. That's the model: the box is cattle, state is not on it. You
+connect via a **connection string in secrets**, which is the universal
+interface to *every* provider:
+
+```bash
+homeport secrets set DATABASE_URL="postgres://user:pass@host/db?sslmode=require"
+```
+
+That one line works with **Neon, Supabase, PlanetScale, Turso, DigitalOcean
+managed DB, RDS — anything** — with no provider-specific setup. homeport
+intentionally has **no per-provider integration and no backup feature**:
+those balloon into per-vendor / per-engine surface for marginal value, and
+backups are better handled by the provider or a purpose-built tool. The
+connection-string-as-secret *is* the integration.
+
+**Practical guidance:**
+
+- **Match region.** A Falkenstein app hitting a US database pays ~100 ms per
+  query. Put the DB in the same region as the box.
+- **Allowlist the box IP** in the provider's firewall / trusted sources, and
+  keep `sslmode=require`.
+- **On DigitalOcean:** if you use a DO managed DB, run homeport on a DO
+  droplet in the same VPC — then the app can reach the DB's **private**
+  endpoint (a different cloud can't), low-latency and unexposed.
+- **Migrations:** run them from CI (or a build step) with the same
+  `DATABASE_URL`, before `homeport deploy` promotes the release.
+
+**Cheapest options:**
+
+- **SQLite in `$STATE_DIR`** — $0, no extra service, genuinely production-fit
+  for a single box. Back it up continuously with
+  [Litestream](https://litestream.io) to Cloudflare R2 / Backblaze B2
+  (pennies). Caveat: single-writer, and the DB is state on the box, so it's
+  not for multi-box/HA.
+- **A free-tier serverless DB** — Turso (libSQL) or Neon (Postgres) start at
+  $0, keep the DB off your box (backups + PITR handled), and scale later.
+
+**Don't** `apt install postgresql` on the app box — that puts a stateful
+service next to your binaries (backups, tuning, OOM contention) and breaks
+the binaries-only model. If you want self-hosted Postgres, give it its own
+box.
+
 ## How it works
 
 ```
@@ -277,6 +322,59 @@ If your app hits one of those, it isn't a good fit for homeport today — a tool
 that reliably does one thing (binaries) beats one that half-supports
 everything. Pick a managed platform with a Node runtime for that app, or
 refactor the offending dependency out.
+
+## Deploying a third-party binary (Lightpanda, MinIO, …)
+
+homeport deploys **any** single static binary — including ones you didn't
+compile. Point `build.command` at a download, and use `run:` for the launch
+flags (for binaries that take `--host/--port` flags instead of the `$PORT`
+env convention). Example — Lightpanda (a lightweight headless browser) as an
+internal backend your app talks to over loopback:
+
+```yaml
+app: lightpanda
+server: deploy@1.2.3.4
+internal: true                          # a backend service, not public
+run: serve --host $HOST --port $PORT    # $PORT/$HOST substituted at launch
+build:
+  command: >
+    curl -fsSL https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux
+    -o server && chmod +x server
+  artifact: server
+health:
+  path: /json/version
+```
+
+`homeport deploy` uploads the binary and systemd runs it as
+`server serve --host 127.0.0.1 --port <port>`. Your app connects on
+`http://127.0.0.1:<port>` (loopback, private, zero network latency) — a
+headless browser for Puppeteer without a Chromium pod, idling at a couple MB
+until it's working.
+
+## Apps with external files or native addons
+
+The single-binary model wants **everything in the binary**. Two common cases:
+
+- **A runtime data file** (a GeoIP `.mmdb`, a template pack, …) — embed it
+  with Go's `//go:embed` (or your language's equivalent) so it ships inside
+  the binary. Download it in `build.command`, embed it at compile time; no
+  external file at runtime. This is a strict improvement — one binary instead
+  of binary + sidecar data dir.
+- **A native addon** — `sharp`, `better-sqlite3`, `bcrypt`, anything with a
+  compiled `.node` / libvips / native `.so`. These **don't bundle** into a
+  compiled binary. Options, best first: **(1)** offload the work to a managed
+  service (image processing → Cloudflare Images / imgix; your app just makes
+  URLs); **(2)** swap for a pure-Go/Rust library that compiles in (basic image
+  ops → `disintegration/imaging`); **(3)** if you truly need the native lib's
+  performance, that specific service isn't a homeport fit — run it elsewhere.
+  Don't fight `bun --compile` to embed libvips; it's a losing battle.
+
+It's your box, so you *can* SSH in and `apt install` a runtime or system
+library by hand — homeport doesn't stop you. But treat that as a last resort,
+not a workflow: the dependency becomes un-captured state homeport neither
+manages nor reproduces (rebuild the box and it's gone), and you've traded
+away the nothing-installed model that's the whole point. If you find yourself
+doing it, the app probably belongs on a different platform.
 
 ## Building a release binary
 

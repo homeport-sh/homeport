@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.1
+HOMEPORTD_VERSION=0.8.2
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -612,13 +612,21 @@ cmd_autoscale() {
     # shellcheck disable=SC1090
     source "$state"; prev_cpu=${AS_CPU:-0} prev_ns=${AS_NS:-0} last_scale=${AS_LAST_SCALE:-0}
   fi
-  printf 'AS_CPU=%s\nAS_NS=%s\nAS_LAST_SCALE=%s\n' "$cpu_now" "$now_ns" "$last_scale" > "$state"
-  (( prev_ns == 0 || now_ns <= prev_ns )) && return 0
+  local nowsec=$((now_ns / 1000000000))
+  if (( prev_ns == 0 || now_ns <= prev_ns )); then
+    # first tick — record baseline, no measurable %% yet
+    printf 'AS_CPU=%s\nAS_NS=%s\nAS_LAST_SCALE=%s\nAS_CPU_PCT=\nAS_TICK=%s\n' \
+      "$cpu_now" "$now_ns" "$last_scale" "$nowsec" > "$state"
+    return 0
+  fi
 
   # per-instance CPU% = (Δcpu_ns / Δwall_ns) / n * 100
   local dcpu=$((cpu_now - prev_cpu)) dt=$((now_ns - prev_ns))
   (( dcpu < 0 )) && dcpu=0
   local pct=$(( dcpu * 100 / (dt * n) ))
+  # record the reading so `status` can show current-vs-target (like HPA)
+  printf 'AS_CPU=%s\nAS_NS=%s\nAS_LAST_SCALE=%s\nAS_CPU_PCT=%s\nAS_TICK=%s\n' \
+    "$cpu_now" "$now_ns" "$last_scale" "$pct" "$nowsec" > "$state"
 
   # cooldown: no second scale within 60s of the last one
   (( $((now_ns / 1000000000)) - last_scale < 60 )) && return 0
@@ -893,8 +901,12 @@ status_json_one() { # caller must have run load_app for $1
   # point at instance 1, plain apps listen on the public port itself.
   local app_port=$PORT
   is_template && app_port=$(( $(replica_base "$PORT") + 1 ))
-  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"port":%d,"app_port":%d,"state":"%s","release":"%s","releases":[' \
-    "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$PORT" "$app_port" "$state" "$current"
+  # autoscale telemetry: current per-instance cpu% (empty if not autoscaling)
+  local as_min=${AUTOSCALE_MIN:-0} as_max=${AUTOSCALE_MAX:-0} as_target=${AUTOSCALE_TARGET:-0} as_cpu=""
+  [[ -n ${AUTOSCALE_MAX:-} && -f "$HOMEPORT_ROOT/$app/.autoscale" ]] &&
+    as_cpu=$(grep -m1 '^AS_CPU_PCT=' "$HOMEPORT_ROOT/$app/.autoscale" | cut -d= -f2)
+  printf '{"app":"%s","domain":"%s","internal":%s,"idle":%s,"replicas":%d,"autoscale_min":%d,"autoscale_max":%d,"autoscale_target":%d,"cpu_pct":"%s","port":%d,"app_port":%d,"state":"%s","release":"%s","releases":[' \
+    "$app" "${DOMAIN:-}" "$internal" "$idle" "${REPLICAS:-1}" "$as_min" "$as_max" "$as_target" "${as_cpu}" "$PORT" "$app_port" "$state" "$current"
   while IFS= read -r r; do
     [[ -n $r ]] || continue
     printf '%s"%s"' "$sep" "$r"
@@ -951,7 +963,12 @@ cmd_status() {
   fi
   [[ -n ${IDLE:-} ]] && echo "mode:     scale-to-zero (sleeps after ${IDLE_TIMEOUT} idle)"
   if [[ -n ${AUTOSCALE_MAX:-} ]]; then
-    echo "replicas: $REPLICAS (autoscale $AUTOSCALE_MIN-$AUTOSCALE_MAX @ ${AUTOSCALE_TARGET}% cpu)"
+    # like `kubectl get hpa`: current cpu% / target, replicas, min-max
+    local aspct=""
+    [[ -f "$HOMEPORT_ROOT/$app/.autoscale" ]] &&
+      aspct=$(grep -m1 '^AS_CPU_PCT=' "$HOMEPORT_ROOT/$app/.autoscale" | cut -d= -f2)
+    echo "replicas: $REPLICAS  (autoscale ${AUTOSCALE_MIN}-${AUTOSCALE_MAX})"
+    echo "cpu:      ${aspct:-–}% / ${AUTOSCALE_TARGET}% target"
   elif [[ ${REPLICAS:-1} -gt 1 ]]; then
     echo "replicas: $REPLICAS (Caddy load-balanced, rolling deploys)"
   fi
