@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.6
+HOMEPORTD_VERSION=0.8.8
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -367,6 +367,19 @@ write_caddy() {
   } > "$CADDY_DIR/$app.caddy"
 }
 
+# write_caddy_internal <app> <port> <count> — a load-balanced INTERNAL service:
+# Caddy listens on loopback :port and balances the app's replica instances, so
+# other apps on the box keep using 127.0.0.1:<port> while N instances serve
+# behind it. No TLS, no public domain, no encode (it's all loopback).
+write_caddy_internal() {
+  local app=$1 port=$2 count=$3 upstreams
+  upstreams=$(app_upstreams "$port" template "$count")
+  { printf 'http://127.0.0.1:%s {\n' "$port"
+    emit_reverse_proxy $'\t' template "$upstreams"
+    printf '}\n'
+  } > "$CADDY_DIR/$app.caddy"
+}
+
 # gateway_slug <domain> — filesystem-safe token for a shared-host fragment.
 gateway_slug() { echo "$1" | tr -c 'a-zA-Z0-9' '-'; }
 
@@ -493,16 +506,15 @@ cmd_add() {
   [[ -z $idle_timeout || $idle_timeout =~ ^[0-9]+[smh]$ ]] || die "invalid idle_timeout: '$idle_timeout' (e.g. 300s, 5m)"
   [[ -n $idle ]] && idle_timeout=${idle_timeout:-300s}
   [[ $replicas =~ ^[0-9]+$ && $replicas -ge 1 && $replicas -le 20 ]] || die "replicas must be 1-20 (got '$replicas')"
-  [[ $replicas -gt 1 && -z $domain ]] && die "replicas>1 needs a domain (Caddy load-balances them)"
   [[ $replicas -gt 1 && -n $idle ]] && die "replicas and idle are mutually exclusive (idle is 0<->1, replicas is 1<->N)"
 
   # autoscale = "min:max:target" — dynamic replica count driven by a systemd
   # timer. Parsed here into AUTOSCALE_* used throughout cmd_add.
-  local AUTOSCALE_MIN="" AUTOSCALE_MAX="" AUTOSCALE_TARGET=""
+  local AUTOSCALE_MIN="" AUTOSCALE_MAX="" AUTOSCALE_TARGET="" as_min="" as_max="" as_target=""
   if [[ -n $autoscale ]]; then
     [[ $autoscale =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]] || die "autoscale must be min:max:target (got '$autoscale')"
     AUTOSCALE_MIN=${BASH_REMATCH[1]} AUTOSCALE_MAX=${BASH_REMATCH[2]} AUTOSCALE_TARGET=${BASH_REMATCH[3]}
-    [[ -n $domain ]] || die "autoscale needs a domain"
+    as_min=$AUTOSCALE_MIN as_max=$AUTOSCALE_MAX as_target=$AUTOSCALE_TARGET
     [[ -z $idle ]] || die "autoscale and idle are mutually exclusive"
     (( AUTOSCALE_MIN >= 1 && AUTOSCALE_MAX <= 20 && AUTOSCALE_MIN <= AUTOSCALE_MAX )) || die "autoscale needs 1<=min<=max<=20"
     (( AUTOSCALE_TARGET >= 1 && AUTOSCALE_TARGET <= 100 )) || die "autoscale target must be 1-100"
@@ -522,9 +534,11 @@ cmd_add() {
   else
     port=$(next_port)
   fi
-  # load_app (above) may have sourced an old SANDBOX from the config; the value
-  # for THIS add is the freshly-parsed arg. Shadow it locally for the unit body.
+  # load_app (above) may have sourced the OLD config over freshly-parsed values
+  # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
+  # the values for THIS add so they get written and take effect.
   local SANDBOX=$sandbox
+  AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
   # from colliding (public 8100.., internal 9100..).
@@ -711,18 +725,23 @@ EOF
   fi
 
   # --- Caddy routing ---
+  local wrote_caddy=0
   if [[ -n $domain && -n $path ]]; then
     # path-mounted: contributes a handle_path to the shared host's gateway
     # block instead of owning a whole-host site block.
     rm -f "$CADDY_DIR/$app.caddy"
-    write_gateway "$domain"
+    write_gateway "$domain"; wrote_caddy=1
   elif [[ -n $domain ]]; then
     local cmode=plain
     [[ $use_template -eq 1 ]] && cmode=template
     [[ -n $idle ]] && cmode=idle
-    write_caddy "$app" "$domain" "$port" "$cmode" "$replicas"
+    write_caddy "$app" "$domain" "$port" "$cmode" "$replicas"; wrote_caddy=1
+  elif [[ $use_template -eq 1 ]]; then
+    # internal + replicas/autoscale: Caddy load-balances on loopback :port so
+    # consumers keep using 127.0.0.1:<port> while N instances serve behind it.
+    write_caddy_internal "$app" "$port" "$replicas"; wrote_caddy=1
   else
-    # Internal app: drop any Caddy fragment a previous public deploy left.
+    # single internal instance binds :port directly — no Caddy fragment.
     rm -f "$CADDY_DIR/$app.caddy"
   fi
 
@@ -731,21 +750,28 @@ EOF
   # gateway to drop the stale prefix. Must precede validation, or a leftover
   # gateway block could collide with a new whole-host block for the same domain.
   if [[ -n $old_path && ( $old_domain != "$domain" || $path != "$old_path" ) ]]; then
-    write_gateway "$old_domain"
+    write_gateway "$old_domain"; wrote_caddy=1
   fi
 
-  if [[ -n $domain ]]; then
+  if [[ $wrote_caddy -eq 1 ]]; then
     caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
       || die "generated Caddy config failed validation"
     systemctl reload caddy
-    local rmsg=""
-    [[ -n $autoscale ]] && rmsg=" · autoscale $AUTOSCALE_MIN-$AUTOSCALE_MAX @ ${AUTOSCALE_TARGET}%"
-    [[ -z $autoscale && $replicas -gt 1 ]] && rmsg=" · $replicas replicas"
+  elif [[ -n $old_domain ]]; then
+    # tore down a public/gateway fragment on the way to a plain internal app
+    systemctl reload caddy 2>/dev/null || true
+  fi
+
+  local rmsg=""
+  [[ -n $autoscale ]] && rmsg=" · autoscale $AUTOSCALE_MIN-$AUTOSCALE_MAX @ ${AUTOSCALE_TARGET}%"
+  [[ -z $autoscale && $replicas -gt 1 ]] && rmsg=" · $replicas replicas"
+  if [[ -n $domain ]]; then
     echo "app '$app' registered: https://$domain$path -> 127.0.0.1:$port$rmsg"
     echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
+  elif [[ $use_template -eq 1 ]]; then
+    echo "app '$app' registered (internal, load-balanced) -> 127.0.0.1:$port$rmsg"
+    echo "reach it from other apps at 127.0.0.1:$port, or with: homeport tunnel"
   else
-    # reload only if we just tore down a public/gateway fragment
-    [[ -n $old_domain ]] && systemctl reload caddy 2>/dev/null || true
     echo "app '$app' registered (internal) -> 127.0.0.1:$port"
     echo "not exposed publicly — reach it with: homeport tunnel"
   fi
@@ -823,11 +849,14 @@ cmd_autoscale() {
 
   sed -i "s/^REPLICAS=.*/REPLICAS=$target/" "$HOMEPORT_ETC/$app/config"
   # rewrite this app's upstreams at the new replica count — a path-mounted app
-  # lives in its host's gateway block, a normal one in its own site block.
+  # lives in its host's gateway block, a public one in its own site block, an
+  # internal one in a loopback load-balancer block.
   if [[ -n ${PATH_PREFIX:-} ]]; then
     write_gateway "$DOMAIN"
-  else
+  elif [[ -n ${DOMAIN:-} ]]; then
     write_caddy "$app" "$DOMAIN" "$PORT" template "$target"
+  else
+    write_caddy_internal "$app" "$PORT" "$target"
   fi
   systemctl reload caddy 2>/dev/null || true
   sed -i "s/^AS_LAST_SCALE=.*/AS_LAST_SCALE=$((now_ns / 1000000000))/" "$state"
@@ -1122,11 +1151,12 @@ status_json_one() { # caller must have run load_app for $1
   local internal=false idle=false
   [[ -z ${DOMAIN:-} ]] && internal=true
   [[ -n ${IDLE:-} ]] && idle=true
-  # app_port = a port that reaches the app directly (tunnel target): idle
-  # apps are woken via the public socket, replicas expose no public port so
-  # point at instance 1, plain apps listen on the public port itself.
+  # app_port = a port that reaches the app directly (tunnel target): idle apps
+  # are woken via the public socket; PUBLIC replicas expose no bound public port
+  # so point at instance 1; internal load-balanced apps DO bind :PORT (Caddy on
+  # loopback) so keep it; plain apps listen on the public port themselves.
   local app_port=$PORT
-  is_template && app_port=$(( $(replica_base "$PORT") + 1 ))
+  is_template && [[ -n ${DOMAIN:-} ]] && app_port=$(( $(replica_base "$PORT") + 1 ))
   # autoscale telemetry: current per-instance cpu% (empty if not autoscaling)
   local as_min=${AUTOSCALE_MIN:-0} as_max=${AUTOSCALE_MAX:-0} as_target=${AUTOSCALE_TARGET:-0} as_cpu=""
   [[ -n ${AUTOSCALE_MAX:-} && -f "$HOMEPORT_ROOT/$app/.autoscale" ]] &&

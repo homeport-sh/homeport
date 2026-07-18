@@ -312,9 +312,11 @@ health:
 # idle: true
 # idle_timeout: 5m
 
-# Optional horizontal replicas (public apps): N instances load-balanced by
-# Caddy, with rolling zero-downtime deploys. Sized to the box's cores —
-# more replicas don't add capacity a single box doesn't have.
+# Optional horizontal replicas: N instances load-balanced by Caddy, with
+# rolling zero-downtime deploys. Works for public apps AND internal ones
+# (an internal service is balanced on loopback; consumers keep using its
+# 127.0.0.1:<port>). Sized to the box's cores — more replicas don't add
+# capacity a single box doesn't have.
 # replicas: 3
 `, app, server, domain, indentComment(det.note), det.build, det.artifact)
 

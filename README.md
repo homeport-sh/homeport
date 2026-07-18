@@ -180,7 +180,7 @@ it never idles out anyway, and you'd just add a proxy hop. Always-on apps
 ## Replicas & rolling deploys (optional)
 
 ```yaml
-# homeport.yaml (public apps only)
+# homeport.yaml
 replicas: 3
 ```
 
@@ -189,10 +189,17 @@ Runs N instances of the app (systemd template units), load-balanced by Caddy
 become **rolling and zero-downtime**: instances restart one at a time,
 health-checked, while the others keep serving.
 
+Works for **public and internal apps alike**. A public app is balanced behind
+its domain; an **internal** app is balanced on **loopback** — Caddy listens on
+`127.0.0.1:<port>` and spreads across the instances, so other apps on the box
+keep calling `127.0.0.1:<port>` exactly as before but now get HA + more cores.
+(`homeport tunnel` still reaches it, and hits the load balancer.)
+
 Size replicas to the box's cores — on a single VPS, more replicas don't add
 capacity the box doesn't have; they mainly help single-process runtimes
 (Node/Bun) use more cores. Mutually exclusive with `idle`. `replicas: 1`
-(default) is a plain single service, unchanged.
+(default) is a plain single service, unchanged. Autoscaling (below) also works
+for internal apps.
 
 ## Autoscaling (optional)
 
