@@ -302,6 +302,12 @@ health:
 # back — e.g. a Chromium-based browser like Lightpanda.
 # sandbox: relaxed
 
+# Deploy strategy for a single-instance PUBLIC app. Default 'blue-green' is
+# zero-downtime (new release proven on a private port, then traffic flips).
+# Use 'recreate' for a SINGLETON that can't run two instances at once (holds an
+# exclusive lock, a singleton scheduler, etc.) — it restarts in place instead.
+# strategy: recreate
+
 # Optional cgroup limits (systemd — the same kernel mechanism as docker).
 # resources:
 #   memory: 512M   # hard cap; throttled at 90%%, OOM-killed at 100%%

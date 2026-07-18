@@ -198,8 +198,34 @@ keep calling `127.0.0.1:<port>` exactly as before but now get HA + more cores.
 Size replicas to the box's cores — on a single VPS, more replicas don't add
 capacity the box doesn't have; they mainly help single-process runtimes
 (Node/Bun) use more cores. Mutually exclusive with `idle`. `replicas: 1`
-(default) is a plain single service, unchanged. Autoscaling (below) also works
-for internal apps.
+(default) is a plain single service, activated **blue/green** (next section).
+Autoscaling (below) also works for internal apps.
+
+## Zero-downtime activation (blue/green)
+
+A single-instance **public** app deploys **blue/green by default** — no config
+needed. On `homeport deploy` the new release starts on a private port while the
+old one keeps serving; once the new one passes its health check, Caddy flips to
+it, the old instance is retired, and traffic never drops. If the new release is
+unhealthy the flip never happens — the old one keeps serving and the deploy
+reverts, so a bad build is invisible to users (verified: 0/400 requests dropped
+across a live flip).
+
+This means two instances of the app **coexist for a few seconds** during each
+deploy. That's fine for stateless web apps, but a **singleton** — one that holds
+an exclusive lock, or is a single scheduler that must never double-run — can't
+tolerate it. Opt such an app out:
+
+```yaml
+strategy: recreate   # restart in place instead (brief downtime, never 2 at once)
+```
+
+Scope: blue/green is the default for single-instance **public** apps. Multi
+-instance apps (`replicas`/autoscale) already deploy **rolling** and zero
+-downtime; **internal** and **path-mounted** single-instance apps restart in
+place (give them `replicas: 2` for zero-downtime); **idle** apps use socket
+activation. `strategy: recreate` forces in-place restart anywhere it would
+otherwise be blue/green.
 
 ## Autoscaling (optional)
 

@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.8
+HOMEPORTD_VERSION=0.8.9
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -227,6 +227,26 @@ replica_base() { echo $((10000 + ($1 - BASE_PORT) * 20)); }
 # have run load_app. This is what most runtime commands branch on, not a bare
 # REPLICAS>1, because an autoscale app at min=1 is still a template instance.
 is_template() { [[ ${REPLICAS:-1} -gt 1 || -n ${AUTOSCALE_MAX:-} ]]; }
+
+# compute_limits <memory> <cpu> — echo the systemd cgroup limit lines for a
+# unit (MemoryMax/MemoryHigh/CPUQuota). Shared by cmd_add and the blue/green
+# activation, which regenerates a unit and must match the app's limits exactly.
+compute_limits() {
+  local memory=$1 cpu=$2 limits="" mem_num mem_suffix bytes
+  if [[ -n $memory ]]; then
+    # convert to bytes for the 90% calc so e.g. 1G doesn't integer-floor to 0G.
+    mem_num=${memory%[KMG]} mem_suffix=${memory: -1}
+    case $mem_suffix in
+      K) bytes=$((mem_num * 1024)) ;;
+      M) bytes=$((mem_num * 1024 * 1024)) ;;
+      G) bytes=$((mem_num * 1024 * 1024 * 1024)) ;;
+    esac
+    limits+="MemoryMax=$memory"$'\n'
+    limits+="MemoryHigh=$((bytes * 9 / 10))"$'\n'
+  fi
+  [[ -n $cpu ]] && limits+="CPUQuota=$cpu"$'\n'
+  printf '%s' "$limits"
+}
 
 # emit_service_body <port-expr> — the shared [Service] block. Relies on
 # bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from cmd_add.
@@ -439,13 +459,15 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
   [[ $sandbox == - ]] && sandbox=""
+  [[ $strategy == - ]] && strategy=""
   [[ -z $sandbox || $sandbox == strict || $sandbox == relaxed ]] || die "sandbox must be 'strict' (default) or 'relaxed'"
+  [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""
   [[ $idle == - ]] && idle=""
@@ -537,7 +559,7 @@ cmd_add() {
   # load_app (above) may have sourced the OLD config over freshly-parsed values
   # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
   # the values for THIS add so they get written and take effect.
-  local SANDBOX=$sandbox
+  local SANDBOX=$sandbox STRATEGY=$strategy
   AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
@@ -565,23 +587,12 @@ RELEASE_B64=$release_b64
 POST_RELEASE_B64=$post_release_b64
 PATH_PREFIX=$path
 SANDBOX=$sandbox
+STRATEGY=$strategy
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
   # MemoryHigh (90% of the cap) throttles before MemoryMax OOM-kills.
-  local limits=""
-  if [[ -n $memory ]]; then
-    # convert to bytes for the 90% calc so e.g. 1G doesn't integer-floor to 0G.
-    local mem_num=${memory%[KMG]} mem_suffix=${memory: -1} bytes
-    case $mem_suffix in
-      K) bytes=$((mem_num * 1024)) ;;
-      M) bytes=$((mem_num * 1024 * 1024)) ;;
-      G) bytes=$((mem_num * 1024 * 1024 * 1024)) ;;
-    esac
-    limits+="MemoryMax=$memory"$'\n'
-    limits+="MemoryHigh=$((bytes * 9 / 10))"$'\n'
-  fi
-  [[ -n $cpu ]] && limits+="CPUQuota=$cpu"$'\n'
+  local limits; limits=$(compute_limits "$memory" "$cpu")
 
   id -u "$user" &>/dev/null \
     || useradd --system --home-dir "$HOMEPORT_ROOT/$app" --no-create-home --shell /usr/sbin/nologin "$user"
@@ -892,12 +903,69 @@ rolling_restart() { # <app> — restart replicas one at a time, health-checking
   return 0
 }
 
+_bg_teardown() { # remove the transient blue/green green unit
+  local app=$1
+  systemctl stop "homeport-$app-green.service" 2>/dev/null || true
+  rm -f "/etc/systemd/system/homeport-$app-green.service"
+  systemctl daemon-reload
+}
+
+# bluegreen_restart <app> — zero-downtime activation for a single-instance
+# PUBLIC (domain, non-path, non-idle) app. The old instance (blue) keeps serving
+# on $PORT while the NEW release starts on a private green port; once green is
+# healthy, Caddy is flipped to it, blue is restarted onto the new release behind
+# green's cover, then traffic flips back and green is retired. The steady state
+# is unchanged (plain service on $PORT), so status/tunnel/remove are untouched.
+# Returns non-zero WITHOUT disrupting blue if the new release is unhealthy.
+bluegreen_restart() {
+  local app=$1
+  local green; green=$(( $(replica_base "$PORT") + 1 ))   # in the app's own free replica block
+  # reconstruct emit_service_body's scope from the loaded config
+  local user="homeport-$app" SANDBOX="${SANDBOX:-}" RUN="" limits
+  [[ -n ${RUN_B64:-} && $RUN_B64 != - ]] && RUN=$(printf %s "$RUN_B64" | base64 -d 2>/dev/null)
+  limits=$(compute_limits "${MEMORY:-}" "${CPU:-}")
+  # 1. start GREEN (new release, already at current/) on the green port
+  { echo "[Unit]"
+    echo "Description=homeport blue/green: $app (green)"
+    echo "After=network-online.target"; echo "Wants=network-online.target"; echo
+    emit_service_body "$green"
+  } > "/etc/systemd/system/homeport-$app-green.service"
+  systemctl daemon-reload
+  if ! systemctl start "homeport-$app-green.service" 2>/dev/null || ! wait_healthy_port "$green"; then
+    echo "--- blue/green: new release (:$green) failed health, last 20 log lines ---" >&2
+    journalctl -u "homeport-$app-green.service" -n 20 --no-pager >&2 || true
+    _bg_teardown "$app"          # blue never lost traffic — caller reverts current
+    return 1
+  fi
+  # 2. shift live traffic to green
+  write_caddy "$app" "$DOMAIN" "$green" plain 1
+  systemctl reload caddy
+  # 3. bring blue onto the new release behind green's cover
+  systemctl restart "homeport-$app"
+  if ! wait_healthy_port "$PORT"; then
+    # pathological (green on the same binary is healthy): restore Caddy to blue
+    # and retire green so the caller's revert path finds a consistent state.
+    write_caddy "$app" "$DOMAIN" "$PORT" plain 1; systemctl reload caddy
+    _bg_teardown "$app"
+    return 1
+  fi
+  # 4. shift traffic back to blue (canonical port) and retire green
+  write_caddy "$app" "$DOMAIN" "$PORT" plain 1
+  systemctl reload caddy
+  _bg_teardown "$app"
+  return 0
+}
+
 # restart+health for a whole app, respecting its mode. Returns 0 if healthy.
 activate_and_check() {
   local app=$1
   if is_template; then
     rolling_restart "$app"
+  elif [[ -n ${DOMAIN:-} && -z ${PATH_PREFIX:-} && -z ${IDLE:-} && ${STRATEGY:-blue-green} != recreate ]]; then
+    # single-instance public app: blue/green, zero-downtime by default
+    bluegreen_restart "$app"
   else
+    # recreate strategy, or internal / path-mounted / idle single-instance
     restart_app "$app"
     wait_healthy
   fi
@@ -971,6 +1039,7 @@ cmd_activate() {
     local note=""
     [[ -n ${IDLE:-} ]] && note=" · sleeps after ${IDLE_TIMEOUT} idle"
     is_template && note=" · $REPLICAS replicas (rolling)"
+    [[ -z ${IDLE:-} ]] && ! is_template && [[ -n ${DOMAIN:-} && -z ${PATH_PREFIX:-} && ${STRATEGY:-blue-green} != recreate ]] && note=" · blue/green"
     if [[ -n ${DOMAIN:-} ]]; then
       echo "live: $release (https://$DOMAIN)$note"
     else
@@ -1327,8 +1396,10 @@ cmd_remove() {
       systemctl disable --now "homeport-$app@$((rbase + i))" 2>/dev/null || true
     done
   fi
+  systemctl stop "homeport-$app-green.service" 2>/dev/null || true
   rm -f "/etc/systemd/system/homeport-$app.service" \
         "/etc/systemd/system/homeport-$app@.service" \
+        "/etc/systemd/system/homeport-$app-green.service" \
         "/etc/systemd/system/homeport-$app-proxy.socket" \
         "/etc/systemd/system/homeport-$app-proxy.service" \
         "$CADDY_DIR/$app.caddy"

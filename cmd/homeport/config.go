@@ -47,6 +47,7 @@ type config struct {
 	Release     string          `yaml:"release"`
 	PostRelease string          `yaml:"post_release"`
 	Sandbox     string          `yaml:"sandbox"`
+	Strategy    string          `yaml:"strategy"`
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -172,6 +173,8 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: post_release must be a single line (chain steps with && )", configFile)
 	case cfg.Sandbox != "" && cfg.Sandbox != "strict" && cfg.Sandbox != "relaxed":
 		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default) or 'relaxed' (for binaries that run their own sandbox, e.g. a browser), got %q", configFile, cfg.Sandbox)
+	case cfg.Strategy != "" && cfg.Strategy != "blue-green" && cfg.Strategy != "recreate":
+		return nil, fmt.Errorf("%s: strategy must be 'blue-green' (default, zero-downtime) or 'recreate' (restart in place — for singleton apps that can't run two instances), got %q", configFile, cfg.Strategy)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -254,6 +257,7 @@ func (c *config) addArgs() []string {
 		postRelease,
 		dashIfEmpty(c.Path),
 		dashIfEmpty(c.Sandbox),
+		dashIfEmpty(c.Strategy),
 	}
 }
 
