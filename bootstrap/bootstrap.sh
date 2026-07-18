@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.0
+HOMEPORTD_VERSION=0.8.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -207,12 +207,23 @@ is_template() { [[ ${REPLICAS:-1} -gt 1 || -n ${AUTOSCALE_MAX:-} ]]; }
 # emit_service_body <port-expr> — the shared [Service] block. Relies on
 # bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from cmd_add.
 emit_service_body() {
+  # optional launch args (from RUN, set by cmd_add): substitute $PORT/$HOST
+  # with this unit's port-expr ($1) and the loopback host. After substitution
+  # RUN contains no "$" (validated), so the unquoted heredoc won't re-expand.
+  local run_args=""
+  if [[ -n ${RUN:-} ]]; then
+    run_args=$RUN
+    run_args=${run_args//\$\{PORT\}/$1}
+    run_args=${run_args//\$PORT/$1}
+    run_args=${run_args//\$\{HOST\}/127.0.0.1}
+    run_args=${run_args//\$HOST/127.0.0.1}
+  fi
   cat <<EOF
 [Service]
 User=$user
 Group=$user
 WorkingDirectory=$HOMEPORT_ROOT/$app/current
-ExecStart=$HOMEPORT_ROOT/$app/current/bin
+ExecStart=$HOMEPORT_ROOT/$app/current/bin${run_args:+ $run_args}
 EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env
 Environment=NODE_ENV=production
 Environment=HOSTNAME=127.0.0.1
@@ -299,7 +310,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -309,6 +320,22 @@ cmd_add() {
   [[ $idle_timeout == - ]] && idle_timeout=""
   [[ $replicas == - || -z $replicas ]] && replicas=1
   [[ $autoscale == - ]] && autoscale=""
+  [[ $run_b64 == - ]] && run_b64=""
+
+  # run: optional launch args for the binary (base64 to survive spaces).
+  # exec (no shell), only $PORT/$HOST substituted — validated to block
+  # newlines, %, and shell metacharacters.
+  local RUN=""
+  if [[ -n $run_b64 ]]; then
+    RUN=$(printf %s "$run_b64" | base64 -d 2>/dev/null) || die "run: invalid encoding"
+    [[ $RUN != *$'\n'* ]] || die "run must be a single line"
+    local _rre='^[A-Za-z0-9 ._:/=@,+${}-]*$'
+    [[ $RUN =~ $_rre ]] || die "run has unsupported characters"
+    local _chk=$RUN
+    _chk=${_chk//\$\{PORT\}/}; _chk=${_chk//\$PORT/}
+    _chk=${_chk//\$\{HOST\}/}; _chk=${_chk//\$HOST/}
+    [[ $_chk != *'$'* ]] || die "run may only reference \$PORT and \$HOST"
+  fi
   # No domain => internal app: bound to 127.0.0.1, reachable only from other
   # apps on the box or through `homeport tunnel`. No Caddy fragment, no TLS,
   # nothing on 80/443.
@@ -369,6 +396,7 @@ REPLICAS=$replicas
 AUTOSCALE_MIN=$AUTOSCALE_MIN
 AUTOSCALE_MAX=$AUTOSCALE_MAX
 AUTOSCALE_TARGET=$AUTOSCALE_TARGET
+RUN_B64=$run_b64
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.

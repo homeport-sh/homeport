@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,7 @@ type config struct {
 	App         string          `yaml:"app"`
 	Server      string          `yaml:"server"`
 	Domain      string          `yaml:"domain"`
+	Run         string          `yaml:"run"`
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -61,6 +63,9 @@ var (
 	memoryRe  = regexp.MustCompile(`^[0-9]+[KMG]$`)
 	cpuRe     = regexp.MustCompile(`^[0-9]+%$`)
 	timeoutRe = regexp.MustCompile(`^[0-9]+[smh]$`)
+	// run: launch args appended to the binary in ExecStart. exec (no shell),
+	// so no shell metachars; only $PORT/$HOST are substituted server-side.
+	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
 )
 
 func loadConfig() (*config, error) {
@@ -125,6 +130,10 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("%s: autoscale needs 1 <= min <= max <= 20 (got min=%d max=%d)", configFile, cfg.Autoscale.Min, cfg.Autoscale.Max)
 	case cfg.Autoscale.on() && cfg.Autoscale.TargetCPU != 0 && (cfg.Autoscale.TargetCPU < 1 || cfg.Autoscale.TargetCPU > 100):
 		return nil, fmt.Errorf("%s: autoscale.target_cpu must be 1-100 (got %d)", configFile, cfg.Autoscale.TargetCPU)
+	case cfg.Run != "" && !runRe.MatchString(cfg.Run):
+		return nil, fmt.Errorf("%s: run has unsupported characters (letters, digits, spaces, . _ : / = @ , + - ${} only)", configFile)
+	case cfg.Run != "" && strings.Contains(stripRunVars(cfg.Run), "$"):
+		return nil, fmt.Errorf("%s: run may only reference $PORT and $HOST, no other variables", configFile)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -154,6 +163,11 @@ func (c *config) addArgs() []string {
 	if c.Autoscale.on() {
 		autoscale = fmt.Sprintf("%d:%d:%d", c.Autoscale.Min, c.Autoscale.Max, c.Autoscale.TargetCPU)
 	}
+	// run args carry spaces, so they travel base64-encoded as a single token
+	run := "-"
+	if c.Run != "" {
+		run = base64.StdEncoding.EncodeToString([]byte(c.Run))
+	}
 	return []string{
 		"add", c.App,
 		dashIfEmpty(c.Domain),
@@ -164,7 +178,17 @@ func (c *config) addArgs() []string {
 		dashIfEmpty(c.IdleTimeout),
 		strconv.Itoa(c.Replicas),
 		autoscale,
+		run,
 	}
+}
+
+// stripRunVars removes the two supported variables so a leftover "$" can be
+// detected (any other $VAR is rejected — only $PORT/$HOST are substituted).
+func stripRunVars(s string) string {
+	for _, v := range []string{"${PORT}", "$PORT", "${HOST}", "$HOST"} {
+		s = strings.ReplaceAll(s, v, "")
+	}
+	return s
 }
 
 // register ensures the app exists on the server (idempotent). Lets `secrets
