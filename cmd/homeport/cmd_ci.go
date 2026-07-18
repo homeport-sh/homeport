@@ -145,6 +145,27 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "${{ secrets.HOMEPORT_HOST_KEY }}" >> ~/.ssh/known_hosts
 
+      # ── App secrets — managed here as GitHub Actions secrets, synced every
+      # deploy (declarative: the box's env becomes EXACTLY this list, so a
+      # secret you delete here is dropped on the box). Add each in the repo:
+      # Settings → Secrets and variables → Actions.
+      #
+      # ⚠️  EDIT the list below to your real keys, and add every one as a repo
+      #     secret BEFORE pushing — an unset ${{ secrets.X }} renders empty and
+      #     would set that var blank. List ALL your app's env vars here (sync
+      #     drops anything not listed). Prefer 'push -' over 'sync -' if you
+      #     want additive/no-delete behaviour instead.
+      - name: Sync secrets
+        run: |
+          cat <<'EOF' | homeport secrets sync -
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          EOF
+
+      # Alternative — secrets managed on the server instead of in CI: set them
+      # once by hand ('homeport secrets push .env'); they persist across
+      # deploys and CI never sees them. If you use that model, delete the
+      # "Sync secrets" step above entirely.
+
       - name: Deploy
         run: homeport deploy
 `
