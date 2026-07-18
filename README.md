@@ -598,12 +598,17 @@ Cross-compile with `GOOS`/`GOARCH` as usual.
 
 ## Roadmap
 
-- Blue/green zero-downtime activation (current strategy is a 1–2s restart).
-- Per-app-scoped CI keys via forced commands.
-- Configurable health-check timeout (currently a fixed 30s).
+- Per-app-scoped CI keys via forced commands (a leaked CI key currently has
+  full box access — scoping shrinks its blast radius to one app).
 - Multi-server fan-out (`servers:` list) for the same app.
 
 A web dashboard is intentionally **not** on the near-term roadmap: for a
 single box the CLI plus `homeport mcp` (agent-driven ops) cover it, and a
 tunnel-only local UI would add friction over the CLI it wraps. A dashboard
 returns only as a future multi-server cloud control plane.
+
+## Support
+
+If homeport saves you time, you can [buy me a coffee](https://buymeacoffee.com/ramonmalcolm) ☕
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/ramonmalcolm)
