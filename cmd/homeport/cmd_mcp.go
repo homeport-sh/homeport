@@ -32,17 +32,28 @@ func cmdMCP(args []string) error {
 			Instructions: "Homeport deploys single-binary web apps to a VPS. " +
 				"These tools operate on the app defined by homeport.yaml in the server's working directory. " +
 				"Deploys are health-gated and auto-revert on failure; rollbacks are instant. " +
-				"Setup commands (init, bootstrap, ci) are intentionally not exposed — humans run those.",
+				"Setup commands (init, bootstrap, ci) and destructive `secrets sync` (declarative " +
+				"full-replace) are intentionally not exposed — humans run those.",
 		},
 	)
 
 	type statusArgs struct{}
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "status",
-		Description: "Current state of the app: systemd state, domain, port, live release, " +
-			"and all rollback-eligible releases. Returns JSON.",
+		Description: "Current state of the app: systemd state, domain (or internal) and path, port, " +
+			"live release, all rollback-eligible releases, and — when applicable — replica count and " +
+			"live autoscale CPU vs target. Returns JSON.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, any, error) {
 		return selfExec(ctx, 60*time.Second, "status", "--json")
+	})
+
+	type appsArgs struct{}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "apps",
+		Description: "Fleet view: every app on this project's server with each one's state, exposure, " +
+			"and live release. Read-only. Returns JSON.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args appsArgs) (*mcp.CallToolResult, any, error) {
+		return selfExec(ctx, 60*time.Second, "apps", "--json")
 	})
 
 	type deployArgs struct {
@@ -50,9 +61,10 @@ func cmdMCP(args []string) error {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "deploy",
-		Description: "Build the app, upload the binary, and activate it. Activation health-checks the " +
-			"new release and automatically reverts to the previous one on failure — the result text " +
-			"states which release is live. Can take several minutes (build + upload).",
+		Description: "Build the app, upload the binary, and activate it. Single-instance public apps " +
+			"activate blue/green (zero-downtime); replicas/autoscale roll one instance at a time. " +
+			"Activation health-checks the new release and automatically reverts to the previous one on " +
+			"failure — the result text states which release is live. Can take several minutes (build + upload).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args deployArgs) (*mcp.CallToolResult, any, error) {
 		cmdArgs := []string{"deploy"}
 		if args.NoBuild {

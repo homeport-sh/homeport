@@ -524,7 +524,7 @@ web", "how much memory is the fleet using"*. Exposed tools:
 
 | Tool | |
 |---|---|
-| `status` · `stats` · `logs` | observe the app |
+| `status` · `apps` · `stats` · `logs` | observe the app and the fleet |
 | `deploy` · `rollback` | ship / revert (health-gated, auto-revert) |
 | `secrets_list` · `secrets_set` · `secrets_rm` | manage env |
 
