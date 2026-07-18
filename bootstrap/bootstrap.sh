@@ -140,7 +140,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.6.1
+HOMEPORTD_VERSION=0.6.3
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -374,7 +374,12 @@ EOF
     # up by their socket-proxy; always-on apps bind the public port directly.
     local idle_unit="" install_sec=$'[Install]\nWantedBy=multi-user.target'
     if [[ -n $idle ]]; then
-      idle_unit="PartOf=homeport-$app-proxy.service"
+      # StopWhenUnneeded, not PartOf: when socket-proxyd self-exits on
+      # --exit-idle-time (a clean exit, not a `systemctl stop`), PartOf does
+      # NOT propagate — the app would linger. StopWhenUnneeded stops the app
+      # the moment nothing Requires it (i.e. the proxy is gone). Verified on
+      # the first live 0.6.1 box, where PartOf left the app running forever.
+      idle_unit="StopWhenUnneeded=true"
       install_sec=""
     fi
     # leaving replica mode: stop every old instance before the template goes —
@@ -401,7 +406,7 @@ EOF
     if [[ -n $idle ]]; then
       # Scale-to-zero: systemd holds the public port and starts the app on
       # first connection. systemd-socket-proxyd bridges to the private port
-      # and exits after $idle_timeout, taking the app with it (PartOf).
+      # and exits after $idle_timeout; the app is StopWhenUnneeded so it stops too.
       cat > "/etc/systemd/system/homeport-$app-proxy.socket" <<EOF
 [Unit]
 Description=homeport socket: $app (scale-to-zero)
@@ -441,6 +446,13 @@ EOF
         # rolling deploys actually zero-downtime (fail_duration is passive
         # and only marks an upstream down after a failure).
         printf '\treverse_proxy%s {\n\t\tlb_policy least_conn\n\t\tlb_try_duration 4s\n\t\tlb_try_interval 250ms\n\t\tfail_duration 10s\n\t}\n' "$caddy_upstreams"
+      elif [[ -n $idle ]]; then
+        # keepalive off is what lets scale-to-zero actually reach zero:
+        # Caddy's idle keepalive connection would otherwise hold
+        # socket-proxyd open forever and --exit-idle-time never fires
+        # (found live on the first 0.6.1 box). Costs a loopback TCP
+        # handshake per request — noise for a low-traffic idle app.
+        printf '\treverse_proxy%s {\n\t\ttransport http {\n\t\t\tkeepalive off\n\t\t}\n\t}\n' "$caddy_upstreams"
       else
         printf '\treverse_proxy%s\n' "$caddy_upstreams"
       fi
