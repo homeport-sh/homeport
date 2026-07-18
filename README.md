@@ -56,8 +56,10 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 | `homeport deploy [--no-build]` | build → upload → activate with health check; auto-reverts on failure |
 | `homeport rollback [release]` | instant rollback (old binaries are kept on the box) |
 | `homeport secrets set K=V ...` | set env values — sent over ssh stdin, never argv |
-| `homeport secrets push [file]` | upload a whole `.env` file |
-| `homeport secrets list` | list env keys; values never leave the server |
+| `homeport secrets rm KEY ...` | remove keys from the app's env |
+| `homeport secrets push [file\|-]` | merge a whole `.env` file (or stdin) into the env |
+| `homeport secrets sync [file\|-]` | declarative full replace — drops keys not in the input |
+| `homeport secrets list [--json]` | list env keys; values never leave the server |
 | `homeport status [--json]` | state, live release, available releases |
 | `homeport apps [server] [--json]` | fleet view: every app on a server (no project dir needed) |
 | `homeport stats` | live resource usage — app memory/cpu/tasks, releases disk, host headroom |
@@ -82,6 +84,39 @@ SSH / a root daemon outright.)
 - A deploy is promoted only after `health.path` returns 200; otherwise the
   previous release is restored automatically. The wait defaults to 30s — raise
   it for slow-booting apps with `health.timeout: 60s` (accepts `s`/`m`/`h`).
+
+## `homeport.yaml` reference
+
+Every field, in one place. `homeport init` writes a commented starter; this is
+the full set. Fields marked † expand `${VAR}` from the environment at load time
+(a referenced-but-unset var is a hard error).
+
+| Field | Default | What it does |
+|---|---|---|
+| `app` † | — | app name (lowercase, digits, dashes, ≤20 chars) |
+| `server` † | — | `deploy@host` (a bare host defaults the user to `deploy@`) |
+| `domain` † | — | public hostname (Caddy + auto-TLS); omit for internal |
+| `internal` | `false` | private app — loopback only, reached via `homeport tunnel` |
+| `path` † | — | mount under a shared `domain` (API gateway); prefix is stripped |
+| `build.command` | `bun run build` | build step run locally/in CI |
+| `build.artifact` | `server` | path to the Linux binary the build produces |
+| `health.path` | `/` | must return 200 before a release is promoted |
+| `health.timeout` | `30s` | how long to wait for that 200 |
+| `run` | — | launch args appended to the binary; `$PORT`/`$HOST` substituted |
+| `release` | — | pre-activate hook (migrations) — fails the deploy if it fails |
+| `post_release` | — | post-activate hook (best-effort; warns, never reverts) |
+| `resources.memory` † | — | cgroup cap, e.g. `512M`, `1G` |
+| `resources.cpu` † | — | cgroup cap, e.g. `150%` (= 1.5 cores) |
+| `idle` | `false` | scale-to-zero (socket-activated); with `idle_timeout` † (`5m`) |
+| `replicas` | `1` | fixed instance count (1–20), load-balanced + rolling |
+| `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
+| `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
+| `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
+
+Secrets are **not** in this file — they go through `homeport secrets` and live
+only on the server. `idle`, `replicas`, and `autoscale` are mutually exclusive
+axes — see the scale-to-zero, replicas, and autoscaling sections below for how
+each behaves.
 
 ## Private apps (no public URL)
 
@@ -363,7 +398,7 @@ equivalent for the runtimeless single-binary box.
 ```
 your laptop / CI                     the VPS
 ┌──────────────┐                    ┌──────────────────────────────────┐
-│  homeport (CLI) │─── ssh / scp ─────▶│ homeportd — bash, root, ~400 lines  │
+│  homeport (CLI) │─── ssh / scp ─────▶│ homeportd — one root-side bash helper│
 └──────────────┘                    │  the only privileged entry point │
                                     │  systemd units · Caddy · releases│
                                     └──────────────────────────────────┘
