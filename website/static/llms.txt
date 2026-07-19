@@ -1,0 +1,21 @@
+# Homeport
+
+> Deploy single-binary web apps to your own VPS — no Docker, no registry, no runtime on the server. One command hardens a fresh Ubuntu box, one command deploys, with zero-downtime blue/green releases, scale-to-zero, autoscaling, and release-phase migrations.
+
+Homeport is a single Go binary that turns a plain VPS into a hardened host: firewall, key-only SSH, fail2ban, automatic security updates, and Caddy for automatic HTTPS. Apps run as locked-down systemd services (dropped capabilities, seccomp, resource caps) behind Caddy — no containers. It deploys compiled binaries (Go, Rust, or bun-compiled Next.js, Nuxt, SvelteKit, TanStack Start) and static sites, and exposes deploy/rollback/status as MCP tools for AI agents.
+
+## Docs
+
+- [GitHub repository](https://github.com/homeport-sh/homeport): source, README, configuration reference, and security model
+- [Security policy](https://github.com/homeport-sh/homeport/blob/main/SECURITY.md): threat model and the per-app scoped-key CI boundary
+
+## Install
+
+- [Install script](https://homeport.sh/install): `curl -fsSL homeport.sh/install | sh` (Linux and macOS)
+- Homebrew (macOS): `brew install homeport-sh/tap/homeport`
+
+## Getting started
+
+- `homeport bootstrap <ip>`: harden a fresh Ubuntu VPS, install Caddy + the root-side helper
+- `homeport init`: detect the framework and write a `homeport.yaml`
+- `homeport deploy`: build, upload, health-check the new release, and flip traffic (auto-reverts on failure)
