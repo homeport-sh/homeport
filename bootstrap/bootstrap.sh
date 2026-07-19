@@ -542,7 +542,9 @@ cmd_add() {
       fi
     done
   fi
-  [[ $health == /* ]] || die "health path must start with /"
+  # anchored + charset-locked: HEALTH_PATH is written to config and source'd as
+  # root, so an un-validated value here is arbitrary root command substitution.
+  [[ $health =~ ^/[A-Za-z0-9._/-]*$ ]] || die "health path must start with / and contain only [A-Za-z0-9._/-]"
   [[ -z $memory || $memory =~ ^[0-9]+[KMG]$ ]] || die "invalid memory limit: '$memory' (e.g. 512M, 1G)"
   [[ -z $cpu || $cpu =~ ^[0-9]+%$ ]] || die "invalid cpu limit: '$cpu' (e.g. 150%)"
   [[ -z $idle || $idle == true ]] || die "idle must be 'true' or unset"
@@ -563,7 +565,12 @@ cmd_add() {
     (( AUTOSCALE_TARGET >= 1 && AUTOSCALE_TARGET <= 100 )) || die "autoscale target must be 1-100"
     # start at min unless the app already has more instances running
     replicas=$AUTOSCALE_MIN
-    [[ -f "$HOMEPORT_ETC/$app/config" ]] && { local _r; _r=$(grep -m1 '^REPLICAS=' "$HOMEPORT_ETC/$app/config" | cut -d= -f2); [[ $_r =~ ^[0-9]+$ && $_r -ge $AUTOSCALE_MIN && $_r -le $AUTOSCALE_MAX ]] && replicas=$_r; }
+    # (plain `if`, not `&&` chains: a false final [[ ]] as the group's last
+    # command would trip set -e and abort the whole add)
+    if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
+      local _r; _r=$(grep -m1 '^REPLICAS=' "$HOMEPORT_ETC/$app/config" | cut -d= -f2)
+      if [[ $_r =~ ^[0-9]+$ && $_r -ge $AUTOSCALE_MIN && $_r -le $AUTOSCALE_MAX ]]; then replicas=$_r; fi
+    fi
   fi
   # template unit (per-instance) is used for fixed replicas>1 AND autoscale
   local use_template=0
@@ -1022,6 +1029,9 @@ cmd_upload() { # <app> <release> — receive the binary on stdin into a release 
   [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app' — register it first"
   local dir="$HOMEPORT_ROOT/$app/releases/$release"
   install -d -o deploy -g deploy -m 755 "$HOMEPORT_ROOT/$app/releases" "$dir"
+  # releases/ is deploy-writable, so a full deploy key could pre-plant bin as a
+  # symlink to a root path; rm first so the '>' write can't follow it.
+  rm -f "$dir/bin"
   # stream stdin to bin with a hard size ceiling (a runaway upload can't fill disk)
   local max=$((1024 * 1024 * 1024)) size # 1 GiB
   head -c $((max + 1)) > "$dir/bin"

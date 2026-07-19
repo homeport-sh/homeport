@@ -22,7 +22,9 @@ func cmdStats(args []string) error {
 			" && echo ===host==="+
 			" && free -b | awk 'NR==2{print \"HOSTMEM=\"$3\"/\"$2}'"+
 			" && df -B1 --output=avail,size / | awk 'NR==2{print \"HOSTDISK=\"$1\"/\"$2}'"+
-			" && du -sb /opt/homeport/%s/releases 2>/dev/null | awk '{print \"RELDISK=\"$1}' || true",
+			// only the releases-disk read is best-effort; a failing systemctl
+			// (wrong box / homeportd absent) must still surface as an error
+			" && ( du -sb /opt/homeport/%s/releases 2>/dev/null | awk '{print \"RELDISK=\"$1}' || true )",
 		unit, cfg.App,
 	)
 	out, err := sshOutput(cfg.Server, remote)

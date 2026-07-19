@@ -109,6 +109,17 @@ has "gate: deny bare sudo"      "$(gate web "sudo bash")"                     "d
 eq  "gate: sudo offset"    "$(gate web "sudo $hd upload web r1")" "allow 2"
 eq  "gate: no-sudo offset" "$(gate web "$hd upload web r1")"      "allow 1"
 
+# --- C1 regression: health path is source'd as root, so it MUST reject any
+#     shell-active character (this was a root RCE via a scoped CI key's `add`) ---
+hp_ok() { [[ ${1:-} =~ ^/[A-Za-z0-9._/-]*$ ]]; }
+eq "health /healthz allowed"    "$(hp_ok /healthz  && echo ok)"        "ok"
+eq "health / allowed"           "$(hp_ok /         && echo ok)"        "ok"
+eq "health rejects \$()"        "$(hp_ok '/h$(id)'      || echo deny)" "deny"
+eq "health rejects backtick"    "$(hp_ok '/h`id`'       || echo deny)" "deny"
+eq "health rejects \${IFS}"     "$(hp_ok '/h${IFS}x'    || echo deny)" "deny"
+eq "health rejects semicolon"   "$(hp_ok '/h;id'        || echo deny)" "deny"
+eq "health rejects space"       "$(hp_ok '/h x'         || echo deny)" "deny"
+
 echo "----"
 if (( fails > 0 )); then echo "$fails bash test(s) FAILED"; exit 1; fi
 echo "all bash tests passed"

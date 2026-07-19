@@ -62,12 +62,16 @@ type config struct {
 // These mirror homeportd's server-side validation — fail fast with a good
 // message locally instead of a terse remote one.
 var (
-	appRe     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,19}$`)
-	domainRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$`)
-	healthRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
+	appRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,19}$`)
+	// server is passed as an argv token to ssh/scp; the first char MUST be
+	// alphanumeric — a leading "-" (e.g. "-oProxyCommand=…@host") would be
+	// parsed by ssh as an OPTION → local command execution.
+	serverRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$`)
+	healthRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
 	// path: mount prefix under a shared domain — leading slash, one or more
 	// segments, no trailing slash, no spaces (Caddy handle_path matcher).
-	pathRe = regexp.MustCompile(`^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*$`)
+	pathRe    = regexp.MustCompile(`^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*$`)
 	releaseRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$`)
 	memoryRe  = regexp.MustCompile(`^[0-9]+[KMG]$`)
 	cpuRe     = regexp.MustCompile(`^[0-9]+%$`)
@@ -75,6 +79,8 @@ var (
 	// run: launch args appended to the binary in ExecStart. exec (no shell),
 	// so no shell metachars; only $PORT/$HOST are substituted server-side.
 	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
+	// an empty `${}` or an unterminated `${…` with no closing brace
+	malformedRefRe = regexp.MustCompile(`\$\{\}|\$\{[^}]*$`)
 )
 
 func loadConfig() (*config, error) {
@@ -137,7 +143,7 @@ func parseConfig(data []byte) (*config, error) {
 	switch {
 	case !appRe.MatchString(cfg.App):
 		return nil, fmt.Errorf("%s: app %q must be lowercase letters, digits, dashes, max 20 chars", configFile, cfg.App)
-	case !strings.Contains(cfg.Server, "@"):
+	case !serverRe.MatchString(cfg.Server):
 		return nil, fmt.Errorf("%s: server should look like deploy@1.2.3.4 (got %q)", configFile, cfg.Server)
 	case cfg.Internal && cfg.Domain != "":
 		return nil, fmt.Errorf("%s: set either a domain (public) or internal: true, not both", configFile)
@@ -203,6 +209,12 @@ func parseConfig(data []byte) (*config, error) {
 func expandEnvStrict(field, s string) (string, error) {
 	if !strings.Contains(s, "$") {
 		return s, nil
+	}
+	// os.Expand silently drops a malformed ref (`${}` or an unterminated `${`),
+	// which would ship an empty value in violation of the hard-error promise —
+	// reject them up front.
+	if malformedRefRe.MatchString(s) {
+		return "", fmt.Errorf("%s: %s has a malformed ${...} reference: %q", configFile, field, s)
 	}
 	var missing []string
 	out := os.Expand(s, func(name string) string {
@@ -272,13 +284,16 @@ func (c *config) addArgs() []string {
 	}
 }
 
-// stripRunVars removes the two supported variables so a leftover "$" can be
-// detected (any other $VAR is rejected — only $PORT/$HOST are substituted).
+// runVarRe matches exactly the braced ${PORT}/${HOST} or the bare $PORT/$HOST
+// (bare requires a word boundary, so $PORTS/$HOSTNAME are NOT treated as
+// supported — they leave a stray "$" the caller rejects). Only these two are
+// substituted server-side.
+var runVarRe = regexp.MustCompile(`\$(\{(PORT|HOST)\}|(PORT|HOST)\b)`)
+
+// stripRunVars removes the supported variables so a leftover "$" can be
+// detected (any other $VAR is rejected).
 func stripRunVars(s string) string {
-	for _, v := range []string{"${PORT}", "$PORT", "${HOST}", "$HOST"} {
-		s = strings.ReplaceAll(s, v, "")
-	}
-	return s
+	return runVarRe.ReplaceAllString(s, "")
 }
 
 // register ensures the app exists on the server (idempotent). Lets `secrets

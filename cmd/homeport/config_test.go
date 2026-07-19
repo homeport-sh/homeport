@@ -63,6 +63,11 @@ func TestParseConfigRejects(t *testing.T) {
 		{"multiline release", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrelease: \"a\\nb\"\n", "single line"},
 		{"bad sandbox", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: loose\n", "sandbox"},
 		{"bad strategy", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nstrategy: canary\n", "strategy"},
+		// review fixes:
+		{"server ssh-option injection", "app: web\nserver: \"-oProxyCommand=x@host\"\ndomain: web.example.com\n", "server"},
+		{"server leading dash", "app: web\nserver: -evil@host\ndomain: web.example.com\n", "server"},
+		{"run non-PORT/HOST var", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve $PORTS\n", "only reference"},
+		{"run $DBHOST var", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --db $DBHOST\n", "only reference"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -94,8 +99,10 @@ func TestParseConfigAccepts(t *testing.T) {
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nidle: true\nidle_timeout: 5m\n",
 		"app: geo\nserver: deploy@1.2.3.4\ndomain: api.example.com\npath: /geo-api\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port $PORT --host $HOST\n",
+		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port ${PORT} --host ${HOST}\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: relaxed\nstrategy: recreate\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nhealth:\n  timeout: 90s\n",
+		"app: worker\nserver: 1.2.3.4\ninternal: true\n", // bare host normalizes, internal ok
 	}
 	for i, y := range ok {
 		if _, err := parseConfig([]byte(y)); err != nil {
@@ -124,6 +131,22 @@ func TestExpandEnvStrict(t *testing.T) {
 	// no $ short-circuits
 	if got, _ := expandEnvStrict("app", "web-prod"); got != "web-prod" {
 		t.Errorf("literal passthrough failed: %q", got)
+	}
+	// malformed refs are a hard error, not silently deleted (os.Expand drops them)
+	for _, bad := range []string{"a${}b", "web-${ENV", "${}"} {
+		if _, err := expandEnvStrict("domain", bad); err == nil {
+			t.Errorf("malformed ref %q should error, got nil", bad)
+		}
+	}
+}
+
+func TestSecretsValueRejectsNewline(t *testing.T) {
+	// a set-value with an embedded newline would smuggle extra KEY=value lines
+	if envLineRe.MatchString("A=b\nEVIL=x") {
+		t.Errorf("envLineRe must reject a value containing a newline")
+	}
+	if !envLineRe.MatchString("A=b-c_d.e/f") {
+		t.Errorf("envLineRe must accept a normal single-line value")
 	}
 }
 

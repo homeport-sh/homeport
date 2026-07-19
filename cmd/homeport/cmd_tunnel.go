@@ -35,7 +35,7 @@ func cmdTunnel(args []string) error {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &st); err != nil {
 		return fmt.Errorf("unexpected status output (is homeportd up to date?): %w", err)
 	}
-	// app_port (0.6.1+) is the port that actually reaches the app — for
+	// app_port is the port that actually reaches the app — for
 	// replica apps nothing binds the public port (Caddy talks straight to
 	// the instances). Older homeportd omits it; fall back to the public port.
 	if st.AppPort != 0 {

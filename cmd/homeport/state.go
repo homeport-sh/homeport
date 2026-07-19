@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,4 +49,14 @@ func normalizeServer(s string) string {
 		return "deploy@" + s
 	}
 	return s
+}
+
+// validServer guards a user@host string before it becomes an ssh/scp argv
+// token — a leading "-" would let ssh parse it as an option (e.g.
+// -oProxyCommand=…) → local command execution. Call after normalizeServer.
+func validServer(s string) error {
+	if !serverRe.MatchString(s) {
+		return fmt.Errorf("server should look like deploy@1.2.3.4 (got %q)", s)
+	}
+	return nil
 }

@@ -14,12 +14,12 @@ import (
 // projectInfo is what init auto-detects so homeport.yaml starts out correct
 // for the toolchain at hand instead of generic.
 type projectInfo struct {
-	kind      string // "next-bun-compile", "go", "rust", "generic"
-	app       string
-	build     string
-	artifact  string
-	note      string // extra comment block for homeport.yaml
-	gitignore string // entry to append, "" if none
+	kind        string // "next-bun-compile", "go", "rust", "generic"
+	app         string
+	build       string
+	artifact    string
+	note        string // extra comment block for homeport.yaml
+	gitignore   string // entry to append, "" if none
 	ciToolchain string // GitHub Actions step(s) installing the build toolchain
 }
 
@@ -41,8 +41,8 @@ func detectProject() projectInfo {
 
 			if has("next-bun-compile") {
 				return projectInfo{
-					kind:     "next-bun-compile",
-					app:      sanitizeAppName(pkg.Name),
+					kind: "next-bun-compile",
+					app:  sanitizeAppName(pkg.Name),
 					// NBC_TARGET cross-compiles; default to a standard x86-64
 					// Linux box so a macOS build deploys as-is.
 					build:    "NBC_TARGET=bun-linux-x64 bun run build",
@@ -56,8 +56,8 @@ func detectProject() projectInfo {
 
 			if has("svelte-bun-compile") {
 				return projectInfo{
-					kind:     "svelte-bun-compile",
-					app:      sanitizeAppName(pkg.Name),
+					kind: "svelte-bun-compile",
+					app:  sanitizeAppName(pkg.Name),
 					// --bun is required: the adapter compiles via Bun.build.
 					build:    "bun --bun vite build",
 					artifact: "dist/app",

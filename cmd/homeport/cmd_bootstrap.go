@@ -16,6 +16,9 @@ func cmdBootstrap(args []string) error {
 		// fresh boxes are reached as root; the hardening then closes that door
 		target = "root@" + target
 	}
+	if err := validServer(target); err != nil {
+		return err
+	}
 	user := target[:strings.Index(target, "@")]
 	host := target[strings.Index(target, "@")+1:]
 

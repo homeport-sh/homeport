@@ -22,16 +22,16 @@ func cmdServer(args []string) error {
 
 	target := ""
 	if len(args) > 1 {
-		target = args[1]
-		if !strings.Contains(target, "@") {
-			return fmt.Errorf("target should look like deploy@1.2.3.4 (got %q)", target)
-		}
+		target = normalizeServer(args[1])
 	} else {
 		cfg, err := loadConfig()
 		if err != nil {
 			return fmt.Errorf("no target given and %w", err)
 		}
 		target = cfg.Server
+	}
+	if err := validServer(target); err != nil {
+		return err
 	}
 
 	script, err := embeddedHomeportd()
@@ -41,7 +41,7 @@ func cmdServer(args []string) error {
 
 	step("updating homeportd on %s", target)
 	if err := sshRunIn(target, "sudo /usr/local/bin/homeportd self-update", script); err != nil {
-		return fmt.Errorf("self-update failed — a homeportd from before v0.2.0 lacks this command; "+
+		return fmt.Errorf("self-update failed — a homeportd from before v0.1.0 lacks this command; "+
 			"update those boxes via Hetzner rescue mode, or recreate them (%w)", err)
 	}
 	return sshRun(target, "sudo /usr/local/bin/homeportd version")

@@ -8,7 +8,12 @@ import (
 	"strings"
 )
 
-var envLineRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+// end-anchored + no CR/LF in the value: a newline would smuggle extra
+// KEY=value lines through the stdin merge on the server. Multi-line values
+// belong in a file via `secrets push`/`sync`, not an argv `set`.
+var envLineRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\n\r]*$`)
+
+const secretsUsage = "usage: homeport secrets <set KEY=value… | rm KEY… | push [file|-] | sync [file|-] | list [--json]>"
 
 func cmdSecrets(args []string) error {
 	cfg, err := loadConfig()
@@ -16,7 +21,7 @@ func cmdSecrets(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: homeport secrets <set KEY=value ... | push [env-file] | list>")
+		return fmt.Errorf("%s", secretsUsage)
 	}
 
 	switch args[0] {
@@ -66,10 +71,14 @@ func cmdSecrets(args []string) error {
 		return sshRun(cfg.Server, cfg.homeportd(append([]string{"env-rm", cfg.App}, keys...)...))
 
 	case "list":
-		return sshRun(cfg.Server, cfg.homeportd("env-list", cfg.App))
+		listArgs := []string{"env-list", cfg.App}
+		if hasFlag(args, "--json") {
+			listArgs = append(listArgs, "--json")
+		}
+		return sshRun(cfg.Server, cfg.homeportd(listArgs...))
 
 	default:
-		return fmt.Errorf("usage: homeport secrets <set K=V… | rm KEY… | push [file|-] | sync [file|-] | list>")
+		return fmt.Errorf("%s", secretsUsage)
 	}
 }
 

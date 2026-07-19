@@ -19,8 +19,11 @@ func cmdCI(args []string) error {
 		return fmt.Errorf("usage: homeport ci setup github")
 	}
 	provider := "github"
-	if len(args) > 1 {
-		provider = args[1]
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "-") { // skip flags (--force/--unscoped) when picking the provider
+			provider = a
+			break
+		}
 	}
 	if provider != "github" {
 		return fmt.Errorf("only github is supported for now (got %q)", provider)
@@ -67,7 +70,7 @@ func cmdCI(args []string) error {
 
 	// 3. pin the host key so CI never has to trust-on-first-use
 	step("pinning the server host key")
-	out, err := exec.Command("ssh-keyscan", "-t", "ed25519", cfg.host()).Output()
+	out, err := exec.Command("ssh-keyscan", "-T", "10", "-t", "ed25519", cfg.host()).Output()
 	if err != nil {
 		return fmt.Errorf("ssh-keyscan failed: %w", err)
 	}
@@ -148,27 +151,34 @@ jobs:
         run: go install github.com/homeport-sh/homeport/cmd/homeport@latest
 
       - name: Deploy key
+        # secrets go through env, not ${{ }} spliced into the script, so their
+        # contents can't break out of the shell (the GitHub-recommended pattern)
+        env:
+          SSH_KEY: ${{ secrets.HOMEPORT_SSH_KEY }}
+          HOST_KEY: ${{ secrets.HOMEPORT_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.HOMEPORT_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "${{ secrets.HOMEPORT_HOST_KEY }}" >> ~/.ssh/known_hosts
+          printf '%s\n' "$HOST_KEY" >> ~/.ssh/known_hosts
 
       # ── App secrets — managed here as GitHub Actions secrets, synced every
       # deploy (declarative: the box's env becomes EXACTLY this list, so a
       # secret you delete here is dropped on the box). Add each in the repo:
       # Settings → Secrets and variables → Actions.
       #
-      # ⚠️  EDIT the list below to your real keys, and add every one as a repo
-      #     secret BEFORE pushing — an unset ${{ secrets.X }} renders empty and
-      #     would set that var blank. List ALL your app's env vars here (sync
-      #     drops anything not listed). Prefer 'push -' over 'sync -' if you
-      #     want additive/no-delete behaviour instead.
+      # ⚠️  EDIT both lists below to your real keys (the env: block AND the
+      #     printf line), and add every one as a repo secret BEFORE pushing —
+      #     an unset secret renders empty and would set that var blank. List ALL
+      #     your app's env vars here (sync drops anything not listed). Prefer
+      #     'push -' over 'sync -' for additive/no-delete behaviour.
+      #     Secrets travel via env (not spliced into the script), so a value
+      #     containing newlines or quotes can't corrupt the sync or break out.
       - name: Sync secrets
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          cat <<'EOF' | homeport secrets sync -
-          DATABASE_URL=${{ secrets.DATABASE_URL }}
-          EOF
+          printf 'DATABASE_URL=%s\n' "$DATABASE_URL" | homeport secrets sync -
 
       # Alternative — secrets managed on the server instead of in CI: set them
       # once by hand ('homeport secrets push .env'); they persist across

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"strings"
+	"os"
 )
 
 // cmdApps shows every app on a server — the fleet view. Unlike the other
@@ -26,7 +26,14 @@ func cmdApps(args []string) error {
 	}
 
 	if target == "" {
-		if cfg, err := loadConfig(); err == nil {
+		// a homeport.yaml here → use its server, and a PARSE error is a real
+		// error (don't silently target the remembered — possibly wrong — box).
+		// No homeport.yaml → fall back to the last server we talked to.
+		if _, statErr := os.Stat(configFile); statErr == nil {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
 			target = cfg.Server
 		} else {
 			target = lastServer()
@@ -36,8 +43,8 @@ func cmdApps(args []string) error {
 		return fmt.Errorf("no server given and none remembered — usage: homeport apps <ip|user@host>")
 	}
 	target = normalizeServer(target)
-	if !strings.Contains(target, "@") {
-		return fmt.Errorf("server should look like deploy@1.2.3.4 (got %q)", target)
+	if err := validServer(target); err != nil {
+		return err
 	}
 
 	remote := "sudo /usr/local/bin/homeportd status"

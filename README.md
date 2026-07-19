@@ -59,7 +59,7 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
    production (sslip.io is a shared public resolver).
 4. **In your project**:
    ```
-   homeport init            # writes homeport.yaml (auto-detects Go / Rust / next-bun-compile)
+   homeport init            # writes homeport.yaml (auto-detects Go, Rust, Next, Nuxt, SvelteKit, TanStack Start, Bun)
    homeport deploy
    ```
 
@@ -71,6 +71,7 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 | `homeport init` | write `homeport.yaml`, auto-detecting the project type |
 | `homeport deploy [--no-build]` | build → upload → activate with health check; auto-reverts on failure |
 | `homeport rollback [release]` | instant rollback (old binaries are kept on the box) |
+| `ssh deploy@<ip> sudo homeportd remove <app> --yes` | delete an app, its releases, env, and user |
 | `homeport secrets set K=V ...` | set env values — sent over ssh stdin, never argv |
 | `homeport secrets rm KEY ...` | remove keys from the app's env |
 | `homeport secrets push [file\|-]` | merge a whole `.env` file (or stdin) into the env |

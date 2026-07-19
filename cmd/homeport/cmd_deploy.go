@@ -6,6 +6,12 @@ import (
 )
 
 func cmdDeploy(args []string) error {
+	// reject typo'd flags — a silently-ignored --no-buld would ship a full build
+	for _, a := range args {
+		if a != "--no-build" && a != "--no-artifact-check" {
+			return fmt.Errorf("unknown option %q (deploy accepts --no-build, --no-artifact-check)", a)
+		}
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -47,7 +53,11 @@ func cmdDeploy(args []string) error {
 	if err := sshRun(cfg.Server, cfg.homeportd("activate", cfg.App, id)); err != nil {
 		return fmt.Errorf("activation failed: %w", err)
 	}
-	step("deployed → https://%s", cfg.Domain)
+	if cfg.Internal {
+		step("deployed → internal (reach it with `homeport tunnel`)")
+	} else {
+		step("deployed → https://%s%s", cfg.Domain, cfg.Path)
+	}
 	return nil
 }
 
