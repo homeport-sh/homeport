@@ -30,7 +30,6 @@ func cmdDeploy(args []string) error {
 	}
 
 	id := releaseID()
-	dir := fmt.Sprintf("/opt/homeport/%s/releases/%s", cfg.App, id)
 
 	step("registering %s on %s", cfg.App, cfg.Server)
 	if err := cfg.register(); err != nil {
@@ -38,10 +37,9 @@ func cmdDeploy(args []string) error {
 	}
 
 	step("uploading %s (%.1f MB, linux %s) as release %s", cfg.Build.Artifact, float64(st.Size())/1024/1024, arch, id)
-	if err := sshRun(cfg.Server, "mkdir -p "+dir); err != nil {
-		return fmt.Errorf("could not create release dir: %w", err)
-	}
-	if err := scpFile(cfg.Build.Artifact, cfg.Server+":"+dir+"/bin"); err != nil {
+	// stream the binary through homeportd's `upload` verb (not scp), so every
+	// privileged step is one homeportd call — and a scoped CI key has one gate.
+	if err := sshRunInFile(cfg.Server, cfg.homeportd("upload", cfg.App, id), cfg.Build.Artifact); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 

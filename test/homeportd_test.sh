@@ -87,6 +87,28 @@ else printf 'FAIL gateway ordering\n%s\n' "$gw"; fails=$((fails + 1)); fi
 rm -rf "$HOMEPORT_ETC"
 fi
 
+# --- ci_gate_decision: the scoped-CI-key security policy ---
+hd=/usr/local/bin/homeportd
+gate() { ci_gate_decision "$1" "$2"; }
+has "gate: upload own app"      "$(gate web "sudo $hd upload web r1")"        "allow"
+has "gate: activate own app"    "$(gate web "sudo $hd activate web r1")"      "allow"
+has "gate: env own app"         "$(gate web "sudo $hd env web")"              "allow"
+has "gate: version"             "$(gate web "sudo $hd version")"              "allow"
+has "gate: no-sudo form"        "$(gate web "$hd status web")"                "allow"
+has "gate: deny remove"         "$(gate web "sudo $hd remove web --yes")"     "deny"
+has "gate: deny self-update"    "$(gate web "sudo $hd self-update")"          "deny"
+has "gate: deny key-add"        "$(gate web "sudo $hd key-add")"              "deny"
+has "gate: deny key-rm"         "$(gate web "sudo $hd key-rm x")"             "deny"
+has "gate: deny other app"      "$(gate web "sudo $hd activate shop r1")"     "deny"
+has "gate: deny env other app"  "$(gate web "sudo $hd env-sync shop")"        "deny"
+has "gate: deny arbitrary cmd"  "$(gate web "cat /etc/shadow")"               "deny"
+has "gate: deny scp"            "$(gate web "scp -t /tmp/x")"                 "deny"
+has "gate: deny empty (shell)"  "$(gate web "")"                              "deny"
+has "gate: deny bare sudo"      "$(gate web "sudo bash")"                     "deny"
+# allow must carry the argv offset the gate execs from
+eq  "gate: sudo offset"    "$(gate web "sudo $hd upload web r1")" "allow 2"
+eq  "gate: no-sudo offset" "$(gate web "$hd upload web r1")"      "allow 1"
+
 echo "----"
 if (( fails > 0 )); then echo "$fails bash test(s) FAILED"; exit 1; fi
 echo "all bash tests passed"

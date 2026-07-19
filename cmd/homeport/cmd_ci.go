@@ -50,9 +50,18 @@ func cmdCI(args []string) error {
 		return err
 	}
 
-	// 2. authorize it on the server (over your existing access)
-	step("authorizing the CI key on %s", cfg.Server)
-	if err := sshRunIn(cfg.Server, cfg.homeportd("key-add"), string(pub)); err != nil {
+	// 2. authorize it on the server (over your existing access). Scoped by
+	// default: an SSH forced command locks this key to THIS app — it can deploy
+	// and manage `cfg.App` and nothing else (no remove, no self-update, no other
+	// app). Pass --unscoped for a full-access key (an admin credential).
+	keyAddArgs := []string{"key-add", "--scope", cfg.App}
+	scopeNote := "scoped to " + cfg.App
+	if hasFlag(args, "--unscoped") {
+		keyAddArgs = []string{"key-add"}
+		scopeNote = "FULL ACCESS (unscoped)"
+	}
+	step("authorizing the CI key on %s (%s)", cfg.Server, scopeNote)
+	if err := sshRunIn(cfg.Server, cfg.homeportd(keyAddArgs...), string(pub)); err != nil {
 		return fmt.Errorf("could not authorize CI key: %w", err)
 	}
 

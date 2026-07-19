@@ -98,7 +98,7 @@
 		['Zero-downtime deploys', 'blue/green + rolling, default', 'per-service config', 'rolling via proxy'],
 		['Scale to zero', 'built in, socket-activated', 'no', 'no'],
 		['Rollback', 'symlink flip, instant', 'redeploy container', 'redeploy image'],
-		['Access to deploy', 'SSH key', 'web UI + SSH', 'root SSH']
+		['Access to deploy', 'per-app scoped SSH keys', 'web UI + SSH', 'root SSH']
 	];
 </script>
 

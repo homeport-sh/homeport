@@ -1014,6 +1014,67 @@ run_deploy_hook() {
   sudo -u "$user" -H bash -c "$script"
 }
 
+cmd_upload() { # <app> <release> — receive the binary on stdin into a release dir.
+  # Replaces the old raw `mkdir` + `scp`, so every privileged step goes through
+  # homeportd (and a scoped CI key can only reach it via ci-gate).
+  local app=${1:-} release=${2:-}
+  valid_app "$app"; valid_release "$release"
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app' — register it first"
+  local dir="$HOMEPORT_ROOT/$app/releases/$release"
+  install -d -o deploy -g deploy -m 755 "$HOMEPORT_ROOT/$app/releases" "$dir"
+  # stream stdin to bin with a hard size ceiling (a runaway upload can't fill disk)
+  local max=$((1024 * 1024 * 1024)) size # 1 GiB
+  head -c $((max + 1)) > "$dir/bin"
+  size=$(wc -c < "$dir/bin")
+  (( size > max )) && { rm -rf "$dir"; die "upload exceeds ${max} bytes"; }
+  (( size > 0 )) || { rm -rf "$dir"; die "upload was empty"; }
+  chmod 755 "$dir/bin"
+  echo "uploaded $release ($size bytes)"
+}
+
+# cmd_ci_gate <app> — the SSH forced command for a per-app-scoped CI key. sshd
+# runs THIS instead of whatever the client asked for; the client's request is in
+# $SSH_ORIGINAL_COMMAND. We permit only an allow-listed homeportd verb targeting
+# THIS app — never remove/self-update/key-add, another app, or an interactive
+# shell. Runs as root (via sudo in the authorized_keys line); homeportd
+# re-validates every argument, so re-exec'ing the client's tokens is safe.
+# ci_gate_decision <app> <orig> — pure scoped-key policy. Echoes "allow <off>"
+# (argv index where the homeportd verb starts) or "deny <reason>". No exec/die,
+# so the security policy is unit-testable. Word-splitting is safe: every token
+# the CLI sends is whitespace-free (charset-safe ids/domains, base64 run/release,
+# secrets travel via stdin).
+ci_gate_decision() {
+  local app=$1 orig=$2
+  [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
+  local -a a; read -ra a <<<"$orig"
+  local off
+  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
+  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then off=1
+  else echo "deny may only run homeportd (got '${a[0]:-}')"; return; fi
+  local verb=${a[off]:-} arg1=${a[off+1]:-}
+  case $verb in
+    upload|add|activate|rollback|env|env-sync|env-rm|env-list|status|logs)
+      [[ $arg1 == "$app" ]] || { echo "deny scoped to '$app', not '${arg1:-(none)}'"; return; } ;;
+    version) : ;;
+    *) echo "deny verb '${verb:-(none)}' is not permitted"; return ;;
+  esac
+  echo "allow $off"
+}
+
+cmd_ci_gate() {
+  local app=${1:-}
+  valid_app "$app"
+  # the client's request arrives as arg 2 — the forced command passes
+  # "$SSH_ORIGINAL_COMMAND" through, because sudo's env_reset drops the env var.
+  local orig=${2:-${SSH_ORIGINAL_COMMAND:-}} d
+  d=$(ci_gate_decision "$app" "$orig")
+  if [[ $d == allow\ * ]]; then
+    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
+    exec /usr/local/bin/homeportd "${a[@]:off}"
+  fi
+  die "this key is scoped to '$app' — ${d#deny }"
+}
+
 cmd_activate() {
   local app=${1:-} release=${2:-}
   valid_app "$app"; valid_release "$release"
@@ -1324,24 +1385,73 @@ cmd_status() {
   echo "releases: $(ls -1 "$HOMEPORT_ROOT/$app/releases" 2>/dev/null | sort -r | tr '\n' ' ')"
 }
 
-cmd_key_add() { # append validated SSH public key(s) from stdin for the deploy user
-  local file=/home/deploy/.ssh/authorized_keys line added=0
+cmd_key_add() { # [--scope <app>] — append validated SSH public key(s) from stdin.
+  # With --scope, each key is prefixed with an SSH forced command so it can ONLY
+  # reach ci-gate for that app (deploy that one app, nothing else). Without it,
+  # the key gets full homeportd access (an admin credential for the box).
+  local scope=""
+  if [[ ${1:-} == --scope ]]; then scope=${2:-}; valid_app "$scope"; fi
+  local file=/home/deploy/.ssh/authorized_keys line added=0 prefix="" entry
+  # `restrict` = no pty / agent / port / X11 forwarding, no user rc — so the key
+  # can do exactly one thing: run the forced command. The client's request is
+  # passed as a double-quoted argument ("$SSH_ORIGINAL_COMMAND" is expanded by
+  # the deploy user's shell that runs the forced command); a double-quoted
+  # expansion is one argument and is not re-tokenized, so it can't inject.
+  [[ -n $scope ]] && prefix="command=\"sudo /usr/local/bin/homeportd ci-gate $scope \\\"\$SSH_ORIGINAL_COMMAND\\\"\",restrict "
   while IFS= read -r line; do
     [[ -z $line || $line == \#* ]] && continue
     [[ $line =~ ^(sk-)?(ssh|ecdsa)-[a-z0-9@.-]+\ [A-Za-z0-9+/=]+( .*)?$ ]] \
       || die "line does not look like an SSH public key: '${line:0:40}...'"
-    if ! grep -qxF "$line" "$file" 2>/dev/null; then
-      echo "$line" >> "$file"
+    entry="${prefix}${line}"
+    if ! grep -qxF "$entry" "$file" 2>/dev/null; then
+      echo "$entry" >> "$file"
       added=$((added + 1))
     fi
   done
   chown deploy:deploy "$file"
   chmod 600 "$file"
-  echo "added $added key(s) for the deploy user"
+  echo "added $added key(s)${scope:+ scoped to '$scope'}"
 }
 
-cmd_key_list() {
-  ssh-keygen -lf /home/deploy/.ssh/authorized_keys 2>/dev/null || echo "(no keys)"
+cmd_key_list() { # fingerprints + scope of every authorized key
+  local file=/home/deploy/.ssh/authorized_keys line fp scope
+  [[ -s $file ]] || { echo "(no keys)"; return; }
+  while IFS= read -r line; do
+    [[ -z $line || $line == \#* ]] && continue
+    fp=$(printf '%s\n' "$line" | ssh-keygen -lf /dev/stdin 2>/dev/null) || continue
+    if [[ $line == command=\"sudo\ /usr/local/bin/homeportd\ ci-gate\ * ]]; then
+      # scope ends at the first space, quote, or comma — covers both the
+      # current format (ci-gate app \"$SSH_ORIGINAL_COMMAND\"") and older
+      # argless lines (ci-gate app",restrict)
+      scope=${line#*ci-gate }; scope=${scope%%[ '",']*}
+      echo "$fp [scoped: $scope]"
+    else
+      echo "$fp [full access]"
+    fi
+  done < "$file"
+}
+
+cmd_key_rm() { # <SHA256:fingerprint | key comment> — revoke authorized key(s)
+  local sel=${1:-}
+  [[ -n $sel ]] || die "usage: key-rm <SHA256:fingerprint | key comment>  (see key-list)"
+  local file=/home/deploy/.ssh/authorized_keys line fp tmp removed=0 kept=0
+  [[ -s $file ]] || die "no authorized keys"
+  tmp=$(mktemp)
+  while IFS= read -r line; do
+    [[ -z $line || $line == \#* ]] && { printf '%s\n' "$line" >> "$tmp"; continue; }
+    fp=$(printf '%s\n' "$line" | ssh-keygen -lf /dev/stdin 2>/dev/null | awk '{print $2}')
+    # match the full fingerprint, or the key's trailing comment (e.g. the
+    # homeport-ci-<app> comment ci setup stamps on CI keys)
+    if [[ ( -n $fp && $fp == "$sel" ) || $line == *" $sel" ]]; then
+      removed=$((removed + 1))
+    else
+      printf '%s\n' "$line" >> "$tmp"; kept=$((kept + 1))
+    fi
+  done < "$file"
+  (( removed > 0 )) || { rm -f "$tmp"; die "no key matched '$sel' — see key-list"; }
+  (( kept > 0 )) || { rm -f "$tmp"; die "refusing — that would remove the LAST key and lock you out"; }
+  install -o deploy -g deploy -m 600 "$tmp" "$file"; rm -f "$tmp"
+  echo "revoked $removed key(s); $kept remain"
 }
 
 cmd_version() {
@@ -1451,8 +1561,10 @@ homeportd — root-side homeport helper (run via sudo)
   env-list <app> [--json]            list env keys (values never printed)
   status [app] [--json]              show one app, or all
   logs <app> [-f] [-n N]             app journal
-  key-add                            authorize SSH public key(s) from stdin (e.g. for CI)
-  key-list                           fingerprints of authorized deploy keys
+  upload <app> <release>             receive the app binary on stdin into a release dir
+  key-add [--scope <app>]            authorize key(s) from stdin; --scope locks them to one app
+  key-list                           fingerprints + scope of authorized deploy keys
+  key-rm <fingerprint|comment>       revoke a key (e.g. a leaked or retired CI key)
   self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
   remove <app> --yes                 delete app, releases, env, user
@@ -1465,6 +1577,8 @@ main() {
   shift || true
   case $cmd in
     add)      cmd_add "$@" ;;
+    upload)   cmd_upload "$@" ;;
+    ci-gate)  cmd_ci_gate "$@" ;;
     activate) cmd_activate "$@" ;;
     autoscale) cmd_autoscale "$@" ;;
     rollback) cmd_rollback "$@" ;;
@@ -1476,6 +1590,7 @@ main() {
     logs)     cmd_logs "$@" ;;
     key-add)  cmd_key_add "$@" ;;
     key-list) cmd_key_list "$@" ;;
+    key-rm)   cmd_key_rm "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;

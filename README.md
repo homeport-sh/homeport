@@ -85,11 +85,13 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 | `homeport mcp` | serve these commands as MCP tools (stdio) for AI agents |
 | `homeport server update` | push this CLI's bundled homeportd to the box (post-hardening update path) |
 
-**Trust model note:** `server update` means a deploy key can replace the
-root-side helper — so a deploy key is an admin credential for its box.
-Treat deploy keys like root keys; scoped per-app CI keys are on the
-roadmap. (This is still stricter than Kamal or Coolify, which require root
-SSH / a root daemon outright.)
+**Trust model note:** a full-access deploy key can run any homeportd command
+(including `server update`, which replaces the root-side helper) — so it's an
+admin credential for its box; treat it like a root key. **CI keys are different:**
+`homeport ci setup` issues a key **scoped to one app** via an SSH forced command
+— it can deploy and manage that app and *nothing else* (no `remove`, no
+`self-update`, no other app, no shell). A leaked CI key can't take the box.
+(This is stricter than Kamal or Coolify, which require root SSH / a root daemon.)
 
 ## Your binary's contract
 
@@ -468,11 +470,24 @@ per-app sandbox ships with `homeport server update` and applies on next deploy.
 homeport ci setup github
 ```
 
-Generates a dedicated ed25519 deploy key, authorizes it on the server, pins
-the server's host key (no `StrictHostKeyChecking=no`), writes
+Generates a dedicated ed25519 deploy key **scoped to this app** (an SSH forced
+command lets it deploy/manage only `app` — never remove it, self-update
+homeportd, touch another app, or open a shell), authorizes it on the server,
+pins the server's host key (no `StrictHostKeyChecking=no`), writes
 `.github/workflows/homeport-deploy.yml` with the right toolchain step for your
 project type, and sets the SSH-key + host-key repo secrets via `gh` if
-available.
+available. Pass `--unscoped` for a full-access key (an admin credential for the
+box) if one pipeline must manage several apps.
+
+**Revoking a key** (leaked, or a retired pipeline) — from any admin session:
+
+```
+ssh deploy@<ip> sudo homeportd key-list            # fingerprints + scope
+ssh deploy@<ip> sudo homeportd key-rm homeport-ci-web   # by comment or fingerprint
+```
+
+Revocation is immediate (the next SSH auth fails), and `key-rm` refuses to
+remove the last remaining key so you can't lock yourself out.
 
 **Secrets — two patterns** (the generated workflow uses B by default):
 
@@ -649,8 +664,6 @@ Cross-compile with `GOOS`/`GOARCH` as usual.
 
 ## Roadmap
 
-- Per-app-scoped CI keys via forced commands (a leaked CI key currently has
-  full box access — scoping shrinks its blast radius to one app).
 - Multi-server fan-out (`servers:` list) for the same app.
 
 A web dashboard is intentionally **not** on the near-term roadmap: for a
