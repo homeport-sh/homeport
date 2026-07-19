@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.11
+HOMEPORTD_VERSION=0.1.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport

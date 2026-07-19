@@ -1,0 +1,73 @@
+# GoReleaser — cross-compiled binaries + a Homebrew tap on every `git tag vX`.
+# Run by .github/workflows/release.yml. Test locally with:  goreleaser release --snapshot --clean
+version: 2
+
+project_name: homeport
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./cmd/...
+
+builds:
+  - id: homeport
+    main: ./cmd/homeport
+    binary: homeport
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: homeport
+    formats: [tar.gz]
+    name_template: "homeport_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+# Publishes a Cask to homeport-sh/homebrew-tap so macOS users can:
+#   brew install homeport-sh/tap/homeport
+# (Casks are the current GoReleaser path for prebuilt binaries and strip the
+# Gatekeeper quarantine xattr, so an unsigned binary runs without a prompt.
+# Linux users install via install.sh — casks are macOS-only.)
+homebrew_casks:
+  - name: homeport
+    repository:
+      owner: homeport-sh
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://homeport.sh"
+    description: "Deploy single-binary web apps to your own VPS — no Docker, no registry, no runtime on the server."
+    commit_author:
+      name: homeport-bot
+      email: bot@homeport.sh
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/homeport"]
+          end
+
+release:
+  github:
+    owner: homeport-sh
+    name: homeport
+  draft: false
+  prerelease: auto
+  name_template: "homeport {{ .Version }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"

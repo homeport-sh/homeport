@@ -12,7 +12,9 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
+// version is the release version, stamped from the git tag at build time via
+// -ldflags "-X main.version=…" (GoReleaser). Plain `go build` reports "dev".
+var version = "dev"
 
 func main() {
 	args := os.Args[1:]

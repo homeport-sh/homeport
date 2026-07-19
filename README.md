@@ -14,6 +14,22 @@ homeport deploy                    # build → upload → health-checked activat
 
 A €4/mo Hetzner box comfortably hosts a dozen apps this way.
 
+## Install
+
+**macOS / Linux (Homebrew):**
+```
+brew install homeport-sh/tap/homeport
+```
+
+**Linux / macOS (script):**
+```
+curl -fsSL https://homeport.sh/install | sh
+```
+
+Or grab a prebuilt binary for your OS/arch from the
+[releases page](https://github.com/homeport-sh/homeport/releases). `homeport`
+runs on your laptop/CI — the server needs nothing installed but SSH.
+
 ## Why binaries
 
 The artifact you tested is byte-for-byte the artifact that runs. Deploys are
