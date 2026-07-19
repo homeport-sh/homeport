@@ -14,6 +14,25 @@
 		}
 	}
 
+	// Why an off-the-shelf binary docks like your own code.
+	const cargo = [
+		{
+			k: 'FETCH',
+			t: 'Fetch, don’t compile',
+			d: 'The build step is a plain curl. Any released binary — a headless browser, a metrics exporter, a game server — becomes the artifact homeport ships.'
+		},
+		{
+			k: 'HARDEN',
+			t: 'Docked like the rest',
+			d: 'It still lands in a locked-down systemd unit behind Caddy, health-gated blue/green with sub-second rollback. Off-the-shelf, not off-the-leash.'
+		},
+		{
+			k: 'SANDBOX',
+			t: 'Brings its own sandbox',
+			d: 'sandbox: relaxed hands back the namespaces Lightpanda needs to run its own Chromium sandbox. Every other app on the box stays strict.'
+		}
+	];
+
 	// The real fleet deployed to one €6.49 box.
 	const fleet = [
 		{ app: 'hello', framework: 'Go', mem: '1 MB', port: 8100 },
@@ -59,7 +78,7 @@
 		},
 		{
 			t: 'Zero-downtime deploys',
-			d: 'The new release proves itself on a private port before Caddy flips traffic to it — blue/green for a single app, rolling for replicas. A failed build never reaches a user; the old one keeps serving.'
+			d: 'The new release proves itself on a private port before Caddy flips traffic to it — blue/green for a single app, rolling for replicas. A failed build never reaches a user; the old one keeps serving, and rollback is a sub-second symlink flip.'
 		},
 		{
 			t: 'Scale to zero, then out',
@@ -82,8 +101,8 @@
 			d: 'Caddy fetches and renews a certificate per domain. Point an A record, deploy, and TLS is already on — sslip.io works if you don’t have a domain yet.'
 		},
 		{
-			t: 'Instant rollback',
-			d: 'Every release is an immutable binary kept on disk. Rollback is a symlink flip — sub-second, no rebuild.'
+			t: 'Binary or static',
+			d: 'Ship a compiled binary — Go, Rust, or a bun-compiled Next, Nuxt, SvelteKit or TanStack Start — or point static: at a built folder and Caddy serves the files directly. SPA or multi-page is auto-detected; a landing page or docs site runs with no process at all.'
 		},
 		{
 			t: 'Agent-ready',
@@ -173,9 +192,10 @@
 
 	<p class="hero-rise mt-7 max-w-2xl text-lg leading-relaxed text-mist md:text-xl" style="--i: 2">
 		Deploy Go, Rust, Next, Nuxt, SvelteKit and TanStack Start apps to a plain VPS
-		as a single executable. No Docker. No registry. Nothing installed on the
-		server. One command hardens the box — one command deploys. Zero-downtime
-		releases, scale-to-zero and migrations come standard.
+		as a single executable — or serve a static site straight from a folder. No
+		Docker. No registry. Nothing installed on the server. One command hardens the
+		box — one command deploys. Zero-downtime releases, scale-to-zero and
+		migrations come standard.
 	</p>
 
 	<div class="hero-rise mt-9 flex flex-wrap items-center gap-3" style="--i: 3">
@@ -349,6 +369,58 @@
 				<p class="mt-3 text-sm leading-relaxed text-mist">{f.d}</p>
 			</div>
 		{/each}
+	</div>
+</section>
+
+<!-- ================= ANY BINARY ================= -->
+<section id="cargo" class="mx-auto max-w-[1200px] px-5 py-24 md:py-32">
+	<div use:reveal class="rise max-w-2xl">
+		<p class="kicker">Off-the-shelf</p>
+		<h2 class="display mt-4 text-[clamp(2.4rem,6vw,4.5rem)]">Cargo you<br />didn’t build</h2>
+		<p class="mt-5 max-w-xl text-mist">
+			Homeport ships whatever your build step produces — and that needn’t be your
+			own code. Point the build at a released binary and it docks like any other
+			vessel: one hardened unit, HTTPS, health-gated deploys. Here’s the Lightpanda
+			headless browser, live straight from its GitHub release.
+		</p>
+	</div>
+
+	<div class="mt-12 grid gap-5 lg:grid-cols-5">
+		<!-- the manifest -->
+		<div use:reveal class="rise panel ticked rounded-none lg:col-span-3">
+			<div class="hair-b flex items-center gap-2 px-4 py-2.5">
+				<span class="term-dot" style="background: var(--color-alarm)"></span>
+				<span class="term-dot" style="background: var(--color-flare)"></span>
+				<span class="term-dot" style="background: var(--color-signal)"></span>
+				<span class="mono ml-3 text-xs text-mist-dim">homeport.yaml — cargo manifest</span>
+			</div>
+<pre class="mono overflow-x-auto p-5 text-[0.8rem] leading-7 text-foam"><span class="text-mist">app:</span> lightpanda
+<span class="text-mist">server:</span> deploy@vps
+<span class="text-mist">domain:</span> browser.example.com
+
+<span class="text-mist-dim"># the build just fetches a release — no compile step</span>
+<span class="text-mist">build:</span>
+  <span class="text-mist">command:</span> <span class="text-signal">curl</span> -fsSL github.com/lightpanda-io/…/lightpanda-x86_64-linux <span class="text-signal">-o</span> server
+  <span class="text-mist">artifact:</span> server
+
+<span class="text-mist">run:</span> serve --host <span style="color: var(--color-flare)">&#123;HOST&#125;</span> --port <span style="color: var(--color-flare)">&#123;PORT&#125;</span>
+<span class="text-mist">sandbox:</span> <span style="color: var(--color-flare)">relaxed</span>   <span class="text-mist-dim"># runs its own browser sandbox</span></pre>
+		</div>
+
+		<!-- why it works -->
+		<div class="flex flex-col justify-center gap-7 lg:col-span-2">
+			{#each cargo as c, i (c.k)}
+				<div
+					use:reveal={i * 90}
+					class="rise pl-4"
+					style="border-left: 2px solid var(--color-line-bright);"
+				>
+					<div class="mono text-xs tracking-widest text-signal">{c.k}</div>
+					<h3 class="display mt-2 text-xl">{c.t}</h3>
+					<p class="mt-1.5 text-sm leading-relaxed text-mist">{c.d}</p>
+				</div>
+			{/each}
+		</div>
 	</div>
 </section>
 
