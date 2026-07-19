@@ -451,8 +451,8 @@
 	</div>
 	<div class="mx-auto max-w-[1200px] px-5 pb-8">
 		<p class="mono text-xs text-mist-dim">
-			This site is a SvelteKit app compiled to a single binary and deployed by
-			Homeport to a €4 VPS.
+			This site is a prerendered SvelteKit build, served as static files by
+			Homeport on a €4 VPS — no process, no runtime, just Caddy.
 		</p>
 	</div>
 </footer>

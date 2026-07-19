@@ -1,6 +1,6 @@
 import tailwindcss from '@tailwindcss/vite';
 import { sveltekit } from '@sveltejs/kit/vite';
-import adapter from 'svelte-bun-compile';
+import adapter from '@sveltejs/adapter-static';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
@@ -13,10 +13,10 @@ export default defineConfig({
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 
-			// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
-			// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
-			// See https://svelte.dev/docs/kit/adapters for more information about adapters.
-			adapter: adapter({ target: 'bun-linux-x64' })
+			// Fully prerendered marketing site (prerender = true in +layout.ts) →
+			// adapter-static emits a folder of HTML/CSS/JS to build/, which homeport
+			// serves via Caddy file_server (no process). See homeport.yaml's static:.
+			adapter: adapter()
 		})
 	]
 });

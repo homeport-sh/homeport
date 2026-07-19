@@ -1,13 +1,11 @@
-# homeport deploy config — safe to commit (secrets go via `homeport secrets`)
+# homeport deploy config — safe to commit
 app: website
 server: deploy@116.203.183.59
 domain: homeport.sh
 
-build:
-  command: bun --bun vite build
-  # path to the single Linux executable the build produces
-  artifact: dist/app
+# Fully prerendered SvelteKit site → a folder of files, served by Caddy
+# file_server (no process on the box). SPA vs multi-page is auto-detected.
+static: ./build
 
-health:
-  # a deploy is only promoted once this path returns 200 on the new binary
-  path: /
+build:
+  command: bun run build
