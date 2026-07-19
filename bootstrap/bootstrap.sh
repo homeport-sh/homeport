@@ -418,6 +418,92 @@ write_caddy_internal() {
   } > "$CADDY_DIR/$app.caddy"
 }
 
+# write_caddy_static <app> <domain> <spa> — Caddy serves a directory of files
+# (no process). try_files gives clean URLs (/about → /about.html or /about/);
+# an SPA also falls back to the app shell (200.html preferred, else index.html —
+# both listed so Caddy picks whichever the build produced, no stat needed).
+write_caddy_static() {
+  local app=$1 domain=$2 spa=$3 fallback=""
+  [[ $spa == 1 ]] && fallback=" /200.html /index.html"
+  { printf '%s {\n' "$domain"
+    printf '\tencode zstd gzip\n'
+    printf '\troot * %s/%s/current\n' "$HOMEPORT_ROOT" "$app"
+    printf '\ttry_files {path} {path}.html {path}/%s\n' "$fallback"
+    printf '\tfile_server\n'
+    printf '}\n'
+  } > "$CADDY_DIR/$app.caddy"
+}
+
+# cmd_add_static <app> <domain> <spa> — register a static site: a Caddy
+# file_server on its own domain, no systemd unit, no app user, no port bound.
+cmd_add_static() {
+  local app=$1 domain=$2 spa=${3:-}
+  [[ $domain == - || -z $domain ]] && die "a static site needs a domain"
+  valid_domain "$domain"
+  [[ $spa == 1 ]] || spa=""
+  # host-ownership conflict: the domain must be free (not another app's whole
+  # host, not a gateway host) — mirrors the binary-app check.
+  local _cfg _odom _oapp
+  for _cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $_cfg && $_cfg != "$HOMEPORT_ETC/$app/config" ]] || continue
+    _odom=$(sed -n 's/^DOMAIN=//p' "$_cfg"); [[ $_odom == "$domain" ]] || continue
+    _oapp=$(basename "$(dirname "$_cfg")")
+    die "domain $domain is already used by app '$_oapp'"
+  done
+
+  local port keep=5 was_binary=0
+  if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
+    load_app "$app"; port=$PORT; keep=${KEEP:-5}
+    [[ ${STATIC:-} == 1 ]] || was_binary=1   # switching a binary app → static
+  else
+    port=$(next_port)
+  fi
+  # if this app was a binary before, tear down its process bits
+  if [[ $was_binary -eq 1 ]]; then
+    systemctl disable --now "homeport-$app" 2>/dev/null || true
+    _teardown_idle_units "$app"; _teardown_autoscale_timer "$app"
+    rm -f "/etc/systemd/system/homeport-$app.service" "/etc/systemd/system/homeport-$app@.service"
+    systemctl daemon-reload
+    id -u "homeport-$app" &>/dev/null && userdel "homeport-$app" 2>/dev/null || true
+  fi
+
+  install -d -m 755 "$HOMEPORT_ROOT/$app"
+  # releases/ is the deploy-writable upload target; no shared/ (a static site
+  # has no process and no secrets).
+  install -d -o deploy -g deploy -m 755 "$HOMEPORT_ROOT/$app/releases"
+  mkdir -p "$HOMEPORT_ETC/$app"
+  cat > "$HOMEPORT_ETC/$app/config" <<EOF
+APP=$app
+PORT=$port
+DOMAIN=$domain
+STATIC=1
+SPA=$spa
+KEEP=$keep
+EOF
+  write_caddy_static "$app" "$domain" "$spa"
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+    || die "generated Caddy config failed validation"
+  systemctl reload caddy
+  echo "app '$app' registered (static${spa:+, SPA}) -> https://$domain"
+  echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
+}
+
+# cmd_upload_static <app> <release> — extract a tar.gz of the site from stdin.
+cmd_upload_static() {
+  local app=${1:-} release=${2:-}
+  valid_app "$app"; valid_release "$release"
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app' — register it first"
+  local dir="$HOMEPORT_ROOT/$app/releases/$release"
+  rm -rf "$dir"
+  install -d -o deploy -g deploy -m 755 "$dir"
+  # cap the compressed stream (2 GiB) so a runaway upload can't fill the disk;
+  # GNU tar refuses '..' members by default, so extraction stays inside dir.
+  head -c $((2 * 1024 * 1024 * 1024)) | tar -xzf - -C "$dir" --no-same-owner 2>/dev/null \
+    || { rm -rf "$dir"; die "could not extract upload (not a .tar.gz?)"; }
+  [[ -f "$dir/index.html" ]] || { rm -rf "$dir"; die "upload has no index.html at its root"; }
+  echo "uploaded $release ($(du -sh "$dir" 2>/dev/null | cut -f1))"
+}
+
 # gateway_slug <domain> — filesystem-safe token for a shared-host fragment.
 # printf (not echo) so a trailing newline doesn't become a trailing '-'.
 gateway_slug() { printf %s "$1" | tr -c 'a-zA-Z0-9' '-'; }
@@ -478,11 +564,14 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
+  # static sites are a wholly different shape (Caddy file_server, no process) —
+  # handle them in their own function, leaving the binary-app path below untouched.
+  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa"; return; }
   [[ $sandbox == - ]] && sandbox=""
   [[ $strategy == - ]] && strategy=""
   [[ $health_timeout == - ]] && health_timeout=""
@@ -1063,7 +1152,7 @@ ci_gate_decision() {
   else echo "deny may only run homeportd (got '${a[0]:-}')"; return; fi
   local verb=${a[off]:-} arg1=${a[off+1]:-}
   case $verb in
-    upload|add|activate|rollback|env|env-sync|env-rm|env-list|status|logs)
+    upload|upload-static|add|activate|rollback|env|env-sync|env-rm|env-list|status|logs)
       [[ $arg1 == "$app" ]] || { echo "deny scoped to '$app', not '${arg1:-(none)}'"; return; } ;;
     version) : ;;
     *) echo "deny verb '${verb:-(none)}' is not permitted"; return ;;
@@ -1085,10 +1174,26 @@ cmd_ci_gate() {
   die "this key is scoped to '$app' — ${d#deny }"
 }
 
+# cmd_activate_static <app> <release> — promote a static release: an atomic
+# symlink flip. Caddy's root follows current/ per request, so the new files are
+# live the instant the symlink moves — no reload, no process, no downtime.
+cmd_activate_static() {
+  local app=$1 release=$2
+  local dir="$HOMEPORT_ROOT/$app/releases/$release"
+  [[ -f "$dir/index.html" ]] || die "no site at $dir (index.html missing) — upload it first"
+  # root-owned so the deploy user can't tamper post-activate; a+rX so Caddy
+  # (its own user) can read the files and traverse the dirs.
+  chown -R root:root "$dir"; chmod -R a+rX "$dir"
+  swap_current "$app" "releases/$release"
+  prune_releases "$app"
+  echo "live: $release (https://$DOMAIN)"
+}
+
 cmd_activate() {
   local app=${1:-} release=${2:-}
   valid_app "$app"; valid_release "$release"
   load_app "$app"
+  [[ ${STATIC:-} == 1 ]] && { cmd_activate_static "$app" "$release"; return; }
   local dir="$HOMEPORT_ROOT/$app/releases/$release"
   [[ -f "$dir/bin" ]] || die "no binary at $dir/bin — upload it first"
   chown -R root:root "$dir"
@@ -1297,6 +1402,11 @@ cmd_env_list() { # keys only — values never leave the box
 
 app_state() { # is-active for an app, whatever its mode (uses $PORT/$REPLICAS)
   local app=$1
+  # a static site has no service; it's "active" whenever a release is deployed
+  if [[ ${STATIC:-} == 1 ]]; then
+    [[ -L "$HOMEPORT_ROOT/$app/current" ]] && echo active || echo inactive
+    return
+  fi
   if is_template; then
     systemctl is-active "homeport-$app@$(( $(replica_base "$PORT") + 1 ))" 2>/dev/null || true
   else
@@ -1588,6 +1698,7 @@ main() {
   case $cmd in
     add)      cmd_add "$@" ;;
     upload)   cmd_upload "$@" ;;
+    upload-static) cmd_upload_static "$@" ;;
     ci-gate)  cmd_ci_gate "$@" ;;
     activate) cmd_activate "$@" ;;
     autoscale) cmd_autoscale "$@" ;;

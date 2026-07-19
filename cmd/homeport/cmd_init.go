@@ -18,10 +18,54 @@ type projectInfo struct {
 	app         string
 	build       string
 	artifact    string
+	static      string // built directory to serve as files (static mode), "" for a binary
 	note        string // extra comment block for homeport.yaml
 	gitignore   string // entry to append, "" if none
 	ciToolchain string // GitHub Actions step(s) installing the build toolchain
 }
+
+// configHasOutput reports whether any of the given framework config files sets
+// `output: '<value>'` — how Next (export) / Astro (server) declare their mode.
+func configHasOutput(files []string, value string) bool {
+	re := regexp.MustCompile(`output\s*:\s*['"]` + value + `['"]`)
+	for _, f := range files {
+		if b, err := os.ReadFile(f); err == nil && re.Match(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectStatic decides, BEFORE any build, whether a JS framework is configured
+// to emit a folder of files (static) rather than a server — by reading its
+// config, not its output. Returns nil for server/binary apps.
+func detectStatic(has func(string) bool, app, bunCI string) *projectInfo {
+	build := "npm run build"
+	if fileExists("bun.lock") || fileExists("bun.lockb") {
+		build = "bun run build"
+	}
+	nextCfgs := []string{"next.config.js", "next.config.mjs", "next.config.ts"}
+	astroCfgs := []string{"astro.config.mjs", "astro.config.ts", "astro.config.js"}
+	switch {
+	// SvelteKit with adapter-static → prerendered/SPA output in build/
+	case has("@sveltejs/kit") && has("@sveltejs/adapter-static"):
+		return &projectInfo{kind: "sveltekit-static", app: app, static: "./build", build: build, ciToolchain: bunCI}
+	// Next.js static export
+	case has("next") && configHasOutput(nextCfgs, "export"):
+		return &projectInfo{kind: "next-static", app: app, static: "./out", build: build, ciToolchain: bunCI}
+	// Astro is static by default; a server adapter or output:server/hybrid means SSR
+	case has("astro") && !has("@astrojs/node") && !has("@astrojs/vercel") && !has("@astrojs/netlify") && !has("@astrojs/cloudflare") &&
+		!configHasOutput(astroCfgs, "server") && !configHasOutput(astroCfgs, "hybrid"):
+		return &projectInfo{kind: "astro-static", app: app, static: "./dist", build: build, ciToolchain: bunCI}
+	// plain Vite SPA (React/Vue/etc.) — Vite present with no SSR framework
+	case has("vite") && !has("@sveltejs/kit") && !has("next") && !has("nuxt") && !has("astro") &&
+		!has("@tanstack/react-start") && !has("@tanstack/solid-start"):
+		return &projectInfo{kind: "vite-static", app: app, static: "./dist", build: build, ciToolchain: bunCI}
+	}
+	return nil
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 func detectProject() projectInfo {
 	if data, err := os.ReadFile("package.json"); err == nil {
@@ -38,6 +82,12 @@ func detectProject() projectInfo {
 			}
 			bunCI := `      - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile`
+
+			// Static output (adapter-static, Next export, static Astro, Vite SPA)
+			// is a folder of files, not a server — check before the binary paths.
+			if s := detectStatic(has, sanitizeAppName(pkg.Name), bunCI); s != nil {
+				return *s
+			}
 
 			if has("next-bun-compile") {
 				return projectInfo{
@@ -255,6 +305,36 @@ func cmdInit(args []string) error {
 		return fmt.Errorf("server should look like deploy@1.2.3.4 (got %q)", server)
 	case !domainRe.MatchString(domain):
 		return fmt.Errorf("%q doesn't look like a domain", domain)
+	}
+
+	// Static site → a files-only homeport.yaml (Caddy serves the built dir; no
+	// process, no binary artifact). SPA vs multi-page is auto-detected at deploy.
+	if det.static != "" {
+		staticYAML := fmt.Sprintf(`# homeport deploy config — safe to commit
+app: %s
+server: %s
+domain: %s
+
+# Detected a %s build: a folder of files, served directly by Caddy (auto HTTPS,
+# no process on the box). SPA vs multi-page is auto-detected from the output;
+# uncomment to force it.
+static: %s
+# spa: true
+
+build:
+  command: %s
+`, app, server, domain, det.kind, det.static, det.build)
+		if err := os.WriteFile(configFile, []byte(staticYAML), 0o644); err != nil {
+			return err
+		}
+		step("wrote %s (static site → %s)", configFile, det.static)
+		saveLastServer(server)
+		fmt.Printf(`
+next steps:
+  homeport bootstrap root@%s     # once, if the server isn't set up yet
+  homeport deploy
+`, server[strings.Index(server, "@")+1:])
+		return nil
 	}
 
 	yaml := fmt.Sprintf(`# homeport deploy config — safe to commit (secrets go via `+"`homeport secrets`"+`)

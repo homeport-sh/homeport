@@ -68,6 +68,10 @@ func TestParseConfigRejects(t *testing.T) {
 		{"server leading dash", "app: web\nserver: -evil@host\ndomain: web.example.com\n", "server"},
 		{"run non-PORT/HOST var", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve $PORTS\n", "only reference"},
 		{"run $DBHOST var", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --db $DBHOST\n", "only reference"},
+		{"static + internal", "app: docs\nserver: deploy@1.2.3.4\ninternal: true\nstatic: ./dist\n", "static"},
+		{"static + process field", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ./dist\nreplicas: 3\n", "files-only"},
+		{"static + path", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ./dist\npath: /docs\n", "path-mounting"},
+		{"static traversal", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ../secrets\n", "relative directory"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -102,7 +106,9 @@ func TestParseConfigAccepts(t *testing.T) {
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port ${PORT} --host ${HOST}\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: relaxed\nstrategy: recreate\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nhealth:\n  timeout: 90s\n",
-		"app: worker\nserver: 1.2.3.4\ninternal: true\n", // bare host normalizes, internal ok
+		"app: worker\nserver: 1.2.3.4\ninternal: true\n",                                // bare host normalizes, internal ok
+		"app: docs\nserver: deploy@1.2.3.4\ndomain: docs.example.com\nstatic: ./dist\n", // static site
+		"app: docs\nserver: deploy@1.2.3.4\ndomain: docs.example.com\nstatic: dist\nspa: true\n",
 	}
 	for i, y := range ok {
 		if _, err := parseConfig([]byte(y)); err != nil {
@@ -179,25 +185,37 @@ func TestAddArgsPositions(t *testing.T) {
 	}
 	args := cfg.addArgs()
 	// add <app> <domain> <health> <mem> <cpu> <idle> <timeout> <replicas>
-	//     <autoscale> <run> <release> <post> <path> <sandbox> <strategy> <health-timeout>
+	//   <autoscale> <run> <release> <post> <path> <sandbox> <strategy>
+	//   <health-timeout> <static> <spa>
 	if args[0] != "add" || args[1] != "web" || args[2] != "web.example.com" || args[3] != "/healthz" {
 		t.Fatalf("leading args wrong: %v", args[:4])
 	}
 	if args[4] != "512M" {
 		t.Errorf("memory should be arg 4, got %q", args[4])
 	}
-	if args[len(args)-1] != "60s" {
-		t.Errorf("health timeout should be last arg, got %q", args[len(args)-1])
-	}
-	if args[len(args)-2] != "recreate" {
-		t.Errorf("strategy should be 2nd-to-last, got %q", args[len(args)-2])
-	}
-	if args[len(args)-3] != "relaxed" {
-		t.Errorf("sandbox should be 3rd-to-last, got %q", args[len(args)-3])
+	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa>
+	tail := args[len(args)-5:]
+	want := []string{"relaxed", "recreate", "60s", "-", "-"} // not static, spa off
+	for i := range want {
+		if tail[i] != want[i] {
+			t.Errorf("tail arg %d = %q, want %q (full tail: %v)", i, tail[i], want[i], tail)
+		}
 	}
 	// unset optional fields render as "-"
 	if args[5] != "-" { // cpu
 		t.Errorf("unset cpu should be '-', got %q", args[5])
+	}
+}
+
+func TestAddArgsStatic(t *testing.T) {
+	spa := true
+	cfg := &config{App: "docs", Domain: "docs.example.com", Static: "./dist", SPA: &spa, spaResolved: true, Health: healthConfig{Path: "/"}, Replicas: 1}
+	args := cfg.addArgs()
+	if args[len(args)-2] != "1" { // static
+		t.Errorf("static marker should be 2nd-to-last '1', got %q", args[len(args)-2])
+	}
+	if args[len(args)-1] != "1" { // spa
+		t.Errorf("spa should be last '1', got %q", args[len(args)-1])
 	}
 }
 

@@ -117,7 +117,9 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 | `domain` † | — | public hostname (Caddy + auto-TLS); omit for internal |
 | `internal` | `false` | private app — loopback only, reached via `homeport tunnel` |
 | `path` † | — | mount under a shared `domain` (API gateway); prefix is stripped |
-| `build.command` | `bun run build` | build step run locally/in CI |
+| `static` | — | serve a directory of files via Caddy (no process); see [Static sites](#static-sites-no-binary) |
+| `spa` | *(auto)* | `true`/`false` override the SPA catch-all fallback for `static` |
+| `build.command` | `bun run build`¹ | build step run locally/in CI |
 | `build.artifact` | `server` | path to the Linux binary the build produces |
 | `health.path` | `/` | must return 200 before a release is promoted |
 | `health.timeout` | `30s` | how long to wait for that 200 |
@@ -132,10 +134,48 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 | `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
 
+¹ `build.command`/`build.artifact` default only for binary apps; a `static` site has no build step by default.
+
 Secrets are **not** in this file — they go through `homeport secrets` and live
 only on the server. `idle`, `replicas`, and `autoscale` are mutually exclusive
 axes — see the scale-to-zero, replicas, and autoscaling sections below for how
 each behaves.
+
+## Static sites (no binary)
+
+A folder of files — an SPA, a docs site, a landing page — needs no process at
+all: point `static:` at the built directory and Caddy serves it directly (auto
+HTTPS, compression, ETags), so there's *nothing* running on the box but the
+file server.
+
+```yaml
+# homeport.yaml
+app: docs
+domain: docs.example.com
+static: ./dist          # the built directory
+build:
+  command: npm run build   # optional — omit for plain HTML
+# spa: true             # optional override; auto-detected by default
+```
+
+`homeport deploy` builds (if `build.command` is set), tars the directory,
+streams it up, and flips an atomic symlink — the new files are live instantly,
+**zero downtime, no reload**. Rollback is a flip.
+
+**SPA vs multi-page is auto-detected**, so client-routed apps get the right
+catch-all fallback and static-per-route sites don't:
+
+| Your build | Detected | Behaviour |
+|---|---|---|
+| SvelteKit `adapter-static` (SPA) → `200.html` | **SPA** | unmatched routes serve the app shell |
+| Vite / CRA → lone `index.html` | **SPA** | ″ |
+| Next `output: export`, Astro, Hugo, Docusaurus → per-route `.html` | **multi-page** | clean URLs (`/about` → `about.html`); unmatched → 404 |
+
+Set `spa: true`/`false` to override. Static apps are public (a domain, no
+`internal`) and have no process — so `run`, `idle`, `replicas`, `autoscale`,
+`sandbox`, `resources` don't apply. If your app needs SSR / API routes /
+server functions, it's not static — deploy it as a **binary** (see the
+framework notes below), which is what `*-bun-compile` produces.
 
 ## Private apps (no public URL)
 

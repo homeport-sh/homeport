@@ -17,6 +17,10 @@ func cmdDeploy(args []string) error {
 		return err
 	}
 
+	if cfg.isStatic() {
+		return deployStatic(cfg, args)
+	}
+
 	if !hasFlag(args, "--no-build") {
 		step("building: %s", cfg.Build.Command)
 		if err := run(nil, "sh", "-c", cfg.Build.Command); err != nil {

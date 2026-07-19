@@ -44,6 +44,8 @@ type config struct {
 	Server      string          `yaml:"server"`
 	Domain      string          `yaml:"domain"`
 	Path        string          `yaml:"path"`
+	Static      string          `yaml:"static"` // a directory → Caddy file_server, no process
+	SPA         *bool           `yaml:"spa"`    // nil = auto-detect; true/false override the fallback
 	Run         string          `yaml:"run"`
 	Release     string          `yaml:"release"`
 	PostRelease string          `yaml:"post_release"`
@@ -57,7 +59,15 @@ type config struct {
 	Build       buildConfig     `yaml:"build"`
 	Health      healthConfig    `yaml:"health"`
 	Resources   resourcesConfig `yaml:"resources"`
+
+	// spaResolved is the concrete SPA decision for this deploy (SPA overridden
+	// or auto-detected from the static dir); set by cmdDeploy, read by addArgs.
+	spaResolved bool
 }
+
+// isStatic reports whether this is a static-files app (Caddy file_server, no
+// process/unit/health-check).
+func (c *config) isStatic() bool { return c.Static != "" }
 
 // These mirror homeportd's server-side validation — fail fast with a good
 // message locally instead of a terse remote one.
@@ -81,6 +91,9 @@ var (
 	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
 	// an empty `${}` or an unterminated `${…` with no closing brace
 	malformedRefRe = regexp.MustCompile(`\$\{\}|\$\{[^}]*$`)
+	// static: a relative directory. A leading "./" is fine; no "..", no
+	// absolute paths (validated separately for the traversal check).
+	staticDirRe = regexp.MustCompile(`^\.?/?[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
 )
 
 func loadConfig() (*config, error) {
@@ -125,11 +138,15 @@ func parseConfig(data []byte) (*config, error) {
 		}
 		*f.ptr = v
 	}
-	if cfg.Build.Command == "" {
-		cfg.Build.Command = "bun run build"
-	}
-	if cfg.Build.Artifact == "" {
-		cfg.Build.Artifact = "server"
+	// binary-app defaults — a static site has no build step by default (plain
+	// HTML) and no binary artifact.
+	if !cfg.isStatic() {
+		if cfg.Build.Command == "" {
+			cfg.Build.Command = "bun run build"
+		}
+		if cfg.Build.Artifact == "" {
+			cfg.Build.Artifact = "server"
+		}
 	}
 	if cfg.Health.Path == "" {
 		cfg.Health.Path = "/"
@@ -191,6 +208,14 @@ func parseConfig(data []byte) (*config, error) {
 		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default) or 'relaxed' (for binaries that run their own sandbox, e.g. a browser), got %q", configFile, cfg.Sandbox)
 	case cfg.Strategy != "" && cfg.Strategy != "blue-green" && cfg.Strategy != "recreate":
 		return nil, fmt.Errorf("%s: strategy must be 'blue-green' (default, zero-downtime) or 'recreate' (restart in place — for singleton apps that can't run two instances), got %q", configFile, cfg.Strategy)
+	case cfg.isStatic() && cfg.Internal:
+		return nil, fmt.Errorf("%s: a static site needs a domain — Caddy serves it publicly", configFile)
+	case cfg.isStatic() && cfg.Path != "":
+		return nil, fmt.Errorf("%s: static path-mounting isn't supported yet — give the static site its own domain", configFile)
+	case cfg.isStatic() && (cfg.Run != "" || cfg.Idle || cfg.Replicas > 1 || cfg.Autoscale.on() || cfg.Sandbox != "" || cfg.Strategy != "" || cfg.Resources.Memory != "" || cfg.Resources.CPU != ""):
+		return nil, fmt.Errorf("%s: static is files-only (no process) — remove run/idle/replicas/autoscale/sandbox/strategy/resources", configFile)
+	case cfg.isStatic() && (!staticDirRe.MatchString(cfg.Static) || strings.Contains(cfg.Static, "..")):
+		return nil, fmt.Errorf("%s: static must be a relative directory (e.g. ./dist, no .. or leading /), got %q", configFile, cfg.Static)
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -281,7 +306,17 @@ func (c *config) addArgs() []string {
 		dashIfEmpty(c.Sandbox),
 		dashIfEmpty(c.Strategy),
 		dashIfEmpty(c.Health.Timeout),
+		boolArg(c.isStatic()),  // arg 17: static mode
+		boolArg(c.spaResolved), // arg 18: SPA fallback
 	}
+}
+
+// boolArg renders a bool as homeportd's "1"/"-" positional convention.
+func boolArg(b bool) string {
+	if b {
+		return "1"
+	}
+	return "-"
 }
 
 // runVarRe matches exactly the braced ${PORT}/${HOST} or the bare $PORT/$HOST
