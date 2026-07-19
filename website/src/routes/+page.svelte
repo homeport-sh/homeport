@@ -82,7 +82,7 @@
 		},
 		{
 			t: 'Scale to zero, then out',
-			d: 'Quiet apps sleep to near-zero RAM and wake on the first request in about half a second. Busy ones autoscale on CPU between a floor and a ceiling. Serverless economics on a box you rent for €4.'
+			d: 'Quiet apps sleep to near-zero RAM and wake on the first request in about half a second. Busy ones autoscale on CPU between a floor and a ceiling. Serverless economics on a box you rent for a few euros a month.'
 		},
 		{
 			t: 'Zero-downtime migrations',
@@ -478,7 +478,7 @@
 		<span class="beacon mb-8" style="width: 0.8rem; height: 0.8rem;"></span>
 		<h2 class="display text-[clamp(3rem,9vw,7rem)]">Dock your app.</h2>
 		<p class="mt-6 max-w-lg text-lg text-mist">
-			A €4 box, three commands, and your app is live with HTTPS. Your app, docked.
+			A cheap VPS, three commands, and your app is live with HTTPS. Your app, docked.
 		</p>
 
 		<button
@@ -524,7 +524,7 @@
 	<div class="mx-auto max-w-[1200px] px-5 pb-8">
 		<p class="mono text-xs text-mist-dim">
 			This site is a prerendered SvelteKit build, served as static files by
-			Homeport on a €4 VPS — no process, no runtime, just Caddy.
+			Homeport on a cheap VPS — no process, no runtime, just Caddy.
 		</p>
 	</div>
 </footer>
