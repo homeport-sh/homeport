@@ -362,7 +362,10 @@
 		</p>
 	</div>
 
-	<div use:reveal class="rise panel ticked overflow-x-auto rounded-none">
+	<!-- overflow-x-auto is for phones (table min-w). On md+ the table fits but
+	     border-collapse rounds it 1px wide, which would summon a do-nothing
+	     scrollbar pair — clip swallows that pixel instead. -->
+	<div use:reveal class="rise panel ticked overflow-x-auto md:overflow-x-clip rounded-none">
 		<table class="w-full min-w-[640px] border-collapse text-left">
 			<thead>
 				<tr class="mono text-xs tracking-wide text-mist-dim uppercase">
