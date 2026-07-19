@@ -387,14 +387,14 @@
 
 	<div class="mt-12 grid gap-5 lg:grid-cols-5">
 		<!-- the manifest -->
-		<div use:reveal class="rise panel ticked rounded-none lg:col-span-3">
+		<div use:reveal class="rise panel ticked min-w-0 rounded-none lg:col-span-3">
 			<div class="hair-b flex items-center gap-2 px-4 py-2.5">
 				<span class="term-dot" style="background: var(--color-alarm)"></span>
 				<span class="term-dot" style="background: var(--color-flare)"></span>
 				<span class="term-dot" style="background: var(--color-signal)"></span>
 				<span class="mono ml-3 text-xs text-mist-dim">homeport.yaml — cargo manifest</span>
 			</div>
-<pre class="mono overflow-x-auto p-5 text-[0.8rem] leading-7 text-foam"><span class="text-mist">app:</span> lightpanda
+<pre class="mono max-w-full overflow-x-auto p-5 text-[0.8rem] leading-7 text-foam"><span class="text-mist">app:</span> lightpanda
 <span class="text-mist">server:</span> deploy@vps
 <span class="text-mist">domain:</span> browser.example.com
 
@@ -408,7 +408,7 @@
 		</div>
 
 		<!-- why it works -->
-		<div class="flex flex-col justify-center gap-7 lg:col-span-2">
+		<div class="flex min-w-0 flex-col justify-center gap-7 lg:col-span-2">
 			{#each cargo as c, i (c.k)}
 				<div
 					use:reveal={i * 90}
