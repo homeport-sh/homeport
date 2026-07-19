@@ -508,7 +508,7 @@
 		<div class="flex items-center gap-2.5">
 			<span class="beacon"></span>
 			<span class="display text-lg">Homeport</span>
-			<span class="mono ml-2 text-xs text-mist-dim">the fastest way to ship binaries</span>
+			<span class="mono ml-2 text-xs text-mist">the fastest way to ship binaries</span>
 		</div>
 		<div class="mono flex flex-wrap gap-6 text-sm text-mist">
 			<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="hover:text-foam">GitHub</a>
@@ -518,11 +518,11 @@
 			<a href="https://www.npmjs.com/package/next-bun-compile" target="_blank" rel="noopener noreferrer" class="hover:text-foam">
 				next-bun-compile
 			</a>
-			<span class="text-mist-dim">MIT</span>
+			<span class="text-mist">MIT</span>
 		</div>
 	</div>
 	<div class="mx-auto max-w-[1200px] px-5 pb-8">
-		<p class="mono text-xs text-mist-dim">
+		<p class="mono text-xs text-mist">
 			This site is a prerendered SvelteKit build, served as static files by
 			Homeport on a cheap VPS — no process, no runtime, just Caddy.
 		</p>
