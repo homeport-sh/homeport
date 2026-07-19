@@ -95,7 +95,7 @@ func detectProject() projectInfo {
 					app:  sanitizeAppName(pkg.Name),
 					// NBC_TARGET cross-compiles; default to a standard x86-64
 					// Linux box so a macOS build deploys as-is.
-					build:    "NBC_TARGET=bun-linux-x64 bun run build",
+					build:    "NBC_TARGET=bun-linux-x64 bun --bun run build",
 					artifact: "server",
 					note: `# NBC_TARGET cross-compiles the binary: bun-linux-x64 for a standard
 # x86-64 Linux box, bun-linux-arm64 for ARM. Drop it to build for the
