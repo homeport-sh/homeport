@@ -108,6 +108,30 @@
 		name="description"
 		content="Deploy single-binary web apps — Go, Rust, Next, Nuxt, SvelteKit, TanStack Start — to your own VPS. No Docker, no registry, no runtime on the server. Zero-downtime blue/green deploys, scale-to-zero, autoscaling and migrations — without Kubernetes."
 	/>
+	<link rel="canonical" href="https://homeport.sh/" />
+	<meta name="theme-color" content="#05090d" />
+
+	<!-- Open Graph -->
+	<meta property="og:type" content="website" />
+	<meta property="og:site_name" content="Homeport" />
+	<meta property="og:url" content="https://homeport.sh/" />
+	<meta property="og:title" content="Homeport — ship binaries to production" />
+	<meta
+		property="og:description"
+		content="Single executable to a plain VPS. No Docker, no registry, nothing on the server. Zero-downtime deploys, scale-to-zero and migrations, standard."
+	/>
+	<meta property="og:image" content="https://homeport.sh/og.png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+
+	<!-- Twitter -->
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:title" content="Homeport — ship binaries to production" />
+	<meta
+		name="twitter:description"
+		content="Single executable to a plain VPS. No Docker, no registry, nothing on the server. Zero-downtime deploys, scale-to-zero and migrations, standard."
+	/>
+	<meta name="twitter:image" content="https://homeport.sh/og.png" />
 </svelte:head>
 
 <!-- ================= NAV ================= -->
