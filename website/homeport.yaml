@@ -7,13 +7,18 @@ domain: homeport.sh
 # file_server (no process on the box). SPA vs multi-page is auto-detected.
 static: ./build
 
-# Response headers this site opts into (homeport sets none on its own). Global,
-# safe for a static marketing site we control: HSTS, no MIME sniffing, no framing.
+# Response headers this site opts into (homeport sets none on its own), keyed by
+# path glob. "/*" = every response: HSTS, no MIME sniffing, no framing. The
+# content-hashed asset dir gets a 1-year immutable cache (safe — new builds ship
+# new filenames), but HTML deliberately does NOT, so deploys show up immediately.
 headers:
-  Strict-Transport-Security: "max-age=31536000; includeSubDomains"
-  X-Content-Type-Options: nosniff
-  X-Frame-Options: SAMEORIGIN
-  Referrer-Policy: strict-origin-when-cross-origin
+  "/*":
+    Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options: nosniff
+    X-Frame-Options: SAMEORIGIN
+    Referrer-Policy: strict-origin-when-cross-origin
+  "/_app/immutable/*":
+    Cache-Control: "public, max-age=31536000, immutable"
 
 build:
   command: bun run build
