@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ type config struct {
 	Build       buildConfig     `yaml:"build"`
 	Health      healthConfig    `yaml:"health"`
 	Resources   resourcesConfig `yaml:"resources"`
+	Headers     map[string]string `yaml:"headers"` // extra response headers, verbatim; homeport never sets any on its own
 
 	// spaResolved is the concrete SPA decision for this deploy (SPA overridden
 	// or auto-detected from the static dir); set by cmdDeploy, read by addArgs.
@@ -86,6 +88,12 @@ var (
 	memoryRe  = regexp.MustCompile(`^[0-9]+[KMG]$`)
 	cpuRe     = regexp.MustCompile(`^[0-9]+%$`)
 	timeoutRe = regexp.MustCompile(`^[0-9]+[smh]$`)
+
+	// response-header name/value: a name is a plain token; a value is one line of
+	// printable ASCII (quotes/braces/backslashes are rejected separately, as they
+	// could break out of the generated Caddyfile).
+	headerNameRe  = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+	headerValueRe = regexp.MustCompile(`^[ -~]*$`)
 	// run: launch args appended to the binary in ExecStart. exec (no shell),
 	// so no shell metachars; only $PORT/$HOST are substituted server-side.
 	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
@@ -217,6 +225,9 @@ func parseConfig(data []byte) (*config, error) {
 	case cfg.isStatic() && (!staticDirRe.MatchString(cfg.Static) || strings.Contains(cfg.Static, "..")):
 		return nil, fmt.Errorf("%s: static must be a relative directory (e.g. ./dist, no .. or leading /), got %q", configFile, cfg.Static)
 	}
+	if err := validateHeaders(configFile, cfg.Headers); err != nil {
+		return nil, err
+	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
 	}
@@ -308,7 +319,42 @@ func (c *config) addArgs() []string {
 		dashIfEmpty(c.Health.Timeout),
 		boolArg(c.isStatic()),  // arg 17: static mode
 		boolArg(c.spaResolved), // arg 18: SPA fallback
+		encodeHeaders(c.Headers), // arg 19: user response headers (base64 "Name: value" lines)
 	}
+}
+
+// encodeHeaders serialises the user's response headers as sorted "Name: value"
+// lines, base64-encoded into a single positional token ("-" when none). Sorted
+// so the command (and its tests) are deterministic.
+func encodeHeaders(h map[string]string) string {
+	if len(h) == 0 {
+		return "-"
+	}
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&b, "%s: %s\n", name, h[name])
+	}
+	return base64.StdEncoding.EncodeToString([]byte(b.String()))
+}
+
+// validateHeaders rejects header names/values that could break out of the
+// generated Caddyfile — CRLF injection, or quote/brace/backslash escapes.
+// homeport emits these verbatim, so each must be a safe single line.
+func validateHeaders(configFile string, h map[string]string) error {
+	for name, val := range h {
+		if !headerNameRe.MatchString(name) {
+			return fmt.Errorf("%s: header name %q is invalid (letters, digits and - only)", configFile, name)
+		}
+		if !headerValueRe.MatchString(val) || strings.ContainsAny(val, "\"\\{}") {
+			return fmt.Errorf(`%s: header %q has an unsafe value (one line of printable ASCII, no " \ { })`, configFile, name)
+		}
+	}
+	return nil
 }
 
 // boolArg renders a bool as homeportd's "1"/"-" positional convention.

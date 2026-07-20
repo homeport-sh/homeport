@@ -66,6 +66,30 @@ write_caddy_internal svc 8102 3
 has "internal LB addr" "$(cat "$CADDY_DIR/svc.caddy")" "http://127.0.0.1:8102 {"
 has "internal LB pol"  "$(cat "$CADDY_DIR/svc.caddy")" "lb_policy least_conn"
 
+# --- user response headers (opt-in; homeport sets NONE by default) ---
+if [[ "$(cat "$CADDY_DIR/web.caddy")" == *"header {"* ]]; then
+  printf 'FAIL headers: default fragment has a header block\n'; fails=$((fails + 1))
+else printf 'ok   headers: none by default\n'; fi
+HEADERS_B64=$(printf 'Cache-Control: public, max-age=60\nX-Frame-Options: SAMEORIGIN\n' | base64 | tr -d '\n')
+write_caddy hdr h.example.com 8105 plain 1
+has "headers block"   "$(cat "$CADDY_DIR/hdr.caddy")" "header {"
+has "headers quoted"  "$(cat "$CADDY_DIR/hdr.caddy")" 'X-Frame-Options "SAMEORIGIN"'
+has "headers value"   "$(cat "$CADDY_DIR/hdr.caddy")" 'Cache-Control "public, max-age=60"'
+HEADERS_B64=""
+# validate_headers is the security gate — accepts a clean header, rejects any
+# value that could break out of the generated Caddyfile.
+b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+if ( validate_headers "$(b64 'X-Frame-Options: DENY')" ) 2>/dev/null; then
+  printf 'ok   headers: accepts clean\n'; else printf 'FAIL headers: rejected clean\n'; fails=$((fails + 1)); fi
+reject_hdr() { # reject_hdr <label> <raw>
+  if ( validate_headers "$(b64 "$2")" ) 2>/dev/null; then
+    printf 'FAIL %s: accepted\n' "$1"; fails=$((fails + 1)); else printf 'ok   %s\n' "$1"; fi
+}
+reject_hdr "headers reject brace"     'X: a{b'
+reject_hdr "headers reject quote"     'X: a"b'
+reject_hdr "headers reject backslash" 'X: a\b'
+reject_hdr "headers reject bad name"  'Bad Name: v'
+
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
 if ! command -v mapfile >/dev/null 2>&1; then

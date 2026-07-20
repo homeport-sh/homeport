@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.1.0
+HOMEPORTD_VERSION=0.1.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -393,6 +393,39 @@ app_mode() {
   else echo plain; fi
 }
 
+# validate_headers <b64> — decode and check the app's user-configured response
+# headers; die on bad encoding or an unsafe name/value. THE SECURITY GATE: these
+# values are emitted verbatim into a generated Caddyfile, so anything that could
+# break out of it (CRLF, quotes, braces, backslashes) is rejected. Runs in the
+# current shell (not a $() subshell) so die() actually aborts the command.
+validate_headers() {
+  local b64=$1 decoded line name val
+  [[ -n $b64 && $b64 != - ]] || return 0
+  decoded=$(printf %s "$b64" | base64 -d 2>/dev/null) || die "headers: invalid encoding"
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    name=${line%%: *}; val=${line#*: }
+    [[ $name =~ ^[A-Za-z0-9-]+$ ]] || die "headers: invalid name '$name'"
+    [[ $val =~ ^[[:print:]]*$ ]] || die "headers: unsafe value for header '$name'"
+    case $val in *'"'*|*'\'*|*'{'*|*'}'*) die "headers: unsafe value for header '$name'";; esac
+  done <<< "$decoded"
+}
+
+# emit_user_headers <indent> — print a Caddy `header { }` block for $HEADERS_B64
+# (pre-validated by validate_headers). homeport sets NO headers on its own; this
+# emits only what the app owner configured in homeport.yaml.
+emit_user_headers() {
+  local ind=$1 decoded line
+  [[ -n ${HEADERS_B64:-} && ${HEADERS_B64} != - ]] || return 0
+  decoded=$(printf %s "$HEADERS_B64" | base64 -d 2>/dev/null) || return 0
+  printf '%sheader {\n' "$ind"
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    printf '%s\t%s "%s"\n' "$ind" "${line%%: *}" "${line#*: }"
+  done <<< "$decoded"
+  printf '%s}\n' "$ind"
+}
+
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
 # fragment (a whole-host site block). mode: template | idle | plain.
 # Used by cmd_add and the autoscaler (which rewrites on every scale event).
@@ -400,6 +433,7 @@ write_caddy() {
   local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams
   upstreams=$(app_upstreams "$port" "$mode" "$count")
   { printf '%s {\n\tencode zstd gzip\n' "$domain"
+    emit_user_headers $'\t'
     emit_reverse_proxy $'\t' "$mode" "$upstreams"
     printf '}\n'
   } > "$CADDY_DIR/$app.caddy"
@@ -427,6 +461,7 @@ write_caddy_static() {
   [[ $spa == 1 ]] && fallback=" /200.html /index.html"
   { printf '%s {\n' "$domain"
     printf '\tencode zstd gzip\n'
+    emit_user_headers $'\t'
     printf '\troot * %s/%s/current\n' "$HOMEPORT_ROOT" "$app"
     printf '\ttry_files {path} {path}.html {path}/%s\n' "$fallback"
     printf '\tfile_server\n'
@@ -437,9 +472,11 @@ write_caddy_static() {
 # cmd_add_static <app> <domain> <spa> — register a static site: a Caddy
 # file_server on its own domain, no systemd unit, no app user, no port bound.
 cmd_add_static() {
-  local app=$1 domain=$2 spa=${3:-}
+  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-}
   [[ $domain == - || -z $domain ]] && die "a static site needs a domain"
   valid_domain "$domain"
+  [[ $headers_b64 == - ]] && headers_b64=""
+  validate_headers "$headers_b64"
   [[ $spa == 1 ]] || spa=""
   # host-ownership conflict: the domain must be free (not another app's whole
   # host, not a gateway host) — mirrors the binary-app check.
@@ -479,7 +516,11 @@ DOMAIN=$domain
 STATIC=1
 SPA=$spa
 KEEP=$keep
+HEADERS_B64=$headers_b64
 EOF
+  # fresh value for emit_user_headers — load_app (above, for an existing app)
+  # would have sourced the OLD HEADERS_B64 over it.
+  HEADERS_B64=$headers_b64
   write_caddy_static "$app" "$domain" "$spa"
   caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
     || die "generated Caddy config failed validation"
@@ -564,14 +605,16 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
+  [[ $headers_b64 == - ]] && headers_b64=""
+  validate_headers "$headers_b64"
   # static sites are a wholly different shape (Caddy file_server, no process) —
   # handle them in their own function, leaving the binary-app path below untouched.
-  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa"; return; }
+  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64"; return; }
   [[ $sandbox == - ]] && sandbox=""
   [[ $strategy == - ]] && strategy=""
   [[ $health_timeout == - ]] && health_timeout=""
@@ -676,7 +719,7 @@ cmd_add() {
   # load_app (above) may have sourced the OLD config over freshly-parsed values
   # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
   # the values for THIS add so they get written and take effect.
-  local SANDBOX=$sandbox STRATEGY=$strategy
+  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64
   AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
@@ -706,6 +749,7 @@ PATH_PREFIX=$path
 SANDBOX=$sandbox
 STRATEGY=$strategy
 HEALTH_TIMEOUT=$health_timeout
+HEADERS_B64=$headers_b64
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.

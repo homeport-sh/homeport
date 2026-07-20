@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -193,9 +194,9 @@ func TestAddArgsPositions(t *testing.T) {
 	if args[4] != "512M" {
 		t.Errorf("memory should be arg 4, got %q", args[4])
 	}
-	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa>
-	tail := args[len(args)-5:]
-	want := []string{"relaxed", "recreate", "60s", "-", "-"} // not static, spa off
+	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa> <headers>
+	tail := args[len(args)-6:]
+	want := []string{"relaxed", "recreate", "60s", "-", "-", "-"} // not static, spa off, no headers
 	for i := range want {
 		if tail[i] != want[i] {
 			t.Errorf("tail arg %d = %q, want %q (full tail: %v)", i, tail[i], want[i], tail)
@@ -211,11 +212,55 @@ func TestAddArgsStatic(t *testing.T) {
 	spa := true
 	cfg := &config{App: "docs", Domain: "docs.example.com", Static: "./dist", SPA: &spa, spaResolved: true, Health: healthConfig{Path: "/"}, Replicas: 1}
 	args := cfg.addArgs()
-	if args[len(args)-2] != "1" { // static
-		t.Errorf("static marker should be 2nd-to-last '1', got %q", args[len(args)-2])
+	if args[len(args)-3] != "1" { // static
+		t.Errorf("static marker should be '1', got %q", args[len(args)-3])
 	}
-	if args[len(args)-1] != "1" { // spa
-		t.Errorf("spa should be last '1', got %q", args[len(args)-1])
+	if args[len(args)-2] != "1" { // spa
+		t.Errorf("spa should be '1', got %q", args[len(args)-2])
+	}
+	if args[len(args)-1] != "-" { // no headers
+		t.Errorf("headers should be '-' when unset, got %q", args[len(args)-1])
+	}
+}
+
+func TestAddArgsHeaders(t *testing.T) {
+	cfg := &config{
+		App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1,
+		Headers: map[string]string{"X-Frame-Options": "SAMEORIGIN", "Cache-Control": "no-cache"},
+	}
+	args := cfg.addArgs()
+	dec, err := base64.StdEncoding.DecodeString(args[len(args)-1])
+	if err != nil {
+		t.Fatalf("headers arg is not base64: %q", args[len(args)-1])
+	}
+	// sorted by name for determinism: Cache-Control before X-Frame-Options
+	want := "Cache-Control: no-cache\nX-Frame-Options: SAMEORIGIN\n"
+	if string(dec) != want {
+		t.Errorf("decoded headers = %q, want %q", dec, want)
+	}
+	cfg.Headers = nil
+	if a := cfg.addArgs(); a[len(a)-1] != "-" {
+		t.Errorf("no headers should render '-', got %q", a[len(a)-1])
+	}
+}
+
+func TestValidateHeaders(t *testing.T) {
+	if err := validateHeaders("f", map[string]string{
+		"X-Frame-Options":         "SAMEORIGIN",
+		"Content-Security-Policy": "default-src 'self'; img-src *",
+	}); err != nil {
+		t.Errorf("clean headers rejected: %v", err)
+	}
+	for label, h := range map[string]map[string]string{
+		"brace":     {"X-Test": "a{b}"},
+		"quote":     {"X-Test": `a"b`},
+		"backslash": {"X-Test": `a\b`},
+		"newline":   {"X-Test": "a\nEvil: b"},
+		"bad-name":  {"Bad Name": "v"},
+	} {
+		if err := validateHeaders("f", h); err == nil {
+			t.Errorf("%s: expected rejection, got nil", label)
+		}
 	}
 }
 
