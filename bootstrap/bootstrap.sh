@@ -399,31 +399,44 @@ app_mode() {
 # break out of it (CRLF, quotes, braces, backslashes) is rejected. Runs in the
 # current shell (not a $() subshell) so die() actually aborts the command.
 validate_headers() {
-  local b64=$1 decoded line name val
+  local b64=$1 decoded glob name val
   [[ -n $b64 && $b64 != - ]] || return 0
   decoded=$(printf %s "$b64" | base64 -d 2>/dev/null) || die "headers: invalid encoding"
-  while IFS= read -r line; do
-    [[ -n $line ]] || continue
-    name=${line%%: *}; val=${line#*: }
+  while IFS=$'\t' read -r glob name val; do
+    [[ -n $glob ]] || continue
+    [[ $glob == '*' || $glob =~ ^/[A-Za-z0-9._*/~-]*$ ]] || die "headers: invalid path '$glob'"
+    [[ $glob != *..* ]] || die "headers: path may not contain '..'"
     [[ $name =~ ^[A-Za-z0-9-]+$ ]] || die "headers: invalid name '$name'"
     [[ $val =~ ^[[:print:]]*$ ]] || die "headers: unsafe value for header '$name'"
     case $val in *'"'*|*'\'*|*'{'*|*'}'*) die "headers: unsafe value for header '$name'";; esac
   done <<< "$decoded"
 }
 
-# emit_user_headers <indent> — print a Caddy `header { }` block for $HEADERS_B64
-# (pre-validated by validate_headers). homeport sets NO headers on its own; this
-# emits only what the app owner configured in homeport.yaml.
+# emit_user_headers <indent> — print Caddy header blocks for $HEADERS_B64
+# (pre-validated). Records are "glob<TAB>name<TAB>value", sorted so one glob's
+# headers are contiguous. "/*" (or "*") → a global `header { }`; any other glob →
+# a path matcher `@N path <glob>` + `header @N { }`. homeport sets NO headers on
+# its own — this emits only what the app owner configured.
 emit_user_headers() {
-  local ind=$1 decoded line
+  local ind=$1 decoded glob name val prev="" i=0 open=0 slug
   [[ -n ${HEADERS_B64:-} && ${HEADERS_B64} != - ]] || return 0
   decoded=$(printf %s "$HEADERS_B64" | base64 -d 2>/dev/null) || return 0
-  printf '%sheader {\n' "$ind"
-  while IFS= read -r line; do
-    [[ -n $line ]] || continue
-    printf '%s\t%s "%s"\n' "$ind" "${line%%: *}" "${line#*: }"
+  while IFS=$'\t' read -r glob name val; do
+    [[ -n $glob ]] || continue
+    if [[ $glob != "$prev" ]]; then
+      [[ $open == 1 ]] && printf '%s}\n' "$ind"
+      if [[ $glob == '*' || $glob == '/*' ]]; then
+        printf '%sheader {\n' "$ind"
+      else
+        slug="hp$i"; i=$((i + 1))
+        printf '%s@%s path %s\n' "$ind" "$slug" "$glob"
+        printf '%sheader @%s {\n' "$ind" "$slug"
+      fi
+      open=1; prev=$glob
+    fi
+    printf '%s\t%s "%s"\n' "$ind" "$name" "$val"
   done <<< "$decoded"
-  printf '%s}\n' "$ind"
+  [[ $open == 1 ]] && printf '%s}\n' "$ind"
 }
 
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy

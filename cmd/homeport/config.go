@@ -60,7 +60,9 @@ type config struct {
 	Build       buildConfig     `yaml:"build"`
 	Health      healthConfig    `yaml:"health"`
 	Resources   resourcesConfig `yaml:"resources"`
-	Headers     map[string]string `yaml:"headers"` // extra response headers, verbatim; homeport never sets any on its own
+	// extra response headers, verbatim; homeport never sets any on its own.
+	// keyed by path glob ("/*" = all paths), then header name -> value.
+	Headers map[string]map[string]string `yaml:"headers"`
 
 	// spaResolved is the concrete SPA decision for this deploy (SPA overridden
 	// or auto-detected from the static dir); set by cmdDeploy, read by addArgs.
@@ -94,6 +96,8 @@ var (
 	// could break out of the generated Caddyfile).
 	headerNameRe  = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 	headerValueRe = regexp.MustCompile(`^[ -~]*$`)
+	// path glob for scoping headers: "*"/"/*" (all) or a "/dir/*" prefix.
+	headerGlobRe = regexp.MustCompile(`^(\*|/[A-Za-z0-9._*/~-]*)$`)
 	// run: launch args appended to the binary in ExecStart. exec (no shell),
 	// so no shell metachars; only $PORT/$HOST are substituted server-side.
 	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
@@ -323,35 +327,48 @@ func (c *config) addArgs() []string {
 	}
 }
 
-// encodeHeaders serialises the user's response headers as sorted "Name: value"
-// lines, base64-encoded into a single positional token ("-" when none). Sorted
-// so the command (and its tests) are deterministic.
-func encodeHeaders(h map[string]string) string {
+// encodeHeaders serialises the user's response headers as sorted, tab-separated
+// "glob<TAB>Name<TAB>value" records, base64-encoded into a single positional
+// token ("-" when none). Sorted by (glob, name) so records for one glob are
+// contiguous (homeportd groups them into one Caddy block) and deterministic.
+func encodeHeaders(h map[string]map[string]string) string {
 	if len(h) == 0 {
 		return "-"
 	}
-	names := make([]string, 0, len(h))
-	for name := range h {
-		names = append(names, name)
+	globs := make([]string, 0, len(h))
+	for glob := range h {
+		globs = append(globs, glob)
 	}
-	sort.Strings(names)
+	sort.Strings(globs)
 	var b strings.Builder
-	for _, name := range names {
-		fmt.Fprintf(&b, "%s: %s\n", name, h[name])
+	for _, glob := range globs {
+		names := make([]string, 0, len(h[glob]))
+		for name := range h[glob] {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Fprintf(&b, "%s\t%s\t%s\n", glob, name, h[glob][name])
+		}
 	}
 	return base64.StdEncoding.EncodeToString([]byte(b.String()))
 }
 
-// validateHeaders rejects header names/values that could break out of the
-// generated Caddyfile — CRLF injection, or quote/brace/backslash escapes.
-// homeport emits these verbatim, so each must be a safe single line.
-func validateHeaders(configFile string, h map[string]string) error {
-	for name, val := range h {
-		if !headerNameRe.MatchString(name) {
-			return fmt.Errorf("%s: header name %q is invalid (letters, digits and - only)", configFile, name)
+// validateHeaders rejects path globs / header names / values that could break
+// out of the generated Caddyfile — CRLF injection, quote/brace/backslash
+// escapes, or a tab (the wire delimiter). homeport emits these verbatim.
+func validateHeaders(configFile string, h map[string]map[string]string) error {
+	for glob, hdrs := range h {
+		if !headerGlobRe.MatchString(glob) || strings.Contains(glob, "..") {
+			return fmt.Errorf(`%s: header path %q is invalid (a glob like "/*" or "/_app/immutable/*")`, configFile, glob)
 		}
-		if !headerValueRe.MatchString(val) || strings.ContainsAny(val, "\"\\{}") {
-			return fmt.Errorf(`%s: header %q has an unsafe value (one line of printable ASCII, no " \ { })`, configFile, name)
+		for name, val := range hdrs {
+			if !headerNameRe.MatchString(name) {
+				return fmt.Errorf("%s: header name %q is invalid (letters, digits and - only)", configFile, name)
+			}
+			if !headerValueRe.MatchString(val) || strings.ContainsAny(val, "\"\\{}") {
+				return fmt.Errorf(`%s: header %q has an unsafe value (one line of printable ASCII, no " \ { })`, configFile, name)
+			}
 		}
 	}
 	return nil

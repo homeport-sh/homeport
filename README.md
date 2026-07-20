@@ -146,20 +146,24 @@ each behaves.
 
 homeport never sets response headers on your behalf — no security or cache
 headers are forced onto your app. If you want them, opt in with a `headers:`
-map, emitted verbatim on the app's site (static or proxied):
+map, keyed by **path glob** then header name, emitted verbatim on the app's site
+(static or proxied). `"/*"` applies to every response; any other glob scopes the
+headers to matching paths:
 
 ```yaml
 headers:
-  Strict-Transport-Security: "max-age=31536000; includeSubDomains"
-  X-Frame-Options: SAMEORIGIN
-  X-Content-Type-Options: nosniff
-  Content-Security-Policy: "default-src 'self'"
+  "/*": # every response
+    Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+    X-Frame-Options: SAMEORIGIN
+    X-Content-Type-Options: nosniff
+  "/_app/immutable/*": # content-hashed assets — safe to cache forever
+    Cache-Control: "public, max-age=31536000, immutable"
 ```
 
-These are global (every response). Values are validated against injection into
-the generated Caddy config, so a name must be a plain token and a value a single
-line without `"`, `\`, `{`, or `}`. Path-scoped headers (e.g. long-cache only on
-hashed asset dirs) aren't supported yet.
+Path-scoping is what lets you long-cache fingerprinted assets *without* caching
+your HTML (so deploys still show up immediately). Globs, names and values are
+validated against injection into the generated Caddy config: a name is a plain
+token, a value is one line without `"`, `\`, `{`, or `}`.
 
 ## Static sites (no binary)
 

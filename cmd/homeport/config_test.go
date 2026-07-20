@@ -226,15 +226,19 @@ func TestAddArgsStatic(t *testing.T) {
 func TestAddArgsHeaders(t *testing.T) {
 	cfg := &config{
 		App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1,
-		Headers: map[string]string{"X-Frame-Options": "SAMEORIGIN", "Cache-Control": "no-cache"},
+		Headers: map[string]map[string]string{
+			"/*":                {"X-Frame-Options": "SAMEORIGIN"},
+			"/_app/immutable/*": {"Cache-Control": "public, max-age=31536000, immutable"},
+		},
 	}
 	args := cfg.addArgs()
 	dec, err := base64.StdEncoding.DecodeString(args[len(args)-1])
 	if err != nil {
 		t.Fatalf("headers arg is not base64: %q", args[len(args)-1])
 	}
-	// sorted by name for determinism: Cache-Control before X-Frame-Options
-	want := "Cache-Control: no-cache\nX-Frame-Options: SAMEORIGIN\n"
+	// sorted by glob then name; tab-separated glob<TAB>name<TAB>value.
+	// "/*" sorts before "/_app/*" ('*' 0x2A < '_' 0x5F).
+	want := "/*\tX-Frame-Options\tSAMEORIGIN\n/_app/immutable/*\tCache-Control\tpublic, max-age=31536000, immutable\n"
 	if string(dec) != want {
 		t.Errorf("decoded headers = %q, want %q", dec, want)
 	}
@@ -245,18 +249,21 @@ func TestAddArgsHeaders(t *testing.T) {
 }
 
 func TestValidateHeaders(t *testing.T) {
-	if err := validateHeaders("f", map[string]string{
-		"X-Frame-Options":         "SAMEORIGIN",
-		"Content-Security-Policy": "default-src 'self'; img-src *",
+	if err := validateHeaders("f", map[string]map[string]string{
+		"/*":                {"X-Frame-Options": "SAMEORIGIN", "Content-Security-Policy": "default-src 'self'; img-src *"},
+		"/_app/immutable/*": {"Cache-Control": "public, max-age=31536000, immutable"},
 	}); err != nil {
 		t.Errorf("clean headers rejected: %v", err)
 	}
-	for label, h := range map[string]map[string]string{
-		"brace":     {"X-Test": "a{b}"},
-		"quote":     {"X-Test": `a"b`},
-		"backslash": {"X-Test": `a\b`},
-		"newline":   {"X-Test": "a\nEvil: b"},
-		"bad-name":  {"Bad Name": "v"},
+	for label, h := range map[string]map[string]map[string]string{
+		"brace":       {"/*": {"X-Test": "a{b}"}},
+		"quote":       {"/*": {"X-Test": `a"b`}},
+		"backslash":   {"/*": {"X-Test": `a\b`}},
+		"newline":     {"/*": {"X-Test": "a\nEvil: b"}},
+		"bad-name":    {"/*": {"Bad Name": "v"}},
+		"tab-value":   {"/*": {"X-Test": "a\tb"}},
+		"bad-glob":    {"api/*": {"X-Test": "v"}}, // no leading slash
+		"glob-dotdot": {"/../etc/*": {"X-Test": "v"}},
 	} {
 		if err := validateHeaders("f", h); err == nil {
 			t.Errorf("%s: expected rejection, got nil", label)

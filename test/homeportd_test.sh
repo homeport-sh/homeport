@@ -70,25 +70,30 @@ has "internal LB pol"  "$(cat "$CADDY_DIR/svc.caddy")" "lb_policy least_conn"
 if [[ "$(cat "$CADDY_DIR/web.caddy")" == *"header {"* ]]; then
   printf 'FAIL headers: default fragment has a header block\n'; fails=$((fails + 1))
 else printf 'ok   headers: none by default\n'; fi
-HEADERS_B64=$(printf 'Cache-Control: public, max-age=60\nX-Frame-Options: SAMEORIGIN\n' | base64 | tr -d '\n')
+# records are glob<TAB>name<TAB>value; "/*" is a global block, "/dir/*" a matcher
+b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+HEADERS_B64=$(b64 "$(printf '/*\tX-Frame-Options\tSAMEORIGIN\n/_app/immutable/*\tCache-Control\tpublic, max-age=31536000, immutable\n')")
 write_caddy hdr h.example.com 8105 plain 1
-has "headers block"   "$(cat "$CADDY_DIR/hdr.caddy")" "header {"
-has "headers quoted"  "$(cat "$CADDY_DIR/hdr.caddy")" 'X-Frame-Options "SAMEORIGIN"'
-has "headers value"   "$(cat "$CADDY_DIR/hdr.caddy")" 'Cache-Control "public, max-age=60"'
+hdrcfg=$(cat "$CADDY_DIR/hdr.caddy")
+has "headers global block"  "$hdrcfg" "header {"
+has "headers global value"  "$hdrcfg" 'X-Frame-Options "SAMEORIGIN"'
+has "headers path matcher"  "$hdrcfg" "path /_app/immutable/*"
+has "headers path scoped"   "$hdrcfg" 'Cache-Control "public, max-age=31536000, immutable"'
 HEADERS_B64=""
 # validate_headers is the security gate — accepts a clean header, rejects any
-# value that could break out of the generated Caddyfile.
-b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
-if ( validate_headers "$(b64 'X-Frame-Options: DENY')" ) 2>/dev/null; then
+# name/value/glob that could break out of the generated Caddyfile.
+if ( validate_headers "$(b64 "$(printf '/*\tX-Frame-Options\tDENY')")" ) 2>/dev/null; then
   printf 'ok   headers: accepts clean\n'; else printf 'FAIL headers: rejected clean\n'; fails=$((fails + 1)); fi
-reject_hdr() { # reject_hdr <label> <raw>
+reject_hdr() { # reject_hdr <label> <raw-record>
   if ( validate_headers "$(b64 "$2")" ) 2>/dev/null; then
     printf 'FAIL %s: accepted\n' "$1"; fails=$((fails + 1)); else printf 'ok   %s\n' "$1"; fi
 }
-reject_hdr "headers reject brace"     'X: a{b'
-reject_hdr "headers reject quote"     'X: a"b'
-reject_hdr "headers reject backslash" 'X: a\b'
-reject_hdr "headers reject bad name"  'Bad Name: v'
+reject_hdr "headers reject brace"     "$(printf '/*\tX\ta{b')"
+reject_hdr "headers reject quote"     "$(printf '/*\tX\ta"b')"
+reject_hdr "headers reject backslash" "$(printf '/*\tX\ta\\b')"
+reject_hdr "headers reject bad name"  "$(printf '/*\tBad Name\tv')"
+reject_hdr "headers reject bad glob"  "$(printf 'api/*\tX\tv')"
+reject_hdr "headers reject dotdot"    "$(printf '/../etc/*\tX\tv')"
 
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
