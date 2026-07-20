@@ -7,5 +7,13 @@ domain: homeport.sh
 # file_server (no process on the box). SPA vs multi-page is auto-detected.
 static: ./build
 
+# Response headers this site opts into (homeport sets none on its own). Global,
+# safe for a static marketing site we control: HSTS, no MIME sniffing, no framing.
+headers:
+  Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: SAMEORIGIN
+  Referrer-Policy: strict-origin-when-cross-origin
+
 build:
   command: bun run build
