@@ -170,6 +170,7 @@ HOMEPORTD_API=1
 HOMEPORT_ROOT=/opt/homeport
 HOMEPORT_ETC=/etc/homeport/apps
 CADDY_DIR=/etc/caddy/homeport.d
+TLS_CERT_DIR=/etc/caddy/homeport.d/certs   # bring-your-own certs live here, per app
 BASE_PORT=8100
 
 die() { echo "homeportd: $*" >&2; exit 1; }
@@ -439,6 +440,17 @@ emit_user_headers() {
   [[ $open == 1 ]] && printf '%s}\n' "$ind"
 }
 
+# emit_tls <indent> <app> — when the app uses a bring-your-own cert
+# (TLS_MODE=manual), tell Caddy to serve it instead of provisioning one via ACME
+# (which can't work behind a TLS-terminating proxy like Cloudflare). homeport
+# never does this on its own — the operator uploads the cert with
+# `homeport tls set`, which cmd_tls_set validates and stores.
+emit_tls() {
+  local ind=$1 app=$2
+  [[ ${TLS_MODE:-} == manual ]] || return 0
+  printf '%stls %s/%s/cert.pem %s/%s/key.pem\n' "$ind" "$TLS_CERT_DIR" "$app" "$TLS_CERT_DIR" "$app"
+}
+
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
 # fragment (a whole-host site block). mode: template | idle | plain.
 # Used by cmd_add and the autoscaler (which rewrites on every scale event).
@@ -446,6 +458,7 @@ write_caddy() {
   local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams
   upstreams=$(app_upstreams "$port" "$mode" "$count")
   { printf '%s {\n\tencode zstd gzip\n' "$domain"
+    emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     emit_reverse_proxy $'\t' "$mode" "$upstreams"
     printf '}\n'
@@ -474,6 +487,7 @@ write_caddy_static() {
   [[ $spa == 1 ]] && fallback=" /200.html /index.html"
   { printf '%s {\n' "$domain"
     printf '\tencode zstd gzip\n'
+    emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     printf '\troot * %s/%s/current\n' "$HOMEPORT_ROOT" "$app"
     printf '\ttry_files {path} {path}.html {path}/%s\n' "$fallback"
@@ -485,10 +499,11 @@ write_caddy_static() {
 # cmd_add_static <app> <domain> <spa> — register a static site: a Caddy
 # file_server on its own domain, no systemd unit, no app user, no port bound.
 cmd_add_static() {
-  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-}
+  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-} tls_mode=${5:-}
   [[ $domain == - || -z $domain ]] && die "a static site needs a domain"
   valid_domain "$domain"
   [[ $headers_b64 == - ]] && headers_b64=""
+  [[ $tls_mode == - ]] && tls_mode=""
   validate_headers "$headers_b64"
   [[ $spa == 1 ]] || spa=""
   # host-ownership conflict: the domain must be free (not another app's whole
@@ -530,16 +545,90 @@ STATIC=1
 SPA=$spa
 KEEP=$keep
 HEADERS_B64=$headers_b64
+TLS_MODE=$tls_mode
 EOF
-  # fresh value for emit_user_headers — load_app (above, for an existing app)
-  # would have sourced the OLD HEADERS_B64 over it.
-  HEADERS_B64=$headers_b64
+  # fresh values for emit_user_headers/emit_tls — load_app (above, for an
+  # existing app) would have sourced the OLD values over them.
+  HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode
   write_caddy_static "$app" "$domain" "$spa"
   caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
     || die "generated Caddy config failed validation"
   systemctl reload caddy
   echo "app '$app' registered (static${spa:+, SPA}) -> https://$domain"
   echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
+}
+
+# _set_config <app> <key> <value> — set KEY=value in the app's config, replacing
+# an existing line or appending. Values here are homeportd-controlled (no user
+# metacharacters), so a plain sed replace is safe.
+_set_config() {
+  local cfg="$HOMEPORT_ETC/$1/config" key=$2 val=$3
+  if grep -q "^$key=" "$cfg" 2>/dev/null; then
+    sed -i "s|^$key=.*|$key=$val|" "$cfg"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$cfg"
+  fi
+}
+
+# rewrite_app_caddy <app> — regenerate one app's Caddy fragment from its saved
+# config (used after tls set/clear). Picks the static / gateway / whole-host
+# writer; each re-reads TLS_MODE via load_app.
+rewrite_app_caddy() {
+  local app=$1
+  load_app "$app"
+  if [[ ${STATIC:-} == 1 ]]; then
+    write_caddy_static "$app" "$DOMAIN" "${SPA:-}"
+  elif [[ -n ${PATH_PREFIX:-} ]]; then
+    write_gateway "$DOMAIN"
+  else
+    write_caddy "$app" "$DOMAIN" "$PORT" "$(app_mode)" "${REPLICAS:-1}"
+  fi
+}
+
+# cmd_tls_set <app> — install a bring-your-own TLS cert for a public app. Reads
+# "cert-PEM \n ##HOMEPORT_TLS_KEY## \n key-PEM" from stdin (the CLI concatenates
+# them; the key never travels via argv). Validates, stores caddy-readable, flips
+# the app to TLS_MODE=manual and reloads Caddy. homeport sets no cert on its own.
+cmd_tls_set() {
+  local app=${1:-}
+  valid_app "$app"
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app'"
+  load_app "$app"
+  [[ -n ${DOMAIN:-} ]] || die "app '$app' is internal (no domain) — nothing to serve a cert for"
+  [[ -z ${PATH_PREFIX:-} ]] || die "app '$app' is path-mounted — its gateway host owns TLS"
+  local blob cert key sep=$'\n''##HOMEPORT_TLS_KEY##'$'\n'
+  blob=$(cat)
+  [[ $blob == *"$sep"* ]] || die "tls: malformed upload (missing cert/key separator)"
+  cert=${blob%%"$sep"*}
+  key=${blob#*"$sep"}
+  [[ $cert == *"-----BEGIN CERTIFICATE-----"* ]] || die "tls: first part is not a PEM certificate"
+  [[ $key == *"-----BEGIN "*"PRIVATE KEY-----"* ]] || die "tls: second part is not a PEM private key"
+  install -d -m 750 -o caddy -g caddy "$TLS_CERT_DIR/$app"
+  printf '%s\n' "$cert" > "$TLS_CERT_DIR/$app/cert.pem"
+  printf '%s\n' "$key"  > "$TLS_CERT_DIR/$app/key.pem"
+  chown caddy:caddy "$TLS_CERT_DIR/$app/cert.pem" "$TLS_CERT_DIR/$app/key.pem"
+  chmod 644 "$TLS_CERT_DIR/$app/cert.pem"
+  chmod 600 "$TLS_CERT_DIR/$app/key.pem"
+  _set_config "$app" TLS_MODE manual
+  rewrite_app_caddy "$app"
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+    || die "generated Caddy config failed validation"
+  systemctl reload caddy
+  echo "tls: manual cert installed for '$app' ($DOMAIN)"
+}
+
+# cmd_tls_clear <app> — remove the manual cert and revert to automatic HTTPS.
+cmd_tls_clear() {
+  local app=${1:-}
+  valid_app "$app"
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app'"
+  rm -rf "${TLS_CERT_DIR:?}/$app"
+  _set_config "$app" TLS_MODE ""
+  rewrite_app_caddy "$app"
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+    || die "generated Caddy config failed validation"
+  systemctl reload caddy
+  echo "tls: reverted '$app' to automatic HTTPS (Let's Encrypt)"
 }
 
 # cmd_upload_static <app> <release> — extract a tar.gz of the site from stdin.
@@ -618,16 +707,21 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
   [[ $headers_b64 == - ]] && headers_b64=""
+  [[ $tls_mode == - ]] && tls_mode=""
   validate_headers "$headers_b64"
+  # manual TLS needs the cert already uploaded (`homeport tls set`), else the
+  # generated `tls <cert>` line points at nothing and Caddy would fail to load.
+  [[ $tls_mode != manual || -f "$TLS_CERT_DIR/$app/cert.pem" ]] \
+    || die "tls: manual is set but no cert is uploaded — run 'homeport tls set <cert> <key>' first"
   # static sites are a wholly different shape (Caddy file_server, no process) —
   # handle them in their own function, leaving the binary-app path below untouched.
-  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64"; return; }
+  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64" "$tls_mode"; return; }
   [[ $sandbox == - ]] && sandbox=""
   [[ $strategy == - ]] && strategy=""
   [[ $health_timeout == - ]] && health_timeout=""
@@ -732,7 +826,7 @@ cmd_add() {
   # load_app (above) may have sourced the OLD config over freshly-parsed values
   # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
   # the values for THIS add so they get written and take effect.
-  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64
+  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode
   AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
@@ -763,6 +857,7 @@ SANDBOX=$sandbox
 STRATEGY=$strategy
 HEALTH_TIMEOUT=$health_timeout
 HEADERS_B64=$headers_b64
+TLS_MODE=$tls_mode
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -1769,6 +1864,8 @@ main() {
     key-add)  cmd_key_add "$@" ;;
     key-list) cmd_key_list "$@" ;;
     key-rm)   cmd_key_rm "$@" ;;
+    tls-set)  cmd_tls_set "$@" ;;
+    tls-clear) cmd_tls_clear "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;

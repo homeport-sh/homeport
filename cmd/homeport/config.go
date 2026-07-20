@@ -52,6 +52,7 @@ type config struct {
 	PostRelease string          `yaml:"post_release"`
 	Sandbox     string          `yaml:"sandbox"`
 	Strategy    string          `yaml:"strategy"`
+	TLS         string          `yaml:"tls"` // "auto" (default, Let's Encrypt) or "manual" (bring-your-own cert via `homeport tls set`)
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -220,6 +221,12 @@ func parseConfig(data []byte) (*config, error) {
 		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default) or 'relaxed' (for binaries that run their own sandbox, e.g. a browser), got %q", configFile, cfg.Sandbox)
 	case cfg.Strategy != "" && cfg.Strategy != "blue-green" && cfg.Strategy != "recreate":
 		return nil, fmt.Errorf("%s: strategy must be 'blue-green' (default, zero-downtime) or 'recreate' (restart in place — for singleton apps that can't run two instances), got %q", configFile, cfg.Strategy)
+	case cfg.TLS != "" && cfg.TLS != "auto" && cfg.TLS != "manual":
+		return nil, fmt.Errorf("%s: tls must be 'auto' (default, Let's Encrypt) or 'manual' (bring-your-own cert via `homeport tls set`), got %q", configFile, cfg.TLS)
+	case cfg.TLS == "manual" && (cfg.Internal || cfg.Domain == ""):
+		return nil, fmt.Errorf("%s: tls: manual needs a public domain — there's nothing to serve a cert for on an internal app", configFile)
+	case cfg.TLS == "manual" && cfg.Path != "":
+		return nil, fmt.Errorf("%s: tls: manual isn't for path-mounted apps — the gateway host owns its TLS", configFile)
 	case cfg.isStatic() && cfg.Internal:
 		return nil, fmt.Errorf("%s: a static site needs a domain — Caddy serves it publicly", configFile)
 	case cfg.isStatic() && cfg.Path != "":
@@ -324,7 +331,17 @@ func (c *config) addArgs() []string {
 		boolArg(c.isStatic()),  // arg 17: static mode
 		boolArg(c.spaResolved), // arg 18: SPA fallback
 		encodeHeaders(c.Headers), // arg 19: user response headers (base64 "Name: value" lines)
+		tlsArg(c.TLS),            // arg 20: "manual" (bring-your-own cert) or "-" (auto)
 	}
+}
+
+// tlsArg renders the TLS mode as homeportd's positional token: "manual" turns on
+// bring-your-own-cert, anything else ("", "auto") is the default ACME path.
+func tlsArg(mode string) string {
+	if mode == "manual" {
+		return "manual"
+	}
+	return "-"
 }
 
 // encodeHeaders serialises the user's response headers as sorted, tab-separated

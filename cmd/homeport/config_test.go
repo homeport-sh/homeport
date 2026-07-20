@@ -64,6 +64,9 @@ func TestParseConfigRejects(t *testing.T) {
 		{"multiline release", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrelease: \"a\\nb\"\n", "single line"},
 		{"bad sandbox", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: loose\n", "sandbox"},
 		{"bad strategy", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nstrategy: canary\n", "strategy"},
+		{"bad tls", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ntls: self-signed\n", "tls must be"},
+		{"tls manual internal", "app: web\nserver: deploy@1.2.3.4\ninternal: true\ntls: manual\n", "public domain"},
+		{"tls manual path", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\npath: /api\ntls: manual\n", "path-mounted"},
 		// review fixes:
 		{"server ssh-option injection", "app: web\nserver: \"-oProxyCommand=x@host\"\ndomain: web.example.com\n", "server"},
 		{"server leading dash", "app: web\nserver: -evil@host\ndomain: web.example.com\n", "server"},
@@ -194,9 +197,9 @@ func TestAddArgsPositions(t *testing.T) {
 	if args[4] != "512M" {
 		t.Errorf("memory should be arg 4, got %q", args[4])
 	}
-	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa> <headers>
-	tail := args[len(args)-6:]
-	want := []string{"relaxed", "recreate", "60s", "-", "-", "-"} // not static, spa off, no headers
+	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa> <headers> <tls>
+	tail := args[len(args)-7:]
+	want := []string{"relaxed", "recreate", "60s", "-", "-", "-", "-"} // not static, spa off, no headers, auto tls
 	for i := range want {
 		if tail[i] != want[i] {
 			t.Errorf("tail arg %d = %q, want %q (full tail: %v)", i, tail[i], want[i], tail)
@@ -212,14 +215,17 @@ func TestAddArgsStatic(t *testing.T) {
 	spa := true
 	cfg := &config{App: "docs", Domain: "docs.example.com", Static: "./dist", SPA: &spa, spaResolved: true, Health: healthConfig{Path: "/"}, Replicas: 1}
 	args := cfg.addArgs()
-	if args[len(args)-3] != "1" { // static
-		t.Errorf("static marker should be '1', got %q", args[len(args)-3])
+	if args[len(args)-4] != "1" { // static
+		t.Errorf("static marker should be '1', got %q", args[len(args)-4])
 	}
-	if args[len(args)-2] != "1" { // spa
-		t.Errorf("spa should be '1', got %q", args[len(args)-2])
+	if args[len(args)-3] != "1" { // spa
+		t.Errorf("spa should be '1', got %q", args[len(args)-3])
 	}
-	if args[len(args)-1] != "-" { // no headers
-		t.Errorf("headers should be '-' when unset, got %q", args[len(args)-1])
+	if args[len(args)-2] != "-" { // no headers
+		t.Errorf("headers should be '-' when unset, got %q", args[len(args)-2])
+	}
+	if args[len(args)-1] != "-" { // auto tls
+		t.Errorf("tls should be '-' when unset, got %q", args[len(args)-1])
 	}
 }
 
@@ -232,9 +238,9 @@ func TestAddArgsHeaders(t *testing.T) {
 		},
 	}
 	args := cfg.addArgs()
-	dec, err := base64.StdEncoding.DecodeString(args[len(args)-1])
+	dec, err := base64.StdEncoding.DecodeString(args[len(args)-2]) // headers is 2nd-to-last (tls is last)
 	if err != nil {
-		t.Fatalf("headers arg is not base64: %q", args[len(args)-1])
+		t.Fatalf("headers arg is not base64: %q", args[len(args)-2])
 	}
 	// sorted by glob then name; tab-separated glob<TAB>name<TAB>value.
 	// "/*" sorts before "/_app/*" ('*' 0x2A < '_' 0x5F).
@@ -243,8 +249,19 @@ func TestAddArgsHeaders(t *testing.T) {
 		t.Errorf("decoded headers = %q, want %q", dec, want)
 	}
 	cfg.Headers = nil
+	if a := cfg.addArgs(); a[len(a)-2] != "-" {
+		t.Errorf("no headers should render '-', got %q", a[len(a)-2])
+	}
+}
+
+func TestAddArgsTLS(t *testing.T) {
+	cfg := &config{App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1, TLS: "manual"}
+	if a := cfg.addArgs(); a[len(a)-1] != "manual" {
+		t.Errorf("tls: manual should render 'manual' as the last arg, got %q", a[len(a)-1])
+	}
+	cfg.TLS = "auto"
 	if a := cfg.addArgs(); a[len(a)-1] != "-" {
-		t.Errorf("no headers should render '-', got %q", a[len(a)-1])
+		t.Errorf("tls: auto should render '-', got %q", a[len(a)-1])
 	}
 }
 

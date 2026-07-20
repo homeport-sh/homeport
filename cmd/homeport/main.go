@@ -49,6 +49,8 @@ func main() {
 		err = cmdMCP(rest)
 	case "server":
 		err = cmdServer(rest)
+	case "tls":
+		err = cmdTLS(rest)
 	case "ci":
 		err = cmdCI(rest)
 	case "version", "-v", "--version":
@@ -101,6 +103,7 @@ everyday:
   homeport logs [-f] [-n N]        app logs (journald)
   homeport tunnel [localPort]   forward a local port to the app (internal apps, or private access)
   homeport mcp                  serve the CLI as MCP tools (stdio) for AI agents
+  homeport tls set <cert> <key> serve a bring-your-own cert (with tls: manual) — e.g. behind a proxy
   homeport server update        push this CLI's bundled homeportd to the box
 
 Your binary's contract: listen on $PORT (bind $HOST, 127.0.0.1); persist

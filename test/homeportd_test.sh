@@ -95,6 +95,18 @@ reject_hdr "headers reject bad name"  "$(printf '/*\tBad Name\tv')"
 reject_hdr "headers reject bad glob"  "$(printf 'api/*\tX\tv')"
 reject_hdr "headers reject dotdot"    "$(printf '/../etc/*\tX\tv')"
 
+# --- bring-your-own TLS cert (opt-in; automatic HTTPS by default) ---
+if [[ "$(cat "$CADDY_DIR/web.caddy")" == *"tls "* ]]; then
+  printf 'FAIL tls: default fragment has a tls directive\n'; fails=$((fails + 1))
+else printf 'ok   tls: auto by default (no tls directive)\n'; fi
+TLS_MODE=manual
+write_caddy tlsapp t.example.com 8106 plain 1
+has "tls manual directive" "$(cat "$CADDY_DIR/tlsapp.caddy")" \
+  "tls $TLS_CERT_DIR/tlsapp/cert.pem $TLS_CERT_DIR/tlsapp/key.pem"
+write_caddy_static tlsstat s.example.com ""
+has "tls manual on static" "$(cat "$CADDY_DIR/tlsstat.caddy")" "tls $TLS_CERT_DIR/tlsstat/cert.pem"
+TLS_MODE=""
+
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
 if ! command -v mapfile >/dev/null 2>&1; then

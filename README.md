@@ -133,6 +133,7 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 | `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
 | `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
+| `tls` | `auto` | `manual` to serve a bring-your-own cert (uploaded via `homeport tls set`) instead of Let's Encrypt — see [Bring your own cert](#bring-your-own-cert) |
 | `headers` | — | opt-in response headers (a `Name: value` map) — homeport sets none on its own; see [Response headers](#response-headers) |
 
 ¹ `build.command`/`build.artifact` default only for binary apps; a `static` site has no build step by default.
@@ -164,6 +165,28 @@ Path-scoping is what lets you long-cache fingerprinted assets *without* caching
 your HTML (so deploys still show up immediately). Globs, names and values are
 validated against injection into the generated Caddy config: a name is a plain
 token, a value is one line without `"`, `\`, `{`, or `}`.
+
+## Bring your own cert
+
+By default Caddy provisions a Let's Encrypt cert automatically. That can't work
+when something in front of your box **terminates TLS** — most commonly a
+Cloudflare proxy (orange-cloud). For that case, serve a cert you provide instead:
+
+```yaml
+tls: manual   # serve an uploaded cert, don't provision one via ACME
+```
+
+Then upload the cert + key (they travel over ssh **stdin**, never argv — the
+private key is treated like a secret):
+
+```sh
+homeport tls set fullchain.pem privkey.pem   # e.g. a Cloudflare Origin Certificate
+homeport tls clear                           # revert to automatic HTTPS
+```
+
+homeport never installs a cert on its own — this is entirely opt-in. Pair it
+with Cloudflare's SSL/TLS mode set to **Full (strict)**. (`tls: manual` needs a
+public domain — it's not for internal or path-mounted apps.)
 
 ## Static sites (no binary)
 
