@@ -447,7 +447,10 @@ emit_user_headers() {
 # `homeport tls set`, which cmd_tls_set validates and stores.
 emit_tls() {
   local ind=$1 app=$2
-  [[ ${TLS_MODE:-} == manual ]] || return 0
+  # both conditions: mode is manual AND the cert is actually uploaded — a tls
+  # directive pointing at missing files would fail Caddyfile validation and
+  # block every app's reload. Until the cert arrives, auto-TLS keeps serving.
+  [[ ${TLS_MODE:-} == manual && -f "$TLS_CERT_DIR/$app/cert.pem" ]] || return 0
   printf '%stls %s/%s/cert.pem %s/%s/key.pem\n' "$ind" "$TLS_CERT_DIR" "$app" "$TLS_CERT_DIR" "$app"
 }
 
@@ -596,23 +599,41 @@ cmd_tls_set() {
   load_app "$app"
   [[ -n ${DOMAIN:-} ]] || die "app '$app' is internal (no domain) — nothing to serve a cert for"
   [[ -z ${PATH_PREFIX:-} ]] || die "app '$app' is path-mounted — its gateway host owns TLS"
+  # 1 MiB cap: a full chain + key is a few KB; anything bigger is a mistake (or
+  # a memory-exhaustion attempt) — same spirit as the upload size cap.
   local blob cert key sep=$'\n''##HOMEPORT_TLS_KEY##'$'\n'
-  blob=$(cat)
+  blob=$(head -c 1048576)
   [[ $blob == *"$sep"* ]] || die "tls: malformed upload (missing cert/key separator)"
   cert=${blob%%"$sep"*}
   key=${blob#*"$sep"}
   [[ $cert == *"-----BEGIN CERTIFICATE-----"* ]] || die "tls: first part is not a PEM certificate"
   [[ $key == *"-----BEGIN "*"PRIVATE KEY-----"* ]] || die "tls: second part is not a PEM private key"
-  install -d -m 750 -o caddy -g caddy "$TLS_CERT_DIR/$app"
-  printf '%s\n' "$cert" > "$TLS_CERT_DIR/$app/cert.pem"
-  printf '%s\n' "$key"  > "$TLS_CERT_DIR/$app/key.pem"
-  chown caddy:caddy "$TLS_CERT_DIR/$app/cert.pem" "$TLS_CERT_DIR/$app/key.pem"
-  chmod 644 "$TLS_CERT_DIR/$app/cert.pem"
-  chmod 600 "$TLS_CERT_DIR/$app/key.pem"
+  # everything below is transactional: back up the current certs, fragment and
+  # mode, and restore ALL of them if the new cert fails Caddy validation —
+  # otherwise a bad upload would leave an invalid Caddyfile that blocks every
+  # app's reload on this box.
+  local certdir="$TLS_CERT_DIR/$app" frag="$CADDY_DIR/$app.caddy"
+  local old_mode=${TLS_MODE:-} fragbak="" hadfrag=0
+  [[ -f $frag ]] && { fragbak=$(cat "$frag"); hadfrag=1; }
+  rm -rf "$certdir.bak"; [[ -d $certdir ]] && cp -a "$certdir" "$certdir.bak"
+  install -d -m 750 -o caddy -g caddy "$certdir"
+  ( umask 077
+    printf '%s\n' "$cert" > "$certdir/cert.pem"
+    printf '%s\n' "$key"  > "$certdir/key.pem"
+  )
+  chown caddy:caddy "$certdir/cert.pem" "$certdir/key.pem"
+  chmod 644 "$certdir/cert.pem"
+  chmod 600 "$certdir/key.pem"
   _set_config "$app" TLS_MODE manual
-  rewrite_app_caddy "$app"
-  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
-    || die "generated Caddy config failed validation"
+  rewrite_app_caddy "$app"   # re-sources the config, which now says manual
+  if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+    rm -rf "$certdir"
+    [[ -d $certdir.bak ]] && mv "$certdir.bak" "$certdir"
+    _set_config "$app" TLS_MODE "$old_mode"
+    [[ $hadfrag == 1 ]] && printf '%s' "$fragbak" > "$frag"
+    die "tls: cert failed Caddy validation — nothing changed (is it a valid cert/key pair for $DOMAIN?)"
+  fi
+  rm -rf "$certdir.bak"
   systemctl reload caddy
   echo "tls: manual cert installed for '$app' ($DOMAIN)"
 }
@@ -715,10 +736,11 @@ cmd_add() {
   [[ $headers_b64 == - ]] && headers_b64=""
   [[ $tls_mode == - ]] && tls_mode=""
   validate_headers "$headers_b64"
-  # manual TLS needs the cert already uploaded (`homeport tls set`), else the
-  # generated `tls <cert>` line points at nothing and Caddy would fail to load.
+  # manual TLS without an uploaded cert is fine on registration (else a fresh
+  # app with tls: manual could never deploy — tls-set needs the app to exist).
+  # emit_tls skips the directive until the cert arrives; warn so it's not missed.
   [[ $tls_mode != manual || -f "$TLS_CERT_DIR/$app/cert.pem" ]] \
-    || die "tls: manual is set but no cert is uploaded — run 'homeport tls set <cert> <key>' first"
+    || echo "tls: manual is set but no cert is uploaded yet — serving automatic HTTPS until you run 'homeport tls set <cert> <key>'" >&2
   # static sites are a wholly different shape (Caddy file_server, no process) —
   # handle them in their own function, leaving the binary-app path below untouched.
   [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64" "$tls_mode"; return; }
@@ -1809,7 +1831,8 @@ cmd_remove() {
         "$CADDY_DIR/$app.caddy"
   systemctl daemon-reload
   systemctl reload caddy 2>/dev/null || true
-  rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}"
+  # the BYO cert dir holds a private key — it must not outlive the app
+  rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}" "${TLS_CERT_DIR:?}/${app:?}"
   # if this was a path-mounted app, rebuild its host's gateway without it (the
   # config is gone now, so the scan naturally excludes it).
   if [[ -n $gwpath && -n $gwdom ]]; then

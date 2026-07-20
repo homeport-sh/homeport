@@ -99,13 +99,25 @@ reject_hdr "headers reject dotdot"    "$(printf '/../etc/*\tX\tv')"
 if [[ "$(cat "$CADDY_DIR/web.caddy")" == *"tls "* ]]; then
   printf 'FAIL tls: default fragment has a tls directive\n'; fails=$((fails + 1))
 else printf 'ok   tls: auto by default (no tls directive)\n'; fi
+TLS_CERT_DIR=$(mktemp -d)   # test cert store
 TLS_MODE=manual
+# manual but no cert uploaded yet → NO tls directive (a directive pointing at
+# missing files would invalidate the whole Caddyfile; also breaks the
+# register-then-upload chicken/egg for fresh apps)
+write_caddy tlsapp t.example.com 8106 plain 1
+if [[ "$(cat "$CADDY_DIR/tlsapp.caddy")" == *"tls $TLS_CERT_DIR"* ]]; then
+  printf 'FAIL tls: emitted directive with no cert on disk\n'; fails=$((fails + 1))
+else printf 'ok   tls: manual without cert emits nothing\n'; fi
+# cert present → directive emitted, for both app shapes
+mkdir -p "$TLS_CERT_DIR/tlsapp" "$TLS_CERT_DIR/tlsstat"
+touch "$TLS_CERT_DIR/tlsapp/cert.pem" "$TLS_CERT_DIR/tlsstat/cert.pem"
 write_caddy tlsapp t.example.com 8106 plain 1
 has "tls manual directive" "$(cat "$CADDY_DIR/tlsapp.caddy")" \
   "tls $TLS_CERT_DIR/tlsapp/cert.pem $TLS_CERT_DIR/tlsapp/key.pem"
 write_caddy_static tlsstat s.example.com ""
 has "tls manual on static" "$(cat "$CADDY_DIR/tlsstat.caddy")" "tls $TLS_CERT_DIR/tlsstat/cert.pem"
 TLS_MODE=""
+rm -rf "$TLS_CERT_DIR"
 
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
@@ -140,6 +152,8 @@ has "gate: deny remove"         "$(gate web "sudo $hd remove web --yes")"     "d
 has "gate: deny self-update"    "$(gate web "sudo $hd self-update")"          "deny"
 has "gate: deny key-add"        "$(gate web "sudo $hd key-add")"              "deny"
 has "gate: deny key-rm"         "$(gate web "sudo $hd key-rm x")"             "deny"
+has "gate: deny tls-set"        "$(gate web "sudo $hd tls-set web")"          "deny"
+has "gate: deny tls-clear"      "$(gate web "sudo $hd tls-clear web")"        "deny"
 has "gate: deny other app"      "$(gate web "sudo $hd activate shop r1")"     "deny"
 has "gate: deny env other app"  "$(gate web "sudo $hd env-sync shop")"        "deny"
 has "gate: deny arbitrary cmd"  "$(gate web "cat /etc/shadow")"               "deny"

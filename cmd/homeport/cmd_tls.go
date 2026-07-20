@@ -48,7 +48,16 @@ func cmdTLS(args []string) error {
 		blob := strings.TrimRight(string(cert), "\n") +
 			"\n##HOMEPORT_TLS_KEY##\n" +
 			strings.TrimRight(string(key), "\n") + "\n"
-		return sshRunIn(cfg.Server, cfg.homeportd("tls-set", cfg.App), blob)
+		if err := sshRunIn(cfg.Server, cfg.homeportd("tls-set", cfg.App), blob); err != nil {
+			return err
+		}
+		// without tls: manual in the yaml, the next deploy re-registers the app
+		// as auto and silently drops this cert — that's a broken site behind a
+		// TLS-terminating proxy, so make the mismatch loud.
+		if cfg.TLS != "manual" {
+			fmt.Fprintln(os.Stderr, "warning: homeport.yaml does not set `tls: manual` — the next deploy will revert this app to automatic HTTPS and stop serving the uploaded cert")
+		}
+		return nil
 	case "clear":
 		return sshRun(cfg.Server, cfg.homeportd("tls-clear", cfg.App))
 	default:
