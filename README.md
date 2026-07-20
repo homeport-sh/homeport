@@ -133,6 +133,7 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 | `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
 | `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
+| `headers` | — | opt-in response headers (a `Name: value` map) — homeport sets none on its own; see [Response headers](#response-headers) |
 
 ¹ `build.command`/`build.artifact` default only for binary apps; a `static` site has no build step by default.
 
@@ -140,6 +141,25 @@ Secrets are **not** in this file — they go through `homeport secrets` and live
 only on the server. `idle`, `replicas`, and `autoscale` are mutually exclusive
 axes — see the scale-to-zero, replicas, and autoscaling sections below for how
 each behaves.
+
+## Response headers
+
+homeport never sets response headers on your behalf — no security or cache
+headers are forced onto your app. If you want them, opt in with a `headers:`
+map, emitted verbatim on the app's site (static or proxied):
+
+```yaml
+headers:
+  Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+  X-Frame-Options: SAMEORIGIN
+  X-Content-Type-Options: nosniff
+  Content-Security-Policy: "default-src 'self'"
+```
+
+These are global (every response). Values are validated against injection into
+the generated Caddy config, so a name must be a plain token and a value a single
+line without `"`, `\`, `{`, or `}`. Path-scoped headers (e.g. long-cache only on
+hashed asset dirs) aren't supported yet.
 
 ## Static sites (no binary)
 
