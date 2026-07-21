@@ -268,6 +268,26 @@ eq "health rejects \${IFS}"     "$(hp_ok '/h${IFS}x'    || echo deny)" "deny"
 eq "health rejects semicolon"   "$(hp_ok '/h;id'        || echo deny)" "deny"
 eq "health rejects space"       "$(hp_ok '/h x'         || echo deny)" "deny"
 
+
+# --- host ownership helpers must return 0 on not-found under set -e ---
+# (regression: a failed [[ ]]&& at the loop tail returned 1, and the caller's
+# owner=$(host_alias_owner …) assignment silently killed homeportd)
+HOMEPORT_ETC=$(mktemp -d)
+mkdir -p "$HOMEPORT_ETC/website"
+printf 'DOMAIN=homeport.sh\nALIASES=www.homeport.sh\nREDIRECT_FROM=\n' > "$HOMEPORT_ETC/website/config"
+if out=$(set -e; host_alias_owner nope.example.com newapp; echo SURVIVED); [[ $out == *SURVIVED* ]]; then
+  printf 'ok   host_alias_owner: not-found survives set -e\n'
+else
+  printf 'FAIL host_alias_owner: not-found dies under set -e\n'; fails=$((fails + 1))
+fi
+if out=$(set -e; host_owned_by nope.example.com newapp; echo SURVIVED); [[ $out == *SURVIVED* ]]; then
+  printf 'ok   host_owned_by: not-found survives set -e\n'
+else
+  printf 'FAIL host_owned_by: not-found dies under set -e\n'; fails=$((fails + 1))
+fi
+eq "host_alias_owner finds alias" "$(host_alias_owner www.homeport.sh newapp)" "website"
+rm -rf "$HOMEPORT_ETC"
+
 echo "----"
 if (( fails > 0 )); then echo "$fails bash test(s) FAILED"; exit 1; fi
 echo "all bash tests passed"

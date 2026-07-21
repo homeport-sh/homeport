@@ -479,7 +479,7 @@ validate_tls_mode() {
     dns:*)
       provider=${mode#dns:}
       [[ $provider =~ ^[a-z0-9-]{1,40}$ ]] || die "tls: invalid dns provider '$provider'"
-      caddy list-modules 2>/dev/null | grep -q "^dns\.providers\.$provider\$" \
+      caddy_has_module "dns.providers.$provider" \
         || die "tls: caddy has no '$provider' DNS module — install it first: homeport server plugins add github.com/caddy-dns/$provider"
       [[ -n $tokenv ]] || tokenv=$(dns_default_env "$provider")
       if [[ $tokenv != none ]] && ! grep -qs "^$tokenv=" "$CADDY_ENV_FILE"; then
@@ -488,6 +488,16 @@ validate_tls_mode() {
       ;;
     *) die "tls: mode must be 'manual' or 'dns:<provider>', got '$mode'" ;;
   esac
+}
+
+# caddy_has_module <exact-module-id> — SIGPIPE-safe module check. `list-modules
+# | grep -q` is a RACE under pipefail: grep exits on first match, caddy gets
+# SIGPIPE mid-write, the pipeline reports 141 — a transient false "no module"
+# we hit live. Capture first, match a herestring.
+caddy_has_module() {
+  local mods
+  mods=$(caddy list-modules 2>/dev/null) || true
+  grep -q "^${1}\$" <<< "$mods"
 }
 
 # dns_default_env <provider> — the uniform token env var name for a provider
@@ -557,6 +567,7 @@ host_owned_by() {
     v=$(sed -n 's/^REDIRECT_FROM=//p' "$_cfg")
     [[ ",$v," == *",$host,"* ]] && { echo "$_oapp"; return; }
   done
+  return 0   # not found is the NORMAL case — callers read the echo, not the status
 }
 
 # host_alias_owner <host> <exclude-app> — like host_owned_by but only scans the
@@ -572,6 +583,7 @@ host_alias_owner() {
     v=$(sed -n 's/^REDIRECT_FROM=//p' "$_cfg")
     [[ ",$v," == *",$host,"* ]] && { echo "$_oapp"; return; }
   done
+  return 0   # not found is the NORMAL case — callers read the echo, not the status
 }
 
 # validate_extra_hosts <app> <primary> <csv> <label> — shared checks for the
@@ -869,8 +881,10 @@ _caddy_rebuild() {
     || die "download from Caddy's build service failed"
   chmod 755 "$tmp"
   "$tmp" version >/dev/null 2>&1 || die "downloaded binary does not run"
+  local binfo
+  binfo=$("$tmp" build-info 2>/dev/null) || true
   for m in "$@"; do
-    "$tmp" build-info 2>/dev/null | grep -qF "$m" \
+    grep -qF "$m" <<< "$binfo" \
       || die "downloaded binary does not contain '$m' (typo in the module path?)"
   done
   caddy_validate "$tmp" \
@@ -1217,7 +1231,7 @@ cmd_global_dns() { # <provider|-> [env-name] — set/clear the global DNS module
     return
   fi
   [[ $provider =~ ^[a-z0-9-]{1,40}$ ]] || die "invalid dns provider '$provider'"
-  caddy list-modules 2>/dev/null | grep -q "^dns\.providers\.$provider\$" \
+  caddy_has_module "dns.providers.$provider" \
     || die "caddy has no '$provider' DNS module — install it first: homeport server plugins add github.com/caddy-dns/$provider"
   [[ -n $envname ]] || envname=$(dns_default_env "$provider")
   [[ $envname == none || $envname =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || die "invalid env var name '$envname'"
@@ -1235,7 +1249,7 @@ cmd_global_dyndns() { # on|off — auto-manage A/AAAA records for every app doma
   case $want in
     on)
       [[ -n $GDNS_PROVIDER ]] || die "set the provider first: homeport server dns <provider>"
-      caddy list-modules 2>/dev/null | grep -q "^dynamic_dns\$" \
+      caddy_has_module "dynamic_dns" \
         || die "caddy has no dynamic_dns module — install it first: homeport server plugins add github.com/mholt/caddy-dynamicdns"
       _globals_snapshot
       GDYNDNS=1
@@ -2411,7 +2425,9 @@ cmd_self_update() { # replace this script with a validated copy from stdin
   local tmp
   tmp=$(mktemp)
   cat > "$tmp"
-  if ! head -5 "$tmp" | grep -q '^# homeportd '; then
+  local hdr
+  hdr=$(head -5 "$tmp")
+  if ! grep -q '^# homeportd ' <<< "$hdr"; then
     rm -f "$tmp"
     die "stdin does not look like a homeportd script"
   fi
