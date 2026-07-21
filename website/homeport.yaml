@@ -1,8 +1,13 @@
 # homeport deploy config — safe to commit
 app: website
 server: deploy@116.203.183.59
-domain: homeport.sh
-redirect_from: [www.homeport.sh] # www → apex (wildcard DNS already points here)
+# both hostnames SERVE the site (no redirect); the page's canonical link tag
+# points search engines at the apex.
+domain: [homeport.sh, www.homeport.sh]
+
+# DNS-01 certs via the Cloudflare API — issuance/renewal keep working with the
+# Cloudflare proxy (orange-cloud) in front, which blocks the HTTP-01 path.
+tls: dns:cloudflare
 
 # Fully prerendered SvelteKit site → a folder of files, served by Caddy
 # file_server (no process on the box). SPA vs multi-page is auto-detected.
