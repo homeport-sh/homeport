@@ -106,7 +106,7 @@ everyday:
   homeport tls set <cert> <key> serve a bring-your-own cert (with tls: manual) — e.g. behind a proxy
   homeport server update        push this CLI's bundled homeportd to the box
   homeport server plugins       add/rm Caddy plugins (official caddyserver.com builds, no toolchain)
-  homeport server firewall      restrict 80/443 to CIDR ranges (e.g. Cloudflare) — SSH untouched
+  homeport server firewall      restrict 80/443 to CIDRs (allow cloudflare = CF edge ranges) — SSH untouched
   homeport server caddy-env     set DNS-provider tokens for tls: dns:<provider> (DNS-01 certs)
   homeport server dns <provider> global DNS module for DNS-01 certs + ECH publication
   homeport server ech <name>    Encrypted Client Hello (privacy: encrypts SNI; needs server dns)

@@ -310,19 +310,29 @@ IP is usually in public DNS history, so the real protection is a kernel-level
 firewall that only accepts web traffic **from the edge's IP ranges**:
 
 ```sh
-curl -s https://www.cloudflare.com/ips-v4 https://www.cloudflare.com/ips-v6 > cf.txt
-homeport server firewall allow cf.txt      # 80/443 now only from Cloudflare
-homeport server firewall                   # show the current policy
-homeport server firewall clear             # reopen to the world
+homeport server firewall allow cloudflare  # fetch CF's live ranges → 80/443 only from Cloudflare
+homeport server firewall                    # show the current policy
+homeport server firewall clear              # reopen to the world
 ```
 
-The list is declarative (one CIDR per line, `#` comments) and replaces the
-previous policy wholesale. Rules are swapped with no gap, enforced by the
-kernel (dropped before a TCP handshake — no per-request checks anywhere), and
-**SSH is never touched**, so a bad policy can only break web traffic, not lock
-you out. Pair it with `tls: manual` or a DNS-01 plugin: once the box only
-accepts edge traffic, Let's Encrypt can't reach it to issue certs (homeport
-warns you about any app still on automatic HTTPS).
+`allow cloudflare` pulls Cloudflare's [current edge ranges](https://www.cloudflare.com/ips/)
+(v4 + v6) and applies them — no list to paste or keep up to date. For any other
+edge (or a custom allow-list), pass a file or `-` for stdin instead; it's a
+declarative CIDR list (one per line, `#` comments) that replaces the previous
+policy wholesale:
+
+```sh
+curl -s https://api.fastly.com/public-ip-list | jq -r '.addresses[]' > edge.txt
+homeport server firewall allow edge.txt
+```
+
+Rules are swapped with no gap, enforced by the kernel (dropped before a TCP
+handshake — no per-request checks anywhere), and **SSH is never touched**, so a
+bad policy can only break web traffic, not lock you out. Once the box only
+accepts edge traffic, Let's Encrypt can't reach it over HTTP-01 — so pair the
+firewall with `tls: manual` (BYO cert) or `tls: dns:<provider>` (DNS-01, which
+proves the challenge over the DNS API). homeport warns you about any app still
+on plain automatic HTTPS, and leaves `manual`/`dns:` apps alone.
 
 ## Static sites (no binary)
 

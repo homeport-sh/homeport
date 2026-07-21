@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"net/http"
 	"net/netip"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	homeport "github.com/homeport-sh/homeport"
 	"golang.org/x/term"
@@ -158,11 +161,13 @@ func cmdServerCaddyEnv(args []string) error {
 // cmdServerFirewall restricts (or reopens) web ingress on the box:
 //
 //	homeport server firewall                          show the current policy
-//	homeport server firewall allow <file|->           restrict 80/443 to these CIDRs
+//	homeport server firewall allow <file|-|cloudflare>  restrict 80/443 to these CIDRs
 //	homeport server firewall clear                    reopen 80/443 to the world
 //
 // The file is declarative — one CIDR per line (# comments ok), and the list
-// replaces the previous policy wholesale. SSH is never touched.
+// replaces the previous policy wholesale. SSH is never touched. The literal
+// keyword "cloudflare" fetches Cloudflare's current edge ranges instead of a
+// file — the one-command way to lock the origin behind the Cloudflare proxy.
 func cmdServerFirewall(args []string) error {
 	host := []string{}
 	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
@@ -178,12 +183,15 @@ func cmdServerFirewall(args []string) error {
 	switch args[0] {
 	case "allow":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: homeport server firewall allow <file|-> [deploy@host]")
+			return fmt.Errorf("usage: homeport server firewall allow <file|-|cloudflare> [deploy@host]")
 		}
 		var data []byte
-		if args[1] == "-" {
+		switch args[1] {
+		case "-":
 			data, err = io.ReadAll(io.LimitReader(os.Stdin, 65536))
-		} else {
+		case "cloudflare":
+			data, err = fetchCloudflareCIDRs()
+		default:
 			data, err = os.ReadFile(args[1])
 		}
 		if err != nil {
@@ -246,6 +254,45 @@ func parseCIDRList(data []byte) ([]string, error) {
 		return nil, fmt.Errorf("too many ranges (%d, max 200)", len(cidrs))
 	}
 	return cidrs, nil
+}
+
+// Cloudflare's official published edge ranges. Fetched (not hardcoded) so the
+// allow-list tracks Cloudflare as it adds ranges. https://www.cloudflare.com/ips/
+const (
+	cloudflareIPsV4URL = "https://www.cloudflare.com/ips-v4"
+	cloudflareIPsV6URL = "https://www.cloudflare.com/ips-v6"
+)
+
+// fetchCloudflareCIDRs returns Cloudflare's current edge IP ranges (v4 + v6) as
+// a newline-separated CIDR list, ready for parseCIDRList. Restricting 80/443 to
+// these is the real origin protection behind the Cloudflare proxy: the origin
+// IP is already public in DNS history, so hiding it isn't the point — dropping
+// packets that didn't come from Cloudflare is.
+func fetchCloudflareCIDRs() ([]byte, error) {
+	var buf bytes.Buffer
+	for _, url := range []string{cloudflareIPsV4URL, cloudflareIPsV6URL} {
+		body, err := httpGetLimited(url, 65536)
+		if err != nil {
+			return nil, fmt.Errorf("fetching Cloudflare IP ranges from %s: %w", url, err)
+		}
+		buf.Write(bytes.TrimSpace(body))
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
+}
+
+// httpGetLimited GETs a URL with a short timeout and caps the body it reads.
+func httpGetLimited(url string, limit int64) ([]byte, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
 
 // serverTarget resolves the box to operate on: an explicit deploy@host arg
