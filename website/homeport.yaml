@@ -2,6 +2,7 @@
 app: website
 server: deploy@116.203.183.59
 domain: homeport.sh
+redirect_from: [www.homeport.sh] # www → apex (wildcard DNS already points here)
 
 # Fully prerendered SvelteKit site → a folder of files, served by Caddy
 # file_server (no process on the box). SPA vs multi-page is auto-detected.
