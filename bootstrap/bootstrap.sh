@@ -775,6 +775,106 @@ cmd_caddy_plugin_list() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Web-ingress firewall — restrict ports 80/443 to a set of CIDR ranges (e.g.
+# Cloudflare's published IPs) so a known origin IP can't be hit directly,
+# bypassing the edge's WAF/DDoS protection. Declarative: the uploaded list IS
+# the policy; clear restores the bootstrap default (open to the world). SSH is
+# never touched — a bad policy can only break web traffic, not lock you out.
+# ---------------------------------------------------------------------------
+FIREWALL_WEB_FILE=/etc/homeport/firewall-web
+
+# valid_cidr <cidr> — IPv4 (octets 0-255, mask 0-32) or IPv6 (mask 0-128).
+# These become ufw argv, so anything else is rejected.
+valid_cidr() {
+  local c=${1:-}
+  if [[ $c =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]]; then
+    local i
+    for i in "${BASH_REMATCH[@]:1:4}"; do (( i <= 255 )) || return 1; done
+    (( BASH_REMATCH[5] <= 32 )) || return 1
+    return 0
+  fi
+  [[ $c == *:* ]] || return 1
+  [[ $c =~ ^[0-9a-fA-F:]{2,39}/([0-9]{1,3})$ ]] || return 1
+  (( BASH_REMATCH[1] <= 128 ))
+}
+
+# _fw_in_list <needle> <item>... — is needle one of the items?
+_fw_in_list() {
+  local needle=$1 c; shift
+  for c in "$@"; do [[ $c == "$needle" ]] && return 0; done
+  return 1
+}
+
+cmd_firewall_set() { # CIDR ranges on stdin, one per line; # comments allowed
+  local line cidrs=()
+  while IFS= read -r line; do
+    line=${line%%#*}; line=${line//[[:space:]]/}
+    [[ -n $line ]] || continue
+    valid_cidr "$line" || die "firewall: invalid CIDR '$line'"
+    _fw_in_list "$line" ${cidrs[@]+"${cidrs[@]}"} && continue
+    cidrs+=("$line")
+    [[ ${#cidrs[@]} -le 200 ]] || die "firewall: too many ranges (max 200)"
+  done < <(head -c 65536)
+  [[ ${#cidrs[@]} -ge 1 ]] || die "firewall: no CIDR ranges on stdin (one per line; use firewall-clear to open up)"
+  # zero-gap swap: add the new allows FIRST (ufw skips duplicates), only then
+  # remove the broad rules and any previously-saved ranges not in the new set.
+  local c
+  for c in "${cidrs[@]}"; do
+    ufw allow from "$c" to any port 80,443 proto tcp >/dev/null || die "firewall: ufw rejected '$c'"
+  done
+  ufw delete allow 80/tcp >/dev/null 2>&1 || true
+  ufw delete allow 443/tcp >/dev/null 2>&1 || true
+  if [[ -f $FIREWALL_WEB_FILE ]]; then
+    while IFS= read -r c; do
+      [[ -n $c ]] || continue
+      _fw_in_list "$c" "${cidrs[@]}" && continue
+      ufw delete allow from "$c" to any port 80,443 proto tcp >/dev/null 2>&1 || true
+    done < "$FIREWALL_WEB_FILE"
+  fi
+  printf '%s\n' "${cidrs[@]}" > "$FIREWALL_WEB_FILE"
+  echo "firewall: 80/443 restricted to ${#cidrs[@]} range(s) — SSH untouched"
+  # ACME can no longer reach the box: warn about every public app still on
+  # automatic HTTPS, or its cert issuance/renewal will silently fail.
+  local cfg dom mode acme=()
+  for cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $cfg ]] || continue
+    dom=$(sed -n 's/^DOMAIN=//p' "$cfg"); [[ -n $dom ]] || continue
+    mode=$(sed -n 's/^TLS_MODE=//p' "$cfg")
+    [[ $mode == manual ]] || acme+=("$(basename "$(dirname "$cfg")") ($dom)")
+  done
+  if [[ ${#acme[@]} -gt 0 ]]; then
+    { echo "WARNING: these apps use automatic HTTPS — Let's Encrypt can no longer reach this box to issue or renew their certs:"
+      printf '  %s\n' "${acme[@]}"
+      echo "  pair the firewall with 'tls: manual' (bring-your-own cert) or a DNS-01 Caddy plugin"
+    } >&2
+  fi
+}
+
+cmd_firewall_clear() {
+  local c
+  # restore the broad rules first, then drop the per-range ones — zero gap
+  ufw allow 80/tcp >/dev/null
+  ufw allow 443/tcp >/dev/null
+  if [[ -f $FIREWALL_WEB_FILE ]]; then
+    while IFS= read -r c; do
+      [[ -n $c ]] || continue
+      ufw delete allow from "$c" to any port 80,443 proto tcp >/dev/null 2>&1 || true
+    done < "$FIREWALL_WEB_FILE"
+  fi
+  rm -f "$FIREWALL_WEB_FILE"
+  echo "firewall: 80/443 open to the world again (bootstrap default)"
+}
+
+cmd_firewall_list() {
+  if [[ -f $FIREWALL_WEB_FILE ]]; then
+    echo "80/443 restricted to:"
+    sed 's/^/  /' "$FIREWALL_WEB_FILE"
+  else
+    echo "80/443 open to the world (bootstrap default)"
+  fi
+}
+
 # cmd_upload_static <app> <release> — extract a tar.gz of the site from stdin.
 cmd_upload_static() {
   local app=${1:-} release=${2:-}
@@ -1988,6 +2088,9 @@ homeportd — root-side homeport helper (run via sudo)
   caddy-plugin-add <module>...       swap in an official Caddy build with these plugins
   caddy-plugin-rm <module>           drop a plugin (no plugins left = stock apt binary)
   caddy-plugin-list                  show the plugins baked into the running Caddy
+  firewall-set                       restrict 80/443 to CIDR ranges from stdin (SSH untouched)
+  firewall-clear                     reopen 80/443 to the world (bootstrap default)
+  firewall-list                      show the current web-ingress policy
   self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
   remove <app> --yes                 delete app, releases, env, user
@@ -2020,6 +2123,9 @@ main() {
     caddy-plugin-add)  cmd_caddy_plugin_add "$@" ;;
     caddy-plugin-rm)   cmd_caddy_plugin_rm "$@" ;;
     caddy-plugin-list) cmd_caddy_plugin_list "$@" ;;
+    firewall-set)   cmd_firewall_set "$@" ;;
+    firewall-clear) cmd_firewall_clear "$@" ;;
+    firewall-list)  cmd_firewall_list "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;

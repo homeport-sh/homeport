@@ -209,6 +209,27 @@ build is active it is **not** upgraded by apt; re-run a `plugins add` to refresh
 it. Plugin *configuration* (e.g. wiring a DNS provider into cert issuance) is
 separate — this command manages what's compiled in.
 
+## Web-ingress firewall
+
+Running behind an edge proxy only helps if attackers can't skip it: your origin
+IP is usually in public DNS history, so the real protection is a kernel-level
+firewall that only accepts web traffic **from the edge's IP ranges**:
+
+```sh
+curl -s https://www.cloudflare.com/ips-v4 https://www.cloudflare.com/ips-v6 > cf.txt
+homeport server firewall allow cf.txt      # 80/443 now only from Cloudflare
+homeport server firewall                   # show the current policy
+homeport server firewall clear             # reopen to the world
+```
+
+The list is declarative (one CIDR per line, `#` comments) and replaces the
+previous policy wholesale. Rules are swapped with no gap, enforced by the
+kernel (dropped before a TCP handshake — no per-request checks anywhere), and
+**SSH is never touched**, so a bad policy can only break web traffic, not lock
+you out. Pair it with `tls: manual` or a DNS-01 plugin: once the box only
+accepts edge traffic, Let's Encrypt can't reach it to issue certs (homeport
+warns you about any app still on automatic HTTPS).
+
 ## Static sites (no binary)
 
 A folder of files — an SPA, a docs site, a landing page — needs no process at

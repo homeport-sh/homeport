@@ -106,6 +106,7 @@ everyday:
   homeport tls set <cert> <key> serve a bring-your-own cert (with tls: manual) — e.g. behind a proxy
   homeport server update        push this CLI's bundled homeportd to the box
   homeport server plugins       add/rm Caddy plugins (official caddyserver.com builds, no toolchain)
+  homeport server firewall      restrict 80/443 to CIDR ranges (e.g. Cloudflare) — SSH untouched
 
 Your binary's contract: listen on $PORT (bind $HOST, 127.0.0.1); persist
 only under $STATE_DIR. Caddy terminates TLS in front of it.

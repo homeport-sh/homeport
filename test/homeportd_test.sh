@@ -132,6 +132,20 @@ bad_mod "github.com/x/y z"                            # space → argv smuggling
 bad_mod "-flag/inject"                                # leading dash
 bad_mod ""                                            # empty
 
+# --- valid_cidr: firewall ranges become ufw argv — the gate ---
+ok_cidr()  { valid_cidr "$1" && printf 'ok   cidr accept %s\n' "$1" || { printf 'FAIL cidr accept %s\n' "$1"; fails=$((fails + 1)); }; }
+bad_cidr() { valid_cidr "$1" && { printf 'FAIL cidr reject %s\n' "$1"; fails=$((fails + 1)); } || printf 'ok   cidr reject %s\n' "$1"; }
+ok_cidr  "103.21.244.0/22"      # a real Cloudflare range
+ok_cidr  "192.0.2.1/32"
+ok_cidr  "2400:cb00::/32"       # Cloudflare IPv6
+ok_cidr  "::1/128"
+bad_cidr "103.21.244.0"         # bare IP, no mask
+bad_cidr "999.1.1.0/24"         # octet out of range
+bad_cidr "10.0.0.0/33"          # mask too big
+bad_cidr "2400:cb00::/200"      # v6 mask too big
+bad_cidr "10.0.0.0/8; rm -rf /" # argv injection
+bad_cidr ""
+
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
 if ! command -v mapfile >/dev/null 2>&1; then
@@ -169,6 +183,8 @@ has "gate: deny tls-set"        "$(gate web "sudo $hd tls-set web")"          "d
 has "gate: deny tls-clear"      "$(gate web "sudo $hd tls-clear web")"        "deny"
 has "gate: deny caddy-plugin-add"  "$(gate web "sudo $hd caddy-plugin-add x/y")" "deny"
 has "gate: deny caddy-plugin-rm"   "$(gate web "sudo $hd caddy-plugin-rm x/y")"  "deny"
+has "gate: deny firewall-set"      "$(gate web "sudo $hd firewall-set")"         "deny"
+has "gate: deny firewall-clear"    "$(gate web "sudo $hd firewall-clear")"       "deny"
 has "gate: deny other app"      "$(gate web "sudo $hd activate shop r1")"     "deny"
 has "gate: deny env other app"  "$(gate web "sudo $hd env-sync shop")"        "deny"
 has "gate: deny arbitrary cmd"  "$(gate web "cat /etc/shadow")"               "deny"

@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/netip"
+	"os"
 	"regexp"
 	"strings"
 
@@ -20,7 +23,7 @@ import (
 // `plugins` swaps Caddy for an official caddyserver.com build with the named
 // plugin modules baked in (nothing compiles on the box).
 func cmdServer(args []string) error {
-	const use = "usage: homeport server <update [deploy@host] | plugins [add <module>... | rm <module>] [deploy@host]>"
+	const use = "usage: homeport server <update | plugins [add|rm …] | firewall [allow <file>|clear]> [deploy@host]"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", use)
 	}
@@ -42,9 +45,84 @@ func cmdServer(args []string) error {
 		return sshRun(target, "sudo /usr/local/bin/homeportd version")
 	case "plugins":
 		return cmdServerPlugins(args[1:])
+	case "firewall":
+		return cmdServerFirewall(args[1:])
 	default:
 		return fmt.Errorf("%s", use)
 	}
+}
+
+// cmdServerFirewall restricts (or reopens) web ingress on the box:
+//
+//	homeport server firewall                          show the current policy
+//	homeport server firewall allow <file|->           restrict 80/443 to these CIDRs
+//	homeport server firewall clear                    reopen 80/443 to the world
+//
+// The file is declarative — one CIDR per line (# comments ok), and the list
+// replaces the previous policy wholesale. SSH is never touched.
+func cmdServerFirewall(args []string) error {
+	host := []string{}
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		host, args = args[n-1:], args[:n-1]
+	}
+	target, err := serverTarget(host)
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return sshRun(target, "sudo /usr/local/bin/homeportd firewall-list")
+	}
+	switch args[0] {
+	case "allow":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: homeport server firewall allow <file|-> [deploy@host]")
+		}
+		var data []byte
+		if args[1] == "-" {
+			data, err = io.ReadAll(io.LimitReader(os.Stdin, 65536))
+		} else {
+			data, err = os.ReadFile(args[1])
+		}
+		if err != nil {
+			return err
+		}
+		cidrs, err := parseCIDRList(data)
+		if err != nil {
+			return err
+		}
+		return sshRunIn(target, "sudo /usr/local/bin/homeportd firewall-set", strings.Join(cidrs, "\n")+"\n")
+	case "clear":
+		return sshRun(target, "sudo /usr/local/bin/homeportd firewall-clear")
+	default:
+		return fmt.Errorf("usage: homeport server firewall [allow <file|-> | clear] [deploy@host]")
+	}
+}
+
+// parseCIDRList extracts and validates CIDR ranges from a policy file: one per
+// line, blank lines and # comments ignored. Validated client-side (exact
+// stdlib parse) so a typo fails before it reaches the box's firewall.
+func parseCIDRList(data []byte) ([]string, error) {
+	var cidrs []string
+	for i, line := range strings.Split(string(data), "\n") {
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, err := netip.ParsePrefix(line); err != nil {
+			return nil, fmt.Errorf("line %d: %q is not a valid CIDR (e.g. 103.21.244.0/22)", i+1, line)
+		}
+		cidrs = append(cidrs, line)
+	}
+	if len(cidrs) == 0 {
+		return nil, fmt.Errorf("no CIDR ranges found (one per line; # comments allowed)")
+	}
+	if len(cidrs) > 200 {
+		return nil, fmt.Errorf("too many ranges (%d, max 200)", len(cidrs))
+	}
+	return cidrs, nil
 }
 
 // serverTarget resolves the box to operate on: an explicit deploy@host arg

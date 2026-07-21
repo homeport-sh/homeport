@@ -278,6 +278,27 @@ func TestValidCaddyModule(t *testing.T) {
 	}
 }
 
+func TestParseCIDRList(t *testing.T) {
+	got, err := parseCIDRList([]byte("# Cloudflare v4\n103.21.244.0/22\n\n2400:cb00::/32  # v6\n"))
+	if err != nil {
+		t.Fatalf("valid list rejected: %v", err)
+	}
+	if len(got) != 2 || got[0] != "103.21.244.0/22" || got[1] != "2400:cb00::/32" {
+		t.Errorf("parsed = %v, want the two ranges", got)
+	}
+	for label, in := range map[string]string{
+		"bare IP":    "103.21.244.0\n",
+		"bad octet":  "999.1.1.0/24\n",
+		"bad mask":   "10.0.0.0/33\n",
+		"injection":  "10.0.0.0/8; rm -rf /\n",
+		"only-blank": "# nothing\n\n",
+	} {
+		if _, err := parseCIDRList([]byte(in)); err == nil {
+			t.Errorf("%s: expected rejection, got nil", label)
+		}
+	}
+}
+
 func TestAddArgsTLS(t *testing.T) {
 	cfg := &config{App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1, TLS: "manual"}
 	if a := cfg.addArgs(); a[len(a)-1] != "manual" {
