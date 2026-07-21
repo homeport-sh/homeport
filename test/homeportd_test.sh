@@ -151,18 +151,18 @@ else printf 'ok   no redirect blocks when unset\n'; fi
 
 # --- managed Caddy global options (00-globals.caddy generator) ---
 CADDY_GLOBALS_FRAG="$CADDY_DIR/00-globals.caddy"
-GDNS_PROVIDER=cloudflare GDNS_ENV=HOMEPORT_DNS_CLOUDFLARE GDYNDNS="" GECH=""
+GDNS_PROVIDER=cloudflare GDNS_ENV=HOMEPORT_DNS_CLOUDFLARE GECH=""
 write_caddy_globals
 g=$(cat "$CADDY_GLOBALS_FRAG")
 has "globals dns line"      "$g" "dns cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}"
-GDYNDNS=1 GECH=ech.example.com
+GECH=ech.example.com
 write_caddy_globals
 g=$(cat "$CADDY_GLOBALS_FRAG")
-has "globals dyndns block"  "$g" "dynamic_dns {"
-has "globals dyndns provider" "$g" "provider cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}"
-has "globals dynamic_domains" "$g" "dynamic_domains"
-has "globals check_interval"   "$g" "check_interval 5m"
 has "globals ech line"      "$g" "ech ech.example.com"
+# dynamic_dns was removed in v0.3.0 — the generator must never emit it again
+if [[ $g == *"dynamic_dns"* ]]; then
+  printf 'FAIL globals: dynamic_dns block resurfaced\n'; fails=$((fails + 1))
+else printf 'ok   globals: no dynamic_dns block\n'; fi
 GDNS_ENV=none
 write_caddy_globals
 g=$(cat "$CADDY_GLOBALS_FRAG")
@@ -170,7 +170,7 @@ has "globals dns sdk-env"   "$g" $'\tdns cloudflare\n'
 if [[ $g == *"{env."* ]]; then
   printf 'FAIL globals: env placeholder emitted with GDNS_ENV=none\n'; fails=$((fails + 1))
 else printf 'ok   globals: no env placeholder when none\n'; fi
-GDNS_PROVIDER="" GDNS_ENV="" GDYNDNS="" GECH=""
+GDNS_PROVIDER="" GDNS_ENV="" GECH=""
 write_caddy_globals
 if [[ -f $CADDY_GLOBALS_FRAG ]]; then
   printf 'FAIL globals: fragment survives with nothing set\n'; fails=$((fails + 1))

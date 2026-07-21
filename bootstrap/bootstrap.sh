@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.2.1
+HOMEPORTD_VERSION=0.3.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -1143,9 +1143,8 @@ cmd_caddy_env_list() {
 
 # ---------------------------------------------------------------------------
 # Caddy global options — a homeport-managed `{ … }` block for server-wide
-# features: a default DNS provider (DNS-01 + ECH publication), dynamic DNS
-# (auto-managed A/AAAA records for every app domain), and ECH. The block lives
-# in its own fragment, 00-globals.caddy, which sorts before every site fragment
+# features: a default DNS provider (DNS-01 + ECH publication) and ECH. The block
+# lives in its own fragment, 00-globals.caddy, which sorts before every site fragment
 # so it lands first in the assembled config — the main Caddyfile is never
 # rewritten, so hand edits there stay safe. State (root-written only, safe to
 # source) is regenerated into the fragment on every change, transactionally.
@@ -1154,7 +1153,7 @@ CADDY_GLOBALS_STATE=/etc/homeport/caddy-globals
 CADDY_GLOBALS_FRAG=$CADDY_DIR/00-globals.caddy
 
 load_globals() {
-  GDNS_PROVIDER="" GDNS_ENV="" GDYNDNS="" GECH=""
+  GDNS_PROVIDER="" GDNS_ENV="" GECH=""
   # shellcheck disable=SC1090
   [[ -f $CADDY_GLOBALS_STATE ]] && source "$CADDY_GLOBALS_STATE"
   return 0
@@ -1164,7 +1163,6 @@ save_globals() {
   cat > "$CADDY_GLOBALS_STATE" <<EOF
 GDNS_PROVIDER=$GDNS_PROVIDER
 GDNS_ENV=$GDNS_ENV
-GDYNDNS=$GDYNDNS
 GECH=$GECH
 EOF
 }
@@ -1172,11 +1170,11 @@ EOF
 # write_caddy_globals — regenerate the global-options fragment from the G*
 # vars; no options set means no fragment at all.
 write_caddy_globals() {
-  if [[ -z $GDNS_PROVIDER && -z $GDYNDNS && -z $GECH ]]; then
+  if [[ -z $GDNS_PROVIDER && -z $GECH ]]; then
     rm -f "$CADDY_GLOBALS_FRAG"
     return 0
   fi
-  { printf '# managed by homeport — edit via `homeport server dns|dns-records|ech`\n'
+  { printf '# managed by homeport — edit via `homeport server dns|ech`\n'
     printf '{\n'
     if [[ -n $GDNS_PROVIDER ]]; then
       if [[ $GDNS_ENV == none ]]; then
@@ -1184,17 +1182,6 @@ write_caddy_globals() {
       else
         printf '\tdns %s {env.%s}\n' "$GDNS_PROVIDER" "$GDNS_ENV"
       fi
-    fi
-    if [[ $GDYNDNS == 1 ]]; then
-      printf '\tdynamic_dns {\n'
-      if [[ $GDNS_ENV == none ]]; then
-        printf '\t\tprovider %s\n' "$GDNS_PROVIDER"
-      else
-        printf '\t\tprovider %s {env.%s}\n' "$GDNS_PROVIDER" "$GDNS_ENV"
-      fi
-      printf '\t\tdynamic_domains\n'
-      printf '\t\tcheck_interval 5m\n'   # default 30m is too sleepy for deploy-then-resolve
-      printf '\t}\n'
     fi
     [[ -n $GECH ]] && printf '\tech %s\n' "$GECH"
     printf '}\n'
@@ -1231,7 +1218,7 @@ cmd_global_dns() { # <provider|-> [env-name] — set/clear the global DNS module
   local provider=${1:-} envname=${2:-}
   load_globals
   if [[ $provider == - || -z $provider ]]; then
-    [[ -z $GDYNDNS && -z $GECH ]] || die "dns-records/ech depend on the global DNS provider — turn them off first"
+    [[ -z $GECH ]] || die "ech depends on the global DNS provider — turn it off first"
     _globals_snapshot
     GDNS_PROVIDER="" GDNS_ENV=""
     _globals_commit "caddy: global DNS provider cleared"
@@ -1248,25 +1235,6 @@ cmd_global_dns() { # <provider|-> [env-name] — set/clear the global DNS module
   _globals_snapshot
   GDNS_PROVIDER=$provider GDNS_ENV=$envname
   _globals_commit "caddy: global DNS provider set to $provider"
-}
-
-cmd_global_dyndns() { # on|off — auto-manage A/AAAA records for every app domain
-  local want=${1:-}
-  load_globals
-  case $want in
-    on)
-      [[ -n $GDNS_PROVIDER ]] || die "set the provider first: homeport server dns <provider>"
-      caddy_has_module "dynamic_dns" \
-        || die "caddy has no dynamic_dns module — install it first: homeport server plugins add github.com/mholt/caddy-dynamicdns"
-      _globals_snapshot
-      GDYNDNS=1
-      _globals_commit "caddy: dynamic DNS on — records for every app domain now managed via $GDNS_PROVIDER" ;;
-    off)
-      _globals_snapshot
-      GDYNDNS=""
-      _globals_commit "caddy: dynamic DNS off (existing records are left as-is)" ;;
-    *) die "usage: global-dyndns <on|off>" ;;
-  esac
 }
 
 cmd_global_ech() { # <public-name|-> — Encrypted Client Hello
@@ -1315,7 +1283,6 @@ cmd_global_ech_rotate() {
 cmd_global_list() {
   load_globals
   echo "dns provider: ${GDNS_PROVIDER:-(unset)}${GDNS_PROVIDER:+ (env: $GDNS_ENV)}"
-  echo "dns-records:  $([[ $GDYNDNS == 1 ]] && echo "on (dynamic_domains)" || echo off)"
   echo "ech:          ${GECH:-off}"
 }
 
@@ -2565,7 +2532,6 @@ homeportd — root-side homeport helper (run via sudo)
   caddy-env-list                     list Caddy env var names (values never printed)
   caddy-logs [-n N]                  the caddy service journal (TLS/ECH/publication errors)
   global-dns <provider|->            set/clear the global DNS module (DNS-01 default + ECH publication)
-  global-dyndns <on|off>             auto-manage A/AAAA records for every app domain (caddy-dynamicdns)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
   global-ech-rotate                  rotate ECH keys & re-publish (fixes late-added records)
   global-list                        show the managed global options
@@ -2609,7 +2575,6 @@ main() {
     caddy-env-list) cmd_caddy_env_list "$@" ;;
     caddy-logs)     cmd_caddy_logs "$@" ;;
     global-dns)     cmd_global_dns "$@" ;;
-    global-dyndns)  cmd_global_dyndns "$@" ;;
     global-ech)     cmd_global_ech "$@" ;;
     global-ech-rotate) cmd_global_ech_rotate "$@" ;;
     global-list)    cmd_global_list "$@" ;;

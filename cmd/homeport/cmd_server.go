@@ -51,7 +51,7 @@ func cmdServer(args []string) error {
 		return cmdServerFirewall(args[1:])
 	case "caddy-env":
 		return cmdServerCaddyEnv(args[1:])
-	case "dns", "dns-records", "ech", "globals":
+	case "dns", "ech", "globals":
 		return cmdServerGlobals(args[0], args[1:])
 	default:
 		return fmt.Errorf("%s", use)
@@ -61,7 +61,6 @@ func cmdServer(args []string) error {
 // cmdServerGlobals drives the homeport-managed Caddy global options:
 //
 //	homeport server dns <provider>|off        global DNS module (DNS-01 default + ECH publication)
-//	homeport server dns-records on|off        auto-manage A/AAAA records for every app domain
 //	homeport server ech <public-name>|off     Encrypted Client Hello (needs `server dns` first)
 //	homeport server globals                   show the current managed global options
 func cmdServerGlobals(sub string, args []string) error {
@@ -95,11 +94,6 @@ func cmdServerGlobals(sub string, args []string) error {
 			cmd += " " + args[1]
 		}
 		return sshRun(target, cmd)
-	case "dns-records":
-		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
-			return fmt.Errorf("usage: homeport server dns-records <on|off> [deploy@host]")
-		}
-		return sshRun(target, hd+"global-dyndns "+args[0])
 	case "ech":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: homeport server ech <public-name|off> [deploy@host]")

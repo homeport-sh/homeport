@@ -108,7 +108,7 @@ everyday:
   homeport server plugins       add/rm Caddy plugins (official caddyserver.com builds, no toolchain)
   homeport server firewall      restrict 80/443 to CIDR ranges (e.g. Cloudflare) — SSH untouched
   homeport server caddy-env     set DNS-provider tokens for tls: dns:<provider> (DNS-01 certs)
-  homeport server dns <provider> global DNS module; then: server dns-records on (auto A/AAAA records)
+  homeport server dns <provider> global DNS module for DNS-01 certs + ECH publication
   homeport server ech <name>    Encrypted Client Hello (privacy: encrypts SNI; needs server dns)
 
 Your binary's contract: listen on $PORT (bind $HOST, 127.0.0.1); persist

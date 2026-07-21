@@ -230,40 +230,32 @@ standard SDK env vars (e.g. route53 with `AWS_ACCESS_KEY_ID` — set those via
 and reach Caddy through a systemd `EnvironmentFile` — never argv, never git.
 Use a token scoped to DNS-edit on the one zone.
 
-## Automatic DNS records (no A records to add)
+## DNS records (no per-app management)
 
 The simplest way to skip DNS management entirely is a **wildcard**: point
 `*.example.com` at the box once and every app you deploy on a subdomain is
-instantly resolvable — nothing else to do, ever.
+instantly resolvable — nothing else to do, ever. A wildcard `A` record never
+overrides an explicit record, so any host you point elsewhere (or proxy) still
+wins; the wildcard just catches everything else.
 
-For per-record automation (custom root domains, no wildcard), homeport wires
-up [`mholt/caddy-dynamicdns`](https://github.com/mholt/caddy-dynamicdns): it
-keeps A/AAAA records pointed at the server via the same caddy-dns providers,
-and auto-discovers **every domain configured in Caddy** — which is exactly
-what homeport's per-app fragments are. Deploy a new app, Caddy reloads, the
-plugin creates its records. Three commands, any provider:
-
-```sh
-homeport server plugins add github.com/caddy-dns/cloudflare github.com/mholt/caddy-dynamicdns
-homeport server caddy-env HOMEPORT_DNS_CLOUDFLARE     # zone-scoped DNS-edit token
-homeport server dns cloudflare                        # global provider (also the DNS-01 default)
-homeport server dns-records on                        # records now follow your apps
-```
-
-`homeport server globals` shows the current state; `dns-records off` /
-`server dns off` unwind it (existing records are left as-is). Under the hood
-these manage a Caddy global-options fragment with the same transactional
-validate-and-roll-back discipline as everything else — the main Caddyfile is
-never rewritten. The same token serves DNS-01 certs (`tls: dns:cloudflare`)
-and record updates. Note this puts a zone-edit token on the box — if you'd
-rather not, stick with the wildcard or manual records.
+For a custom root domain or a stricter setup with no wildcard, add that one
+record by hand. It's a one-time step per domain, and it's the honest place to
+draw the line: homeport deliberately does **not** auto-create or auto-update
+your DNS records. Record automation (e.g. `caddy-dynamicdns`) exists to chase a
+*changing* IP — on a static-IP VPS it's a no-op — and it can only write
+**DNS-only (grey)** records, with no way to mark a record proxied. So on any
+zone that mixes proxied and direct hosts it can't create the record you
+actually want, and homeport has no authoritative way to tell which hosts are
+proxied (that state lives at your DNS provider, not in `homeport.yaml`). The
+wildcard covers the common case with zero moving parts; a hand-added record
+covers the rest.
 
 ## Encrypted Client Hello (ECH)
 
 [ECH](https://caddyserver.com/docs/caddyfile/options) stops TLS from leaking
 which site a visitor is opening (the SNI is encrypted). Caddy ≥ 2.10 generates
 the keys and **publishes them as HTTPS-type DNS records** — which is why ECH
-needs the full DNS setup from the previous section first: the provider plugin,
+needs the same DNS-provider setup as DNS-01 certs above: the provider plugin,
 the `caddy-env` **DNS-edit token** (publication writes records through it),
 and the global provider. The whole chain:
 
@@ -279,7 +271,7 @@ homeport server ech off
 missing, so you can't half-configure it — and a token that the global config
 references can't be removed out from under it either.)
 
-One thing validation **can't** catch (for `dns-records` and `ech` alike): a
+One thing validation **can't** catch for `ech`: a
 wrong-but-well-formed token. Caddy checks the token's shape at load, not its
 validity — homeport won't call your DNS provider's API to probe it. After
 enabling, confirm the records actually appeared in your DNS dashboard, and
