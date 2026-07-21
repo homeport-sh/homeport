@@ -149,6 +149,35 @@ if [[ "$(cat "$CADDY_DIR/multi.caddy")" == *"redir "* ]]; then
   printf 'FAIL redirect blocks emitted with empty REDIRECT_FROM\n'; fails=$((fails + 1))
 else printf 'ok   no redirect blocks when unset\n'; fi
 
+# --- managed Caddy global options (00-globals.caddy generator) ---
+CADDY_GLOBALS_FRAG="$CADDY_DIR/00-globals.caddy"
+GDNS_PROVIDER=cloudflare GDNS_ENV=HOMEPORT_DNS_CLOUDFLARE GDYNDNS="" GECH=""
+write_caddy_globals
+g=$(cat "$CADDY_GLOBALS_FRAG")
+has "globals dns line"      "$g" "dns cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}"
+GDYNDNS=1 GECH=ech.example.com
+write_caddy_globals
+g=$(cat "$CADDY_GLOBALS_FRAG")
+has "globals dyndns block"  "$g" "dynamic_dns {"
+has "globals dyndns provider" "$g" "provider cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}"
+has "globals dynamic_domains" "$g" "dynamic_domains"
+has "globals ech line"      "$g" "ech ech.example.com"
+GDNS_ENV=none
+write_caddy_globals
+g=$(cat "$CADDY_GLOBALS_FRAG")
+has "globals dns sdk-env"   "$g" $'\tdns cloudflare\n'
+if [[ $g == *"{env."* ]]; then
+  printf 'FAIL globals: env placeholder emitted with GDNS_ENV=none\n'; fails=$((fails + 1))
+else printf 'ok   globals: no env placeholder when none\n'; fi
+GDNS_PROVIDER="" GDNS_ENV="" GDYNDNS="" GECH=""
+write_caddy_globals
+if [[ -f $CADDY_GLOBALS_FRAG ]]; then
+  printf 'FAIL globals: fragment survives with nothing set\n'; fails=$((fails + 1))
+else printf 'ok   globals: fragment removed when empty\n'; fi
+# 00-globals must sort before every site fragment so the block lands first
+first=$(printf '00-globals.caddy\n00-homeport.caddy\nweb.caddy\n_gw_x.caddy\n' | LC_ALL=C sort | head -1)
+eq "globals sorts first" "$first" "00-globals.caddy"
+
 # --- valid_caddy_module: plugin names become URL params + argv — the gate ---
 ok_mod()  { valid_caddy_module "$1" && printf 'ok   mod accept %s\n' "$1" || { printf 'FAIL mod accept %s\n' "$1"; fails=$((fails + 1)); }; }
 bad_mod() { valid_caddy_module "$1" && { printf 'FAIL mod reject %s\n' "$1"; fails=$((fails + 1)); } || printf 'ok   mod reject %s\n' "$1"; }
@@ -216,6 +245,8 @@ has "gate: deny caddy-plugin-rm"   "$(gate web "sudo $hd caddy-plugin-rm x/y")" 
 has "gate: deny firewall-set"      "$(gate web "sudo $hd firewall-set")"         "deny"
 has "gate: deny firewall-clear"    "$(gate web "sudo $hd firewall-clear")"       "deny"
 has "gate: deny caddy-env-set"     "$(gate web "sudo $hd caddy-env-set X")"      "deny"
+has "gate: deny global-dns"        "$(gate web "sudo $hd global-dns cloudflare")" "deny"
+has "gate: deny global-ech"        "$(gate web "sudo $hd global-ech x.com")"      "deny"
 has "gate: deny other app"      "$(gate web "sudo $hd activate shop r1")"     "deny"
 has "gate: deny env other app"  "$(gate web "sudo $hd env-sync shop")"        "deny"
 has "gate: deny arbitrary cmd"  "$(gate web "cat /etc/shadow")"               "deny"

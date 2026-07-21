@@ -236,36 +236,43 @@ The simplest way to skip DNS management entirely is a **wildcard**: point
 `*.example.com` at the box once and every app you deploy on a subdomain is
 instantly resolvable — nothing else to do, ever.
 
-For per-record automation (custom root domains, no wildcard), the Caddy
-ecosystem already solves it:
-[`mholt/caddy-dynamicdns`](https://github.com/mholt/caddy-dynamicdns) keeps
-A/AAAA records pointed at the server via the same caddy-dns providers, and its
-`dynamic_domains` option auto-discovers **every domain configured in Caddy** —
-which is exactly what homeport's per-app fragments are. Deploy a new app, Caddy
-reloads, the plugin creates its records.
+For per-record automation (custom root domains, no wildcard), homeport wires
+up [`mholt/caddy-dynamicdns`](https://github.com/mholt/caddy-dynamicdns): it
+keeps A/AAAA records pointed at the server via the same caddy-dns providers,
+and auto-discovers **every domain configured in Caddy** — which is exactly
+what homeport's per-app fragments are. Deploy a new app, Caddy reloads, the
+plugin creates its records. Three commands, any provider:
 
 ```sh
 homeport server plugins add github.com/caddy-dns/cloudflare github.com/mholt/caddy-dynamicdns
 homeport server caddy-env HOMEPORT_DNS_CLOUDFLARE     # zone-scoped DNS-edit token
+homeport server dns cloudflare                        # global provider (also the DNS-01 default)
+homeport server dns-records on                        # records now follow your apps
 ```
 
-Then add a global options block at the **top** of `/etc/caddy/Caddyfile`
-(homeport writes that file once at bootstrap and never touches it again — only
-the per-app fragments under `homeport.d/` are managed, so your edit persists):
+`homeport server globals` shows the current state; `dns-records off` /
+`server dns off` unwind it (existing records are left as-is). Under the hood
+these manage a Caddy global-options fragment with the same transactional
+validate-and-roll-back discipline as everything else — the main Caddyfile is
+never rewritten. The same token serves DNS-01 certs (`tls: dns:cloudflare`)
+and record updates. Note this puts a zone-edit token on the box — if you'd
+rather not, stick with the wildcard or manual records.
 
-```caddy
-{
-	dynamic_dns {
-		provider cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}
-		dynamic_domains
-	}
-}
+## Encrypted Client Hello (ECH)
+
+With a global DNS provider set (above), one command turns on
+[ECH](https://caddyserver.com/docs/caddyfile/options) — TLS stops leaking
+which site a visitor is opening (the SNI is encrypted). Caddy ≥ 2.10
+generates the keys and publishes the HTTPS DNS records automatically:
+
+```sh
+homeport server ech ech.example.com    # a "public name" you control — the decoy SNI
+homeport server ech off
 ```
 
-The same token serves DNS-01 certs (`tls: dns:cloudflare`) and record updates.
-Note this puts a zone-edit token on the box — if you'd rather not, stick with
-the wildcard or manual records. This flow is documented from upstream; verify
-it end-to-end with your own token before relying on it.
+Browsers only use ECH when DNS-over-HTTPS is enabled, so treat it as
+defense-in-depth. It shines on a box hosting many domains — outside observers
+see only the public name, not which of your sites was visited.
 
 ## Caddy plugins
 

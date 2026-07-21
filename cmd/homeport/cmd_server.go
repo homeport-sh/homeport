@@ -49,9 +49,68 @@ func cmdServer(args []string) error {
 		return cmdServerFirewall(args[1:])
 	case "caddy-env":
 		return cmdServerCaddyEnv(args[1:])
+	case "dns", "dns-records", "ech", "globals":
+		return cmdServerGlobals(args[0], args[1:])
 	default:
 		return fmt.Errorf("%s", use)
 	}
+}
+
+// cmdServerGlobals drives the homeport-managed Caddy global options:
+//
+//	homeport server dns <provider>|off        global DNS module (DNS-01 default + ECH publication)
+//	homeport server dns-records on|off        auto-manage A/AAAA records for every app domain
+//	homeport server ech <public-name>|off     Encrypted Client Hello (needs `server dns` first)
+//	homeport server globals                   show the current managed global options
+func cmdServerGlobals(sub string, args []string) error {
+	host := []string{}
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		host, args = args[n-1:], args[:n-1]
+	}
+	target, err := serverTarget(host)
+	if err != nil {
+		return err
+	}
+	hd := "sudo /usr/local/bin/homeportd "
+	switch sub {
+	case "globals":
+		return sshRun(target, hd+"global-list")
+	case "dns":
+		if len(args) < 1 || len(args) > 2 {
+			return fmt.Errorf("usage: homeport server dns <provider [ENV_NAME] | off> [deploy@host]")
+		}
+		if args[0] == "off" {
+			return sshRun(target, hd+"global-dns -")
+		}
+		if !bareProviderRe.MatchString(args[0]) {
+			return fmt.Errorf("invalid dns provider %q (e.g. cloudflare, digitalocean)", args[0])
+		}
+		cmd := hd + "global-dns " + args[0]
+		if len(args) == 2 {
+			if args[1] != "none" && !envNameRe.MatchString(args[1]) {
+				return fmt.Errorf("invalid env var name %q (A-Z, digits, _; or 'none')", args[1])
+			}
+			cmd += " " + args[1]
+		}
+		return sshRun(target, cmd)
+	case "dns-records":
+		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+			return fmt.Errorf("usage: homeport server dns-records <on|off> [deploy@host]")
+		}
+		return sshRun(target, hd+"global-dyndns "+args[0])
+	case "ech":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: homeport server ech <public-name|off> [deploy@host]")
+		}
+		if args[0] == "off" {
+			return sshRun(target, hd+"global-ech -")
+		}
+		if !domainRe.MatchString(args[0]) {
+			return fmt.Errorf("ech public name %q doesn't look like a domain", args[0])
+		}
+		return sshRun(target, hd+"global-ech "+args[0])
+	}
+	return nil
 }
 
 // cmdServerCaddyEnv manages env vars for Caddy itself — DNS-provider tokens
@@ -188,6 +247,9 @@ func serverTarget(args []string) (string, error) {
 
 // caddyModuleRe mirrors homeportd's valid_caddy_module: a Go module repo path.
 // Checked client-side too so a typo fails before any SSH round-trip.
+// bareProviderRe: a caddy-dns provider short name (the part after "dns:").
+var bareProviderRe = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+
 var caddyModuleRe = regexp.MustCompile(`^[a-z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9._-]+)+$`)
 
 func validCaddyModule(m string) error {
