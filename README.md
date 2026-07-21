@@ -230,6 +230,43 @@ standard SDK env vars (e.g. route53 with `AWS_ACCESS_KEY_ID` — set those via
 and reach Caddy through a systemd `EnvironmentFile` — never argv, never git.
 Use a token scoped to DNS-edit on the one zone.
 
+## Automatic DNS records (no A records to add)
+
+The simplest way to skip DNS management entirely is a **wildcard**: point
+`*.example.com` at the box once and every app you deploy on a subdomain is
+instantly resolvable — nothing else to do, ever.
+
+For per-record automation (custom root domains, no wildcard), the Caddy
+ecosystem already solves it:
+[`mholt/caddy-dynamicdns`](https://github.com/mholt/caddy-dynamicdns) keeps
+A/AAAA records pointed at the server via the same caddy-dns providers, and its
+`dynamic_domains` option auto-discovers **every domain configured in Caddy** —
+which is exactly what homeport's per-app fragments are. Deploy a new app, Caddy
+reloads, the plugin creates its records.
+
+```sh
+homeport server plugins add github.com/caddy-dns/cloudflare github.com/mholt/caddy-dynamicdns
+homeport server caddy-env HOMEPORT_DNS_CLOUDFLARE     # zone-scoped DNS-edit token
+```
+
+Then add a global options block at the **top** of `/etc/caddy/Caddyfile`
+(homeport writes that file once at bootstrap and never touches it again — only
+the per-app fragments under `homeport.d/` are managed, so your edit persists):
+
+```caddy
+{
+	dynamic_dns {
+		provider cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}
+		dynamic_domains
+	}
+}
+```
+
+The same token serves DNS-01 certs (`tls: dns:cloudflare`) and record updates.
+Note this puts a zone-edit token on the box — if you'd rather not, stick with
+the wildcard or manual records. This flow is documented from upstream; verify
+it end-to-end with your own token before relying on it.
+
 ## Caddy plugins
 
 Caddy's ecosystem (DNS providers, rate limiting, geo-IP, …) ships as compile-time
