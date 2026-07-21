@@ -119,6 +119,19 @@ has "tls manual on static" "$(cat "$CADDY_DIR/tlsstat.caddy")" "tls $TLS_CERT_DI
 TLS_MODE=""
 rm -rf "$TLS_CERT_DIR"
 
+# --- valid_caddy_module: plugin names become URL params + argv — the gate ---
+ok_mod()  { valid_caddy_module "$1" && printf 'ok   mod accept %s\n' "$1" || { printf 'FAIL mod accept %s\n' "$1"; fails=$((fails + 1)); }; }
+bad_mod() { valid_caddy_module "$1" && { printf 'FAIL mod reject %s\n' "$1"; fails=$((fails + 1)); } || printf 'ok   mod reject %s\n' "$1"; }
+ok_mod  "github.com/caddy-dns/cloudflare"
+ok_mod  "github.com/mholt/caddy-ratelimit"
+ok_mod  "github.com/greenpau/caddy-security/v2"
+bad_mod "cloudflare"                                  # no slash — not a repo path
+bad_mod "github.com/x/../../../etc"                   # traversal
+bad_mod "github.com/x/y&os=windows"                   # URL param smuggling
+bad_mod "github.com/x/y z"                            # space → argv smuggling
+bad_mod "-flag/inject"                                # leading dash
+bad_mod ""                                            # empty
+
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
 if ! command -v mapfile >/dev/null 2>&1; then
@@ -154,6 +167,8 @@ has "gate: deny key-add"        "$(gate web "sudo $hd key-add")"              "d
 has "gate: deny key-rm"         "$(gate web "sudo $hd key-rm x")"             "deny"
 has "gate: deny tls-set"        "$(gate web "sudo $hd tls-set web")"          "deny"
 has "gate: deny tls-clear"      "$(gate web "sudo $hd tls-clear web")"        "deny"
+has "gate: deny caddy-plugin-add"  "$(gate web "sudo $hd caddy-plugin-add x/y")" "deny"
+has "gate: deny caddy-plugin-rm"   "$(gate web "sudo $hd caddy-plugin-rm x/y")"  "deny"
 has "gate: deny other app"      "$(gate web "sudo $hd activate shop r1")"     "deny"
 has "gate: deny env other app"  "$(gate web "sudo $hd env-sync shop")"        "deny"
 has "gate: deny arbitrary cmd"  "$(gate web "cat /etc/shadow")"               "deny"

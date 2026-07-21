@@ -254,6 +254,30 @@ func TestAddArgsHeaders(t *testing.T) {
 	}
 }
 
+func TestValidCaddyModule(t *testing.T) {
+	for _, m := range []string{
+		"github.com/caddy-dns/cloudflare",
+		"github.com/mholt/caddy-ratelimit",
+		"github.com/greenpau/caddy-security/v2",
+	} {
+		if err := validCaddyModule(m); err != nil {
+			t.Errorf("%s: expected accept, got %v", m, err)
+		}
+	}
+	for _, m := range []string{
+		"cloudflare",                // no slash — not a repo path
+		"github.com/x/../../../etc", // traversal
+		"github.com/x/y&os=windows", // URL param smuggling
+		"github.com/x/y z",          // argv smuggling
+		"-flag/inject",              // leading dash
+		"",
+	} {
+		if err := validCaddyModule(m); err == nil {
+			t.Errorf("%q: expected rejection, got nil", m)
+		}
+	}
+}
+
 func TestAddArgsTLS(t *testing.T) {
 	cfg := &config{App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1, TLS: "manual"}
 	if a := cfg.addArgs(); a[len(a)-1] != "manual" {

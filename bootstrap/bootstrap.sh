@@ -652,6 +652,129 @@ cmd_tls_clear() {
   echo "tls: reverted '$app' to automatic HTTPS (Let's Encrypt)"
 }
 
+# ---------------------------------------------------------------------------
+# Caddy plugins — swap /usr/bin/caddy for a build from Caddy's OFFICIAL build
+# service (caddyserver.com/api/download) that includes the requested plugin
+# modules. Nothing compiles on this box (xcaddy would need a Go toolchain);
+# the project's build farm compiles, we download over HTTPS and verify. The
+# apt-installed binary is preserved via dpkg-divert, so removing every plugin
+# restores stock Caddy and its apt security-upgrade path.
+# ---------------------------------------------------------------------------
+CADDY_PLUGINS_FILE=/etc/homeport/caddy-plugins
+
+# valid_caddy_module <module> — a Go module repo path (github.com/caddy-dns/…).
+# Strict charset: these become URL query values and argv, so anything that
+# could smuggle a second URL parameter or path traversal is rejected.
+valid_caddy_module() {
+  local m=${1:-}
+  [[ -n $m && ${#m} -le 200 ]] || return 1
+  [[ $m != *..* ]] || return 1
+  [[ $m =~ ^[a-z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9._-]+)+$ ]]
+}
+
+_caddy_plugin_list() { [[ -f $CADDY_PLUGINS_FILE ]] && cat "$CADDY_PLUGINS_FILE" || true; }
+
+# _caddy_restore_stock — undo the diversion: put the apt-managed binary back.
+_caddy_restore_stock() {
+  rm -f /usr/bin/caddy /usr/bin/caddy.homeport-prev
+  dpkg-divert --rename --remove /usr/bin/caddy >/dev/null 2>&1 || true
+  rm -f "$CADDY_PLUGINS_FILE"
+}
+
+# _caddy_rebuild <module>... — download a build with exactly these modules,
+# verify it, swap it in, restart Caddy; roll back to the previous binary if
+# Caddy doesn't come back healthy. With NO modules, restore the stock binary.
+_caddy_rebuild() {
+  if [[ $# -eq 0 ]]; then
+    _caddy_restore_stock
+    systemctl restart caddy
+    sleep 2
+    systemctl is-active --quiet caddy || die "stock caddy failed to start after restore — check 'journalctl -u caddy'"
+    echo "caddy: restored stock binary (apt-managed, no plugins)"
+    return
+  fi
+  local arch m url tmp
+  arch=$(dpkg --print-architecture)
+  [[ $arch == amd64 || $arch == arm64 ]] || die "unsupported architecture '$arch'"
+  url="https://caddyserver.com/api/download?os=linux&arch=$arch"
+  for m in "$@"; do url+="&p=$m"; done
+  tmp=$(mktemp /usr/bin/.caddy-download.XXXXXX)
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" RETURN
+  echo "caddy: downloading a build with $# plugin(s) from caddyserver.com…"
+  curl -fsSL --proto '=https' --max-time 300 "$url" -o "$tmp" \
+    || die "download from Caddy's build service failed"
+  chmod 755 "$tmp"
+  "$tmp" version >/dev/null 2>&1 || die "downloaded binary does not run"
+  for m in "$@"; do
+    "$tmp" build-info 2>/dev/null | grep -qF "$m" \
+      || die "downloaded binary does not contain '$m' (typo in the module path?)"
+  done
+  "$tmp" validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+    || die "current Caddyfile fails validation under the new binary — not installed"
+  # first swap: divert the apt binary aside so upgrades don't clobber ours
+  dpkg-divert --list /usr/bin/caddy 2>/dev/null | grep -q 'caddy\.default' \
+    || dpkg-divert --divert /usr/bin/caddy.default --rename --add /usr/bin/caddy >/dev/null
+  [[ -f /usr/bin/caddy ]] && cp -a /usr/bin/caddy /usr/bin/caddy.homeport-prev
+  install -m 755 "$tmp" /usr/bin/caddy
+  systemctl restart caddy
+  sleep 2
+  if ! systemctl is-active --quiet caddy; then
+    # roll back: previous custom binary if there was one, else the stock one
+    if [[ -f /usr/bin/caddy.homeport-prev ]]; then
+      install -m 755 /usr/bin/caddy.homeport-prev /usr/bin/caddy
+    else
+      _caddy_restore_stock
+    fi
+    systemctl restart caddy
+    die "caddy failed to start with the new build — rolled back (check 'journalctl -u caddy')"
+  fi
+  printf '%s\n' "$@" > "$CADDY_PLUGINS_FILE"
+}
+
+cmd_caddy_plugin_add() {
+  [[ $# -ge 1 ]] || die "usage: caddy-plugin-add <module> [module...]"
+  local m c seen current=() want=()
+  for m in "$@"; do valid_caddy_module "$m" || die "invalid plugin module '$m' (expected a repo path like github.com/caddy-dns/cloudflare)"; done
+  mapfile -t current < <(_caddy_plugin_list)
+  want=("${current[@]}")
+  for m in "$@"; do
+    seen=0
+    for c in "${want[@]}"; do [[ $c == "$m" ]] && seen=1; done
+    [[ $seen == 1 ]] && { echo "caddy: '$m' already installed"; continue; }
+    want+=("$m")
+  done
+  [[ ${#want[@]} -gt ${#current[@]} ]] || return 0
+  _caddy_rebuild "${want[@]}"
+  echo "caddy: now running with plugins:"; printf '  %s\n' "${want[@]}"
+  echo "note: this binary is no longer upgraded by apt — re-run a plugin add to refresh it"
+}
+
+cmd_caddy_plugin_rm() {
+  [[ $# -eq 1 ]] || die "usage: caddy-plugin-rm <module>"
+  local m=$1 c keep=() found=0
+  valid_caddy_module "$m" || die "invalid plugin module '$m'"
+  while IFS= read -r c; do
+    [[ -n $c ]] || continue
+    if [[ $c == "$m" ]]; then found=1; else keep+=("$c"); fi
+  done < <(_caddy_plugin_list)
+  [[ $found == 1 ]] || die "plugin '$m' is not installed (caddy-plugin-list to see them)"
+  _caddy_rebuild "${keep[@]}"
+  if [[ ${#keep[@]} -gt 0 ]]; then
+    echo "caddy: now running with plugins:"; printf '  %s\n' "${keep[@]}"
+  fi
+}
+
+cmd_caddy_plugin_list() {
+  local plugins
+  plugins=$(_caddy_plugin_list)
+  if [[ -z $plugins ]]; then
+    echo "stock caddy (apt-managed, no extra plugins)"
+  else
+    printf '%s\n' "$plugins"
+  fi
+}
+
 # cmd_upload_static <app> <release> — extract a tar.gz of the site from stdin.
 cmd_upload_static() {
   local app=${1:-} release=${2:-}
@@ -1860,6 +1983,11 @@ homeportd — root-side homeport helper (run via sudo)
   key-add [--scope <app>]            authorize key(s) from stdin; --scope locks them to one app
   key-list                           fingerprints + scope of authorized deploy keys
   key-rm <fingerprint|comment>       revoke a key (e.g. a leaked or retired CI key)
+  tls-set <app>                      install a bring-your-own cert+key from stdin (tls: manual)
+  tls-clear <app>                    remove the manual cert, revert to automatic HTTPS
+  caddy-plugin-add <module>...       swap in an official Caddy build with these plugins
+  caddy-plugin-rm <module>           drop a plugin (no plugins left = stock apt binary)
+  caddy-plugin-list                  show the plugins baked into the running Caddy
   self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
   remove <app> --yes                 delete app, releases, env, user
@@ -1889,6 +2017,9 @@ main() {
     key-rm)   cmd_key_rm "$@" ;;
     tls-set)  cmd_tls_set "$@" ;;
     tls-clear) cmd_tls_clear "$@" ;;
+    caddy-plugin-add)  cmd_caddy_plugin_add "$@" ;;
+    caddy-plugin-rm)   cmd_caddy_plugin_rm "$@" ;;
+    caddy-plugin-list) cmd_caddy_plugin_list "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;

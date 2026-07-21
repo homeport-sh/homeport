@@ -188,6 +188,27 @@ homeport never installs a cert on its own — this is entirely opt-in. Pair it
 with Cloudflare's SSL/TLS mode set to **Full (strict)**. (`tls: manual` needs a
 public domain — it's not for internal or path-mounted apps.)
 
+## Caddy plugins
+
+Caddy's ecosystem (DNS providers, rate limiting, geo-IP, …) ships as compile-time
+plugins. homeport installs them **without a Go toolchain on the box**: it
+downloads a build with your plugins baked in from **Caddy's official build
+service** (the same one behind caddyserver.com's download page), verifies it
+(runs, contains the module, current Caddyfile validates), swaps it in, and rolls
+back automatically if Caddy doesn't come back healthy.
+
+```sh
+homeport server plugins add github.com/caddy-dns/cloudflare   # install
+homeport server plugins                                       # list
+homeport server plugins rm github.com/caddy-dns/cloudflare    # remove
+```
+
+The apt-installed binary is preserved via `dpkg-divert` — removing the last
+plugin restores stock Caddy and its apt security-upgrade path. While a custom
+build is active it is **not** upgraded by apt; re-run a `plugins add` to refresh
+it. Plugin *configuration* (e.g. wiring a DNS provider into cert issuance) is
+separate — this command manages what's compiled in.
+
 ## Static sites (no binary)
 
 A folder of files — an SPA, a docs site, a landing page — needs no process at
