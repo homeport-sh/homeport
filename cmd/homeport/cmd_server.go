@@ -47,8 +47,55 @@ func cmdServer(args []string) error {
 		return cmdServerPlugins(args[1:])
 	case "firewall":
 		return cmdServerFirewall(args[1:])
+	case "caddy-env":
+		return cmdServerCaddyEnv(args[1:])
 	default:
 		return fmt.Errorf("%s", use)
+	}
+}
+
+// cmdServerCaddyEnv manages env vars for Caddy itself — DNS-provider tokens
+// for `tls: dns:<provider>` (DNS-01 certs):
+//
+//	homeport server caddy-env                 list names (values never printed)
+//	homeport server caddy-env NAME            set NAME from stdin (or a hidden prompt)
+//	homeport server caddy-env rm NAME         remove
+//
+// The value travels over ssh stdin — never argv, never shell history.
+func cmdServerCaddyEnv(args []string) error {
+	host := []string{}
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		host, args = args[n-1:], args[:n-1]
+	}
+	target, err := serverTarget(host)
+	if err != nil {
+		return err
+	}
+	switch {
+	case len(args) == 0:
+		return sshRun(target, "sudo /usr/local/bin/homeportd caddy-env-list")
+	case args[0] == "rm" && len(args) == 2:
+		if !envNameRe.MatchString(args[1]) {
+			return fmt.Errorf("invalid env var name %q (A-Z, digits, _)", args[1])
+		}
+		return sshRun(target, "sudo /usr/local/bin/homeportd caddy-env-rm "+args[1])
+	case len(args) == 1 && args[0] != "rm":
+		name := args[0]
+		if !envNameRe.MatchString(name) {
+			return fmt.Errorf("invalid env var name %q (A-Z, digits, _)", name)
+		}
+		fmt.Fprintf(os.Stderr, "paste the value for %s (input is piped to the server, not stored locally):\n", name)
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+		if err != nil {
+			return err
+		}
+		val := strings.TrimSpace(string(data))
+		if val == "" {
+			return fmt.Errorf("empty value")
+		}
+		return sshRunIn(target, "sudo /usr/local/bin/homeportd caddy-env-set "+name, val+"\n")
+	default:
+		return fmt.Errorf("usage: homeport server caddy-env [NAME | rm NAME] [deploy@host]")
 	}
 }
 

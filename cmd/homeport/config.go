@@ -52,7 +52,8 @@ type config struct {
 	PostRelease string          `yaml:"post_release"`
 	Sandbox     string          `yaml:"sandbox"`
 	Strategy    string          `yaml:"strategy"`
-	TLS         string          `yaml:"tls"` // "auto" (default, Let's Encrypt) or "manual" (bring-your-own cert via `homeport tls set`)
+	TLS         string          `yaml:"tls"`           // "auto" (default) | "manual" (BYO cert) | "dns:<provider>" (DNS-01 via a caddy-dns plugin)
+	DNSTokenEnv string          `yaml:"dns_token_env"` // env var holding the DNS provider token (default HOMEPORT_DNS_<PROVIDER>); "none" for SDK-env providers
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -99,6 +100,9 @@ var (
 	headerValueRe = regexp.MustCompile(`^[ -~]*$`)
 	// path glob for scoping headers: "*"/"/*" (all) or a "/dir/*" prefix.
 	headerGlobRe = regexp.MustCompile(`^(\*|/[A-Za-z0-9._*/~-]*)$`)
+	// tls: dns:<provider> — the caddy-dns plugin's short name (dns:cloudflare)
+	dnsProviderRe = regexp.MustCompile(`^dns:[a-z0-9-]{1,40}$`)
+	envNameRe     = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 	// run: launch args appended to the binary in ExecStart. exec (no shell),
 	// so no shell metachars; only $PORT/$HOST are substituted server-side.
 	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
@@ -221,12 +225,16 @@ func parseConfig(data []byte) (*config, error) {
 		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default) or 'relaxed' (for binaries that run their own sandbox, e.g. a browser), got %q", configFile, cfg.Sandbox)
 	case cfg.Strategy != "" && cfg.Strategy != "blue-green" && cfg.Strategy != "recreate":
 		return nil, fmt.Errorf("%s: strategy must be 'blue-green' (default, zero-downtime) or 'recreate' (restart in place — for singleton apps that can't run two instances), got %q", configFile, cfg.Strategy)
-	case cfg.TLS != "" && cfg.TLS != "auto" && cfg.TLS != "manual":
-		return nil, fmt.Errorf("%s: tls must be 'auto' (default, Let's Encrypt) or 'manual' (bring-your-own cert via `homeport tls set`), got %q", configFile, cfg.TLS)
-	case cfg.TLS == "manual" && (cfg.Internal || cfg.Domain == ""):
-		return nil, fmt.Errorf("%s: tls: manual needs a public domain — there's nothing to serve a cert for on an internal app", configFile)
-	case cfg.TLS == "manual" && cfg.Path != "":
-		return nil, fmt.Errorf("%s: tls: manual isn't for path-mounted apps — the gateway host owns its TLS", configFile)
+	case cfg.TLS != "" && cfg.TLS != "auto" && cfg.TLS != "manual" && !dnsProviderRe.MatchString(cfg.TLS):
+		return nil, fmt.Errorf("%s: tls must be 'auto' (default), 'manual' (bring-your-own cert via `homeport tls set`), or 'dns:<provider>' (DNS-01 via a caddy-dns plugin, e.g. dns:cloudflare), got %q", configFile, cfg.TLS)
+	case (cfg.TLS == "manual" || strings.HasPrefix(cfg.TLS, "dns:")) && (cfg.Internal || cfg.Domain == ""):
+		return nil, fmt.Errorf("%s: tls: %s needs a public domain — there's nothing to serve a cert for on an internal app", configFile, cfg.TLS)
+	case (cfg.TLS == "manual" || strings.HasPrefix(cfg.TLS, "dns:")) && cfg.Path != "":
+		return nil, fmt.Errorf("%s: tls: %s isn't for path-mounted apps — the gateway host owns its TLS", configFile, cfg.TLS)
+	case cfg.DNSTokenEnv != "" && !strings.HasPrefix(cfg.TLS, "dns:"):
+		return nil, fmt.Errorf("%s: dns_token_env only applies with tls: dns:<provider>", configFile)
+	case cfg.DNSTokenEnv != "" && cfg.DNSTokenEnv != "none" && !envNameRe.MatchString(cfg.DNSTokenEnv):
+		return nil, fmt.Errorf("%s: dns_token_env must be an env var name (A-Z, digits, _) or 'none', got %q", configFile, cfg.DNSTokenEnv)
 	case cfg.isStatic() && cfg.Internal:
 		return nil, fmt.Errorf("%s: a static site needs a domain — Caddy serves it publicly", configFile)
 	case cfg.isStatic() && cfg.Path != "":
@@ -331,15 +339,17 @@ func (c *config) addArgs() []string {
 		boolArg(c.isStatic()),  // arg 17: static mode
 		boolArg(c.spaResolved), // arg 18: SPA fallback
 		encodeHeaders(c.Headers), // arg 19: user response headers (base64 "Name: value" lines)
-		tlsArg(c.TLS),            // arg 20: "manual" (bring-your-own cert) or "-" (auto)
+		tlsArg(c.TLS),            // arg 20: "manual" | "dns:<provider>" | "-" (auto)
+		dashIfEmpty(c.DNSTokenEnv), // arg 21: token env var override for dns: mode
 	}
 }
 
-// tlsArg renders the TLS mode as homeportd's positional token: "manual" turns on
-// bring-your-own-cert, anything else ("", "auto") is the default ACME path.
+// tlsArg renders the TLS mode as homeportd's positional token: "manual"
+// (bring-your-own cert) and "dns:<provider>" (DNS-01) pass through; anything
+// else ("", "auto") is the default ACME path.
 func tlsArg(mode string) string {
-	if mode == "manual" {
-		return "manual"
+	if mode == "manual" || strings.HasPrefix(mode, "dns:") {
+		return mode
 	}
 	return "-"
 }

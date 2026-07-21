@@ -171,6 +171,7 @@ HOMEPORT_ROOT=/opt/homeport
 HOMEPORT_ETC=/etc/homeport/apps
 CADDY_DIR=/etc/caddy/homeport.d
 TLS_CERT_DIR=/etc/caddy/homeport.d/certs   # bring-your-own certs live here, per app
+CADDY_ENV_FILE=/etc/caddy/homeport.env     # env vars for Caddy (DNS tokens), root-owned 600
 BASE_PORT=8100
 
 die() { echo "homeportd: $*" >&2; exit 1; }
@@ -445,13 +446,83 @@ emit_user_headers() {
 # (which can't work behind a TLS-terminating proxy like Cloudflare). homeport
 # never does this on its own — the operator uploads the cert with
 # `homeport tls set`, which cmd_tls_set validates and stores.
+# caddy_validate [binary] — validate the Caddyfile with Caddy's env vars
+# loaded: DNS-provider modules provision at load time and reject a missing
+# token, and the systemd EnvironmentFile only applies to the service, not CLI
+# runs. The env file is passed via env(1) argv — never sourced (its values are
+# data; sourcing a secrets file would execute it).
+caddy_validate() {
+  local bin=${1:-caddy} line
+  local -a envargs=()
+  if [[ -f $CADDY_ENV_FILE ]]; then
+    while IFS= read -r line; do [[ -n $line ]] && envargs+=("$line"); done < "$CADDY_ENV_FILE"
+  fi
+  env ${envargs[@]+"${envargs[@]}"} "$bin" validate --config /etc/caddy/Caddyfile >/dev/null 2>&1
+}
+
+# validate_tls_mode <app> <mode> <token_env> — gate the tls positional args.
+# manual without a cert and dns without a token are allowed at registration
+# (chicken/egg: both are uploaded per-server AFTER the app exists or before —
+# order-free), but each gets a loud warning. A dns: mode without its Caddy
+# plugin is a hard error: the generated Caddyfile would fail validation anyway,
+# so fail here with an actionable message instead.
+validate_tls_mode() {
+  local app=$1 mode=$2 tokenv=$3 provider
+  [[ -z $tokenv || $tokenv == none || $tokenv =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] \
+    || die "tls: dns_token_env '$tokenv' is not a valid env var name"
+  case $mode in
+    "") : ;;
+    manual)
+      [[ -f "$TLS_CERT_DIR/$app/cert.pem" ]] \
+        || echo "tls: manual is set but no cert is uploaded yet — serving automatic HTTPS until you run 'homeport tls set <cert> <key>'" >&2
+      ;;
+    dns:*)
+      provider=${mode#dns:}
+      [[ $provider =~ ^[a-z0-9-]{1,40}$ ]] || die "tls: invalid dns provider '$provider'"
+      caddy list-modules 2>/dev/null | grep -q "^dns\.providers\.$provider\$" \
+        || die "tls: caddy has no '$provider' DNS module — install it first: homeport server plugins add github.com/caddy-dns/$provider"
+      [[ -n $tokenv ]] || tokenv=$(dns_default_env "$provider")
+      if [[ $tokenv != none ]] && ! grep -qs "^$tokenv=" "$CADDY_ENV_FILE"; then
+        echo "tls: env var '$tokenv' is not set for caddy — cert issuance will fail until you run 'homeport server caddy-env $tokenv'" >&2
+      fi
+      ;;
+    *) die "tls: mode must be 'manual' or 'dns:<provider>', got '$mode'" ;;
+  esac
+}
+
+# dns_default_env <provider> — the uniform token env var name for a provider
+# (Caddy resolves {env.X} itself, so the name is homeport's choice, not the
+# plugin's): dns:cloudflare -> HOMEPORT_DNS_CLOUDFLARE.
+dns_default_env() {
+  # tr, not ${1^^}: keeps the function testable on bash 3.2 (macOS)
+  printf 'HOMEPORT_DNS_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"
+}
+
 emit_tls() {
   local ind=$1 app=$2
-  # both conditions: mode is manual AND the cert is actually uploaded — a tls
-  # directive pointing at missing files would fail Caddyfile validation and
-  # block every app's reload. Until the cert arrives, auto-TLS keeps serving.
-  [[ ${TLS_MODE:-} == manual && -f "$TLS_CERT_DIR/$app/cert.pem" ]] || return 0
-  printf '%stls %s/%s/cert.pem %s/%s/key.pem\n' "$ind" "$TLS_CERT_DIR" "$app" "$TLS_CERT_DIR" "$app"
+  case ${TLS_MODE:-} in
+    manual)
+      # both conditions: mode is manual AND the cert is actually uploaded — a
+      # tls directive pointing at missing files would fail Caddyfile validation
+      # and block every app's reload. Until then, auto-TLS keeps serving.
+      [[ -f "$TLS_CERT_DIR/$app/cert.pem" ]] || return 0
+      printf '%stls %s/%s/cert.pem %s/%s/key.pem\n' "$ind" "$TLS_CERT_DIR" "$app" "$TLS_CERT_DIR" "$app"
+      ;;
+    dns:*)
+      # DNS-01 via a caddy-dns plugin — works behind a TLS-terminating proxy.
+      # The token reaches the plugin through a Caddy {env.X} placeholder; the
+      # env var itself is loaded via caddy-env-set (systemd EnvironmentFile).
+      local provider=${TLS_MODE#dns:} tokenv=${TLS_DNS_ENV:-}
+      [[ -n $tokenv ]] || tokenv=$(dns_default_env "$provider")
+      printf '%stls {\n' "$ind"
+      if [[ $tokenv == none ]]; then
+        printf '%s\tdns %s\n' "$ind" "$provider"   # provider reads SDK env vars itself
+      else
+        printf '%s\tdns %s {env.%s}\n' "$ind" "$provider" "$tokenv"
+      fi
+      printf '%s}\n' "$ind"
+      ;;
+  esac
 }
 
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
@@ -502,12 +573,14 @@ write_caddy_static() {
 # cmd_add_static <app> <domain> <spa> — register a static site: a Caddy
 # file_server on its own domain, no systemd unit, no app user, no port bound.
 cmd_add_static() {
-  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-} tls_mode=${5:-}
+  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-} tls_mode=${5:-} tls_dns_env=${6:-}
   [[ $domain == - || -z $domain ]] && die "a static site needs a domain"
   valid_domain "$domain"
   [[ $headers_b64 == - ]] && headers_b64=""
   [[ $tls_mode == - ]] && tls_mode=""
+  [[ $tls_dns_env == - ]] && tls_dns_env=""
   validate_headers "$headers_b64"
+  validate_tls_mode "$app" "$tls_mode" "$tls_dns_env"
   [[ $spa == 1 ]] || spa=""
   # host-ownership conflict: the domain must be free (not another app's whole
   # host, not a gateway host) — mirrors the binary-app check.
@@ -549,13 +622,20 @@ SPA=$spa
 KEEP=$keep
 HEADERS_B64=$headers_b64
 TLS_MODE=$tls_mode
+TLS_DNS_ENV=$tls_dns_env
 EOF
   # fresh values for emit_user_headers/emit_tls — load_app (above, for an
   # existing app) would have sourced the OLD values over them.
-  HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode
+  HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env
+  # fragment write is transactional: a fragment that fails validation must not
+  # stay on disk, or the NEXT caddy restart (any restart!) fails to boot.
+  local _frag="$CADDY_DIR/$app.caddy" _fragbak="" _hadfrag=0
+  [[ -f $_frag ]] && { _fragbak=$(cat "$_frag"); _hadfrag=1; }
   write_caddy_static "$app" "$domain" "$spa"
-  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
-    || die "generated Caddy config failed validation"
+  if ! caddy_validate; then
+    if [[ $_hadfrag == 1 ]]; then printf '%s' "$_fragbak" > "$_frag"; else rm -f "$_frag"; fi
+    die "generated Caddy config failed validation — rolled back"
+  fi
   systemctl reload caddy
   echo "app '$app' registered (static${spa:+, SPA}) -> https://$domain"
   echo "DNS: point an A record for $domain to $(public_ip) — TLS is automatic once it resolves"
@@ -626,7 +706,7 @@ cmd_tls_set() {
   chmod 600 "$certdir/key.pem"
   _set_config "$app" TLS_MODE manual
   rewrite_app_caddy "$app"   # re-sources the config, which now says manual
-  if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+  if ! caddy_validate; then
     rm -rf "$certdir"
     [[ -d $certdir.bak ]] && mv "$certdir.bak" "$certdir"
     _set_config "$app" TLS_MODE "$old_mode"
@@ -646,7 +726,7 @@ cmd_tls_clear() {
   rm -rf "${TLS_CERT_DIR:?}/$app"
   _set_config "$app" TLS_MODE ""
   rewrite_app_caddy "$app"
-  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+  caddy_validate \
     || die "generated Caddy config failed validation"
   systemctl reload caddy
   echo "tls: reverted '$app' to automatic HTTPS (Let's Encrypt)"
@@ -710,7 +790,7 @@ _caddy_rebuild() {
     "$tmp" build-info 2>/dev/null | grep -qF "$m" \
       || die "downloaded binary does not contain '$m' (typo in the module path?)"
   done
-  "$tmp" validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+  caddy_validate "$tmp" \
     || die "current Caddyfile fails validation under the new binary — not installed"
   # first swap: divert the apt binary aside so upgrades don't clobber ours
   dpkg-divert --list /usr/bin/caddy 2>/dev/null | grep -q 'caddy\.default' \
@@ -875,6 +955,89 @@ cmd_firewall_list() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Caddy environment — secrets Caddy itself needs (DNS-provider tokens for
+# DNS-01 certs). Values arrive on stdin (never argv), live root-owned 0600 in
+# $CADDY_ENV_FILE, and reach Caddy via a systemd EnvironmentFile drop-in
+# (systemd reads it as root before dropping privileges). Names only are ever
+# printed — same discipline as app secrets.
+# ---------------------------------------------------------------------------
+valid_env_name() { [[ ${1:-} =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || die "invalid env var name '${1:-}' (A-Z, digits, _)"; }
+
+_caddy_env_dropin() { # ensure caddy.service loads $CADDY_ENV_FILE
+  local d=/etc/systemd/system/caddy.service.d
+  [[ -f $d/homeport-env.conf ]] && return 0
+  mkdir -p "$d"
+  printf '[Service]\nEnvironmentFile=-%s\n' "$CADDY_ENV_FILE" > "$d/homeport-env.conf"
+  systemctl daemon-reload
+}
+
+# _caddy_env_commit <old-content> <had-file> <done-msg> — shared transactional
+# tail for env set/rm: validate the Caddyfile under the NEW env before touching
+# the service, restart, and restore the old env (+ restart) if anything fails —
+# a bad token must never leave Caddy down or poisoned.
+_caddy_env_commit() {
+  local old=$1 had=$2 msg=$3
+  chown root:root "$CADDY_ENV_FILE"; chmod 600 "$CADDY_ENV_FILE"
+  _caddy_env_dropin
+  _caddy_env_revert() {
+    if [[ $had == 1 ]]; then printf '%s' "$old" > "$CADDY_ENV_FILE"
+    else rm -f "$CADDY_ENV_FILE"; fi
+  }
+  if ! caddy_validate; then
+    _caddy_env_revert
+    die "caddy-env: the Caddyfile does not validate with this change (a dns-provider app may need the token) — reverted, caddy untouched"
+  fi
+  systemctl restart caddy
+  sleep 1
+  if ! systemctl is-active --quiet caddy; then
+    _caddy_env_revert
+    systemctl restart caddy
+    die "caddy-env: caddy failed to restart with this change — reverted (check 'journalctl -u caddy')"
+  fi
+  echo "$msg"
+}
+
+cmd_caddy_env_set() { # <NAME>, value on stdin (single line)
+  local name=${1:-} val old="" had=0
+  valid_env_name "$name"
+  val=$(head -c 4096)
+  val=${val%$'\n'}
+  [[ -n $val ]] || die "caddy-env: empty value on stdin"
+  [[ $val != *$'\n'* ]] || die "caddy-env: value must be a single line"
+  [[ $val =~ ^[[:print:]]+$ ]] || die "caddy-env: value has non-printable characters"
+  [[ -f $CADDY_ENV_FILE ]] && { old=$(cat "$CADDY_ENV_FILE"); had=1; }
+  ( umask 077
+    touch "$CADDY_ENV_FILE"
+    if grep -q "^$name=" "$CADDY_ENV_FILE"; then
+      # `|| true`: grep -v exits 1 when the file held ONLY this var (empty
+      # result is a valid outcome, not an error — set -e would abort silently)
+      grep -v "^$name=" "$CADDY_ENV_FILE" > "$CADDY_ENV_FILE.tmp" || true
+      mv "$CADDY_ENV_FILE.tmp" "$CADDY_ENV_FILE"
+    fi
+    printf '%s=%s\n' "$name" "$val" >> "$CADDY_ENV_FILE"
+  )
+  _caddy_env_commit "$old" "$had" "caddy-env: $name set (caddy restarted)"
+}
+
+cmd_caddy_env_rm() {
+  local name=${1:-} old="" had=0
+  valid_env_name "$name"
+  [[ -f $CADDY_ENV_FILE ]] && grep -q "^$name=" "$CADDY_ENV_FILE" || die "caddy-env: '$name' is not set"
+  old=$(cat "$CADDY_ENV_FILE"); had=1
+  grep -v "^$name=" "$CADDY_ENV_FILE" > "$CADDY_ENV_FILE.tmp" || true
+  mv "$CADDY_ENV_FILE.tmp" "$CADDY_ENV_FILE"
+  _caddy_env_commit "$old" "$had" "caddy-env: $name removed (caddy restarted)"
+}
+
+cmd_caddy_env_list() {
+  if [[ -s $CADDY_ENV_FILE ]]; then
+    cut -d= -f1 "$CADDY_ENV_FILE"
+  else
+    echo "(no caddy env vars set)"
+  fi
+}
+
 # cmd_upload_static <app> <release> — extract a tar.gz of the site from stdin.
 cmd_upload_static() {
   local app=${1:-} release=${2:-}
@@ -951,22 +1114,19 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
   [[ $headers_b64 == - ]] && headers_b64=""
   [[ $tls_mode == - ]] && tls_mode=""
+  [[ $tls_dns_env == - ]] && tls_dns_env=""
   validate_headers "$headers_b64"
-  # manual TLS without an uploaded cert is fine on registration (else a fresh
-  # app with tls: manual could never deploy — tls-set needs the app to exist).
-  # emit_tls skips the directive until the cert arrives; warn so it's not missed.
-  [[ $tls_mode != manual || -f "$TLS_CERT_DIR/$app/cert.pem" ]] \
-    || echo "tls: manual is set but no cert is uploaded yet — serving automatic HTTPS until you run 'homeport tls set <cert> <key>'" >&2
+  validate_tls_mode "$app" "$tls_mode" "$tls_dns_env"
   # static sites are a wholly different shape (Caddy file_server, no process) —
   # handle them in their own function, leaving the binary-app path below untouched.
-  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64" "$tls_mode"; return; }
+  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64" "$tls_mode" "$tls_dns_env"; return; }
   [[ $sandbox == - ]] && sandbox=""
   [[ $strategy == - ]] && strategy=""
   [[ $health_timeout == - ]] && health_timeout=""
@@ -1071,7 +1231,7 @@ cmd_add() {
   # load_app (above) may have sourced the OLD config over freshly-parsed values
   # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
   # the values for THIS add so they get written and take effect.
-  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode
+  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env
   AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
@@ -1103,6 +1263,7 @@ STRATEGY=$strategy
 HEALTH_TIMEOUT=$health_timeout
 HEADERS_B64=$headers_b64
 TLS_MODE=$tls_mode
+TLS_DNS_ENV=$tls_dns_env
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
@@ -1251,6 +1412,16 @@ EOF
   fi
 
   # --- Caddy routing ---
+  # snapshot every fragment this add may touch, so a validation failure can
+  # roll them ALL back — a broken fragment left on disk would fail the NEXT
+  # caddy restart, whatever triggers it.
+  local _snap_paths=() _snap_data=() _snap_had=() _p
+  for _p in "$CADDY_DIR/$app.caddy" \
+            ${domain:+"$CADDY_DIR/_gw_$(gateway_slug "$domain").caddy"} \
+            ${old_domain:+"$CADDY_DIR/_gw_$(gateway_slug "$old_domain").caddy"}; do
+    _snap_paths+=("$_p")
+    if [[ -f $_p ]]; then _snap_had+=(1); _snap_data+=("$(cat "$_p")"); else _snap_had+=(0); _snap_data+=(""); fi
+  done
   local wrote_caddy=0
   if [[ -n $domain && -n $path ]]; then
     # path-mounted: contributes a handle_path to the shared host's gateway
@@ -1280,8 +1451,14 @@ EOF
   fi
 
   if [[ $wrote_caddy -eq 1 ]]; then
-    caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
-      || die "generated Caddy config failed validation"
+    if ! caddy_validate; then
+      local _i
+      for _i in "${!_snap_paths[@]}"; do
+        if [[ ${_snap_had[$_i]} == 1 ]]; then printf '%s' "${_snap_data[$_i]}" > "${_snap_paths[$_i]}"
+        else rm -f "${_snap_paths[$_i]}"; fi
+      done
+      die "generated Caddy config failed validation — rolled back"
+    fi
     systemctl reload caddy
   elif [[ -n $old_domain ]]; then
     # tore down a public/gateway fragment on the way to a plain internal app
@@ -2091,6 +2268,9 @@ homeportd — root-side homeport helper (run via sudo)
   firewall-set                       restrict 80/443 to CIDR ranges from stdin (SSH untouched)
   firewall-clear                     reopen 80/443 to the world (bootstrap default)
   firewall-list                      show the current web-ingress policy
+  caddy-env-set <NAME>               set an env var for Caddy from stdin (DNS tokens for tls: dns:*)
+  caddy-env-rm <NAME>                remove a Caddy env var
+  caddy-env-list                     list Caddy env var names (values never printed)
   self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
   remove <app> --yes                 delete app, releases, env, user
@@ -2126,6 +2306,9 @@ main() {
     firewall-set)   cmd_firewall_set "$@" ;;
     firewall-clear) cmd_firewall_clear "$@" ;;
     firewall-list)  cmd_firewall_list "$@" ;;
+    caddy-env-set)  cmd_caddy_env_set "$@" ;;
+    caddy-env-rm)   cmd_caddy_env_rm "$@" ;;
+    caddy-env-list) cmd_caddy_env_list "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;

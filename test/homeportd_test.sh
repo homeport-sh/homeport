@@ -116,7 +116,21 @@ has "tls manual directive" "$(cat "$CADDY_DIR/tlsapp.caddy")" \
   "tls $TLS_CERT_DIR/tlsapp/cert.pem $TLS_CERT_DIR/tlsapp/key.pem"
 write_caddy_static tlsstat s.example.com ""
 has "tls manual on static" "$(cat "$CADDY_DIR/tlsstat.caddy")" "tls $TLS_CERT_DIR/tlsstat/cert.pem"
-TLS_MODE=""
+# dns mode: default env var derived from provider; override; SDK-env "none"
+TLS_MODE="dns:cloudflare" TLS_DNS_ENV=""
+write_caddy dnsapp d.example.com 8107 plain 1
+has "tls dns default env" "$(cat "$CADDY_DIR/dnsapp.caddy")" "dns cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}"
+TLS_DNS_ENV="CF_API_TOKEN"
+write_caddy dnsapp d.example.com 8107 plain 1
+has "tls dns env override" "$(cat "$CADDY_DIR/dnsapp.caddy")" "dns cloudflare {env.CF_API_TOKEN}"
+TLS_DNS_ENV="none"
+write_caddy dnsapp d.example.com 8107 plain 1
+if [[ "$(cat "$CADDY_DIR/dnsapp.caddy")" == *"{env."* ]]; then
+  printf 'FAIL tls dns none still has env placeholder\n'; fails=$((fails + 1))
+else printf 'ok   tls dns none emits bare provider\n'; fi
+has "tls dns none directive" "$(cat "$CADDY_DIR/dnsapp.caddy")" "dns cloudflare"
+eq "dns_default_env dashes" "$(dns_default_env "azure-dns")" "HOMEPORT_DNS_AZURE_DNS"
+TLS_MODE="" TLS_DNS_ENV=""
 rm -rf "$TLS_CERT_DIR"
 
 # --- valid_caddy_module: plugin names become URL params + argv — the gate ---
@@ -185,6 +199,7 @@ has "gate: deny caddy-plugin-add"  "$(gate web "sudo $hd caddy-plugin-add x/y")"
 has "gate: deny caddy-plugin-rm"   "$(gate web "sudo $hd caddy-plugin-rm x/y")"  "deny"
 has "gate: deny firewall-set"      "$(gate web "sudo $hd firewall-set")"         "deny"
 has "gate: deny firewall-clear"    "$(gate web "sudo $hd firewall-clear")"       "deny"
+has "gate: deny caddy-env-set"     "$(gate web "sudo $hd caddy-env-set X")"      "deny"
 has "gate: deny other app"      "$(gate web "sudo $hd activate shop r1")"     "deny"
 has "gate: deny env other app"  "$(gate web "sudo $hd env-sync shop")"        "deny"
 has "gate: deny arbitrary cmd"  "$(gate web "cat /etc/shadow")"               "deny"

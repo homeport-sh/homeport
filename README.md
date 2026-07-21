@@ -133,7 +133,8 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 | `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
 | `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
-| `tls` | `auto` | `manual` to serve a bring-your-own cert (uploaded via `homeport tls set`) instead of Let's Encrypt — see [Bring your own cert](#bring-your-own-cert) |
+| `tls` | `auto` | `manual` (cert via `homeport tls set`) or `dns:<provider>` (DNS-01 via a caddy-dns plugin) — see [Bring your own cert](#bring-your-own-cert) |
+| `dns_token_env` † | `HOMEPORT_DNS_<PROVIDER>` | env var holding the DNS token for `tls: dns:*`; `none` for SDK-env providers |
 | `headers` | — | opt-in response headers (a `Name: value` map) — homeport sets none on its own; see [Response headers](#response-headers) |
 
 ¹ `build.command`/`build.artifact` default only for binary apps; a `static` site has no build step by default.
@@ -187,6 +188,29 @@ homeport tls clear                           # revert to automatic HTTPS
 homeport never installs a cert on its own — this is entirely opt-in. Pair it
 with Cloudflare's SSL/TLS mode set to **Full (strict)**. (`tls: manual` needs a
 public domain — it's not for internal or path-mounted apps.)
+
+### DNS-01 certificates (any provider)
+
+Instead of a hand-managed cert, let Caddy issue **real, auto-renewing Let's
+Encrypt certs via DNS-01** — it proves ownership by writing a TXT record
+through your DNS provider's API, so it works behind a TLS-terminating proxy.
+Generic across every [caddy-dns](https://github.com/caddy-dns) provider:
+
+```sh
+homeport server plugins add github.com/caddy-dns/cloudflare   # 1. the provider plugin
+homeport server caddy-env HOMEPORT_DNS_CLOUDFLARE             # 2. API token (via stdin)
+```
+
+```yaml
+tls: dns:cloudflare        # 3. per app — or dns:digitalocean, dns:route53, …
+```
+
+The token env var defaults to `HOMEPORT_DNS_<PROVIDER>`; set `dns_token_env:`
+to use a different name, or `dns_token_env: none` for providers that read
+standard SDK env vars (e.g. route53 with `AWS_ACCESS_KEY_ID` — set those via
+`caddy-env` too). Tokens travel over ssh stdin, live root-owned on the box,
+and reach Caddy through a systemd `EnvironmentFile` — never argv, never git.
+Use a token scoped to DNS-edit on the one zone.
 
 ## Caddy plugins
 
