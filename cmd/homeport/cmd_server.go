@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/netip"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	homeport "github.com/homeport-sh/homeport"
+	"golang.org/x/term"
 )
 
 // cmdServer manages the box itself (as opposed to an app on it).
@@ -143,12 +145,10 @@ func cmdServerCaddyEnv(args []string) error {
 		if !envNameRe.MatchString(name) {
 			return fmt.Errorf("invalid env var name %q (A-Z, digits, _)", name)
 		}
-		fmt.Fprintf(os.Stderr, "paste the value for %s (input is piped to the server, not stored locally):\n", name)
-		data, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+		val, err := readSecretLine(fmt.Sprintf("value for %s (input hidden, Enter submits): ", name))
 		if err != nil {
 			return err
 		}
-		val := strings.TrimSpace(string(data))
 		if val == "" {
 			return fmt.Errorf("empty value")
 		}
@@ -202,6 +202,26 @@ func cmdServerFirewall(args []string) error {
 	default:
 		return fmt.Errorf("usage: homeport server firewall [allow <file|-> | clear] [deploy@host]")
 	}
+}
+
+// readSecretLine reads ONE line of secret input — like a password prompt:
+// Enter submits, and on a terminal the input is not echoed. Piped stdin
+// (e.g. `pbpaste | homeport server caddy-env X`) takes the first line.
+func readSecretLine(prompt string) (string, error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, prompt)
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	line, err := bufio.NewReader(io.LimitReader(os.Stdin, 4096)).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
 }
 
 // parseCIDRList extracts and validates CIDR ranges from a policy file: one per
