@@ -260,15 +260,23 @@ rather not, stick with the wildcard or manual records.
 
 ## Encrypted Client Hello (ECH)
 
-With a global DNS provider set (above), one command turns on
-[ECH](https://caddyserver.com/docs/caddyfile/options) — TLS stops leaking
-which site a visitor is opening (the SNI is encrypted). Caddy ≥ 2.10
-generates the keys and publishes the HTTPS DNS records automatically:
+[ECH](https://caddyserver.com/docs/caddyfile/options) stops TLS from leaking
+which site a visitor is opening (the SNI is encrypted). Caddy ≥ 2.10 generates
+the keys and **publishes them as HTTPS-type DNS records** — which is why ECH
+needs the full DNS setup from the previous section first: the provider plugin,
+the `caddy-env` **DNS-edit token** (publication writes records through it),
+and the global provider. The whole chain:
 
 ```sh
+homeport server plugins add github.com/caddy-dns/cloudflare
+homeport server caddy-env HOMEPORT_DNS_CLOUDFLARE   # zone-scoped DNS-edit token
+homeport server dns cloudflare
 homeport server ech ech.example.com    # a "public name" you control — the decoy SNI
 homeport server ech off
 ```
+
+(Each step refuses to run with an actionable error if the previous one is
+missing, so you can't half-configure it.)
 
 Browsers only use ECH when DNS-over-HTTPS is enabled, so treat it as
 defense-in-depth. It shines on a box hosting many domains — outside observers
