@@ -1127,6 +1127,12 @@ cmd_caddy_env_rm() {
   _caddy_env_commit "$old" "$had" "caddy-env: $name removed (caddy restarted)"
 }
 
+cmd_caddy_logs() { # [-n N] — the caddy service journal (deploy can't read it directly)
+  local n=80
+  [[ ${1:-} == -n && -n ${2:-} ]] && { [[ $2 =~ ^[0-9]{1,4}$ ]] || die "caddy-logs: -n takes a number"; n=$2; }
+  journalctl -u caddy -n "$n" --no-pager -o short-iso 2>/dev/null || true
+}
+
 cmd_caddy_env_list() {
   if [[ -s $CADDY_ENV_FILE ]]; then
     cut -d= -f1 "$CADDY_ENV_FILE"
@@ -1187,6 +1193,7 @@ write_caddy_globals() {
         printf '\t\tprovider %s {env.%s}\n' "$GDNS_PROVIDER" "$GDNS_ENV"
       fi
       printf '\t\tdynamic_domains\n'
+      printf '\t\tcheck_interval 5m\n'   # default 30m is too sleepy for deploy-then-resolve
       printf '\t}\n'
     fi
     [[ -n $GECH ]] && printf '\tech %s\n' "$GECH"
@@ -2534,6 +2541,7 @@ homeportd — root-side homeport helper (run via sudo)
   caddy-env-set <NAME>               set an env var for Caddy from stdin (DNS tokens for tls: dns:*)
   caddy-env-rm <NAME>                remove a Caddy env var
   caddy-env-list                     list Caddy env var names (values never printed)
+  caddy-logs [-n N]                  the caddy service journal (TLS/ECH/publication errors)
   global-dns <provider|->            set/clear the global DNS module (DNS-01 default + ECH publication)
   global-dyndns <on|off>             auto-manage A/AAAA records for every app domain (caddy-dynamicdns)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
@@ -2576,6 +2584,7 @@ main() {
     caddy-env-set)  cmd_caddy_env_set "$@" ;;
     caddy-env-rm)   cmd_caddy_env_rm "$@" ;;
     caddy-env-list) cmd_caddy_env_list "$@" ;;
+    caddy-logs)     cmd_caddy_logs "$@" ;;
     global-dns)     cmd_global_dns "$@" ;;
     global-dyndns)  cmd_global_dyndns "$@" ;;
     global-ech)     cmd_global_ech "$@" ;;

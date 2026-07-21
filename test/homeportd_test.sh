@@ -161,6 +161,7 @@ g=$(cat "$CADDY_GLOBALS_FRAG")
 has "globals dyndns block"  "$g" "dynamic_dns {"
 has "globals dyndns provider" "$g" "provider cloudflare {env.HOMEPORT_DNS_CLOUDFLARE}"
 has "globals dynamic_domains" "$g" "dynamic_domains"
+has "globals check_interval"   "$g" "check_interval 5m"
 has "globals ech line"      "$g" "ech ech.example.com"
 GDNS_ENV=none
 write_caddy_globals
