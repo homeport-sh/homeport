@@ -107,6 +107,9 @@ func cmdServerGlobals(sub string, args []string) error {
 		if args[0] == "off" {
 			return sshRun(target, hd+"global-ech -")
 		}
+		if args[0] == "rotate" {
+			return sshRun(target, hd+"global-ech-rotate")
+		}
 		if !domainRe.MatchString(args[0]) {
 			return fmt.Errorf("ech public name %q doesn't look like a domain", args[0])
 		}

@@ -1290,6 +1290,28 @@ cmd_global_ech() { # <public-name|-> — Encrypted Client Hello
   _globals_commit "caddy: ECH on — public name $name (keys generate + publish to DNS automatically)"
 }
 
+# cmd_global_ech_rotate — regenerate ECH keys and re-publish HTTPS records.
+# Caddy publishes an ECH config ONCE per key generation and caches that it did;
+# it won't retroactively publish for a host whose DNS record appeared after ECH
+# was first enabled. Clearing the ech keystore forces new keys → Caddy
+# re-publishes for every served host that now has a record. Also the standard
+# way to rotate ECH keys. (The deploy user can't reach caddy's storage itself —
+# only homeportd, as root, can.)
+cmd_global_ech_rotate() {
+  load_globals
+  [[ -n $GECH ]] || die "ECH is not enabled — nothing to rotate (turn it on with 'homeport server ech <name>')"
+  local d found=0
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    rm -rf "$d"; found=1
+  done < <(find /var/lib/caddy -type d -name ech -path '*caddy*' 2>/dev/null)
+  [[ $found == 1 ]] || echo "note: no existing ECH keystore found — fresh keys will be generated" >&2
+  systemctl restart caddy
+  sleep 2
+  systemctl is-active --quiet caddy || die "caddy failed to restart after ECH rotate — check 'homeport server caddy-logs'"
+  echo "caddy: ECH keys rotated — new configs publish to DNS for every host that has a record"
+}
+
 cmd_global_list() {
   load_globals
   echo "dns provider: ${GDNS_PROVIDER:-(unset)}${GDNS_PROVIDER:+ (env: $GDNS_ENV)}"
@@ -2545,6 +2567,7 @@ homeportd — root-side homeport helper (run via sudo)
   global-dns <provider|->            set/clear the global DNS module (DNS-01 default + ECH publication)
   global-dyndns <on|off>             auto-manage A/AAAA records for every app domain (caddy-dynamicdns)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
+  global-ech-rotate                  rotate ECH keys & re-publish (fixes late-added records)
   global-list                        show the managed global options
   self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
@@ -2588,6 +2611,7 @@ main() {
     global-dns)     cmd_global_dns "$@" ;;
     global-dyndns)  cmd_global_dyndns "$@" ;;
     global-ech)     cmd_global_ech "$@" ;;
+    global-ech-rotate) cmd_global_ech_rotate "$@" ;;
     global-list)    cmd_global_list "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
