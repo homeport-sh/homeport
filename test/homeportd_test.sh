@@ -206,6 +206,17 @@ bad_cidr "2400:cb00::/200"      # v6 mask too big
 bad_cidr "10.0.0.0/8; rm -rf /" # argv injection
 bad_cidr ""
 
+# --- tls_needs_inbound_acme: which apps the firewall warning should flag ---
+# Only HTTP-01 (default/empty mode) needs Let's Encrypt to reach 80/443. manual
+# (BYO cert) and dns:* (DNS-01) both work behind a Cloudflare-only firewall, so
+# they must NOT be warned about — warning on a dns: app is a false positive.
+needs_acme()    { tls_needs_inbound_acme "$1" && printf 'ok   flags http-01 mode %q\n' "$1" || { printf 'FAIL should flag %q\n' "$1"; fails=$((fails + 1)); }; }
+no_needs_acme() { tls_needs_inbound_acme "$1" && { printf 'FAIL should NOT flag %q\n' "$1"; fails=$((fails + 1)); } || printf 'ok   exempts %q\n' "$1"; }
+needs_acme    ""                 # default automatic HTTPS = HTTP-01
+no_needs_acme "manual"           # BYO cert — no ACME at all
+no_needs_acme "dns:cloudflare"   # DNS-01 — works behind the firewall
+no_needs_acme "dns:route53"
+
 # --- write_gateway merges path apps, longest prefix first ---
 # write_gateway uses mapfile (bash 4+); skip on ancient bash (e.g. macOS 3.2).
 if ! command -v mapfile >/dev/null 2>&1; then

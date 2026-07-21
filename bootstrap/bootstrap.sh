@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.3.0
+HOMEPORTD_VERSION=0.3.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -983,6 +983,18 @@ _fw_in_list() {
   return 1
 }
 
+# tls_needs_inbound_acme <mode> — true if the app's cert depends on Let's
+# Encrypt reaching the box over 80/443 (the HTTP-01 challenge). The default
+# (empty) mode does. `manual` (bring-your-own cert) uses no ACME at all, and
+# `dns:*` (DNS-01) proves the challenge over the DNS API — both keep working
+# behind a Cloudflare-only firewall, so neither should be warned about.
+tls_needs_inbound_acme() {
+  case ${1:-} in
+    manual|dns:*) return 1 ;;
+    *)            return 0 ;;
+  esac
+}
+
 cmd_firewall_set() { # CIDR ranges on stdin, one per line; # comments allowed
   local line cidrs=()
   while IFS= read -r line; do
@@ -1011,14 +1023,15 @@ cmd_firewall_set() { # CIDR ranges on stdin, one per line; # comments allowed
   fi
   printf '%s\n' "${cidrs[@]}" > "$FIREWALL_WEB_FILE"
   echo "firewall: 80/443 restricted to ${#cidrs[@]} range(s) — SSH untouched"
-  # ACME can no longer reach the box: warn about every public app still on
-  # automatic HTTPS, or its cert issuance/renewal will silently fail.
+  # ACME can no longer reach the box: warn about every public app whose cert
+  # depends on the HTTP-01 challenge, or its issuance/renewal will silently
+  # fail. manual (BYO) and dns:* (DNS-01) apps are unaffected — don't warn.
   local cfg dom mode acme=()
   for cfg in "$HOMEPORT_ETC"/*/config; do
     [[ -f $cfg ]] || continue
     dom=$(sed -n 's/^DOMAIN=//p' "$cfg"); [[ -n $dom ]] || continue
     mode=$(sed -n 's/^TLS_MODE=//p' "$cfg")
-    [[ $mode == manual ]] || acme+=("$(basename "$(dirname "$cfg")") ($dom)")
+    if tls_needs_inbound_acme "$mode"; then acme+=("$(basename "$(dirname "$cfg")") ($dom)"); fi
   done
   if [[ ${#acme[@]} -gt 0 ]]; then
     { echo "WARNING: these apps use automatic HTTPS — Let's Encrypt can no longer reach this box to issue or renew their certs:"
