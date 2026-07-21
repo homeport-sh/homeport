@@ -354,6 +354,36 @@ func TestAddArgsTLS(t *testing.T) {
 	}
 }
 
+func TestParseConfigCloudflare(t *testing.T) {
+	// cloudflare: true expands to tls: dns:cloudflare and renders as such.
+	cfg, err := parseConfig([]byte("app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ncloudflare: true\n"))
+	if err != nil {
+		t.Fatalf("cloudflare: true rejected: %v", err)
+	}
+	if cfg.TLS != "dns:cloudflare" {
+		t.Errorf("cloudflare: true should expand to dns:cloudflare, got %q", cfg.TLS)
+	}
+	if a := cfg.addArgs(); a[len(a)-4] != "dns:cloudflare" {
+		t.Errorf("cloudflare: true should render dns:cloudflare, got %q", a[len(a)-4])
+	}
+
+	// redundant-but-consistent explicit tls is allowed.
+	if _, err := parseConfig([]byte("app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ncloudflare: true\ntls: dns:cloudflare\n")); err != nil {
+		t.Errorf("cloudflare: true + tls: dns:cloudflare should be allowed, got %v", err)
+	}
+
+	// conflicting tls, and no public domain, are both errors.
+	for label, y := range map[string]string{
+		"conflict-manual": "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ncloudflare: true\ntls: manual\n",
+		"conflict-dns":    "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ncloudflare: true\ntls: dns:route53\n",
+		"internal":        "app: worker\nserver: deploy@1.2.3.4\ninternal: true\ncloudflare: true\n",
+	} {
+		if _, err := parseConfig([]byte(y)); err == nil {
+			t.Errorf("%s: expected rejection, got nil", label)
+		}
+	}
+}
+
 func TestValidateHeaders(t *testing.T) {
 	if err := validateHeaders("f", map[string]map[string]string{
 		"/*":                {"X-Frame-Options": "SAMEORIGIN", "Content-Security-Policy": "default-src 'self'; img-src *"},

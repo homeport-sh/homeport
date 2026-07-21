@@ -105,6 +105,7 @@ everyday:
   homeport mcp                  serve the CLI as MCP tools (stdio) for AI agents
   homeport tls set <cert> <key> serve a bring-your-own cert (with tls: manual) — e.g. behind a proxy
   homeport server update        push this CLI's bundled homeportd to the box
+  homeport server cloudflare    one-shot behind-Cloudflare setup: DNS plugin + token + provider
   homeport server plugins       add/rm Caddy plugins (official caddyserver.com builds, no toolchain)
   homeport server firewall      restrict 80/443 to CIDRs (allow cloudflare = CF edge ranges) — SSH untouched
   homeport server caddy-env     set DNS-provider tokens for tls: dns:<provider> (DNS-01 certs)

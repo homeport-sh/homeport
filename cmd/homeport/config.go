@@ -92,6 +92,7 @@ type config struct {
 	Strategy    string          `yaml:"strategy"`
 	TLS         string          `yaml:"tls"`           // "auto" (default) | "manual" (BYO cert) | "dns:<provider>" (DNS-01 via a caddy-dns plugin)
 	DNSTokenEnv string          `yaml:"dns_token_env"` // env var holding the DNS provider token (default HOMEPORT_DNS_<PROVIDER>); "none" for SDK-env providers
+	Cloudflare  bool            `yaml:"cloudflare"`    // shorthand for tls: dns:cloudflare (DNS-01 certs that survive the CF proxy); sets nothing else
 	Internal    bool            `yaml:"internal"`
 	Idle        bool            `yaml:"idle"`
 	IdleTimeout string          `yaml:"idle_timeout"`
@@ -223,6 +224,21 @@ func parseConfig(data []byte) (*config, error) {
 	// rest of the CLI (and homeportd) can key on either.
 	if cfg.Domain == "" {
 		cfg.Internal = true
+	}
+	// cloudflare: true is pure shorthand for tls: dns:cloudflare — DNS-01 certs
+	// that keep issuing/renewing behind the Cloudflare proxy (which blocks the
+	// HTTP-01 path). It expands to exactly that and nothing else; it never sets
+	// headers or any other behavior on your behalf. A conflicting tls: is an
+	// error rather than a silent pick.
+	if cfg.Cloudflare {
+		switch cfg.TLS {
+		case "", "auto":
+			cfg.TLS = "dns:cloudflare"
+		case "dns:cloudflare":
+			// explicit and consistent with the shorthand — allowed
+		default:
+			return nil, fmt.Errorf("%s: cloudflare: true is shorthand for tls: dns:cloudflare — remove the conflicting tls: %q", configFile, cfg.TLS)
+		}
 	}
 	switch {
 	case !appRe.MatchString(cfg.App):

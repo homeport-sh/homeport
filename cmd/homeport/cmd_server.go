@@ -28,7 +28,7 @@ import (
 // `plugins` swaps Caddy for an official caddyserver.com build with the named
 // plugin modules baked in (nothing compiles on the box).
 func cmdServer(args []string) error {
-	const use = "usage: homeport server <update | plugins [add|rm …] | firewall [allow <file>|clear]> [deploy@host]"
+	const use = "usage: homeport server <update | cloudflare | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals> [deploy@host]"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", use)
 	}
@@ -56,6 +56,8 @@ func cmdServer(args []string) error {
 		return cmdServerCaddyEnv(args[1:])
 	case "dns", "ech", "globals":
 		return cmdServerGlobals(args[0], args[1:])
+	case "cloudflare":
+		return cmdServerCloudflare(args[1:])
 	default:
 		return fmt.Errorf("%s", use)
 	}
@@ -207,6 +209,52 @@ func cmdServerFirewall(args []string) error {
 	default:
 		return fmt.Errorf("usage: homeport server firewall [allow <file|-> | clear] [deploy@host]")
 	}
+}
+
+// cmdServerCloudflare is the one-command setup for running behind Cloudflare:
+// it installs the caddy-dns/cloudflare plugin, stores the DNS token for Caddy,
+// and sets Cloudflare as the global DNS provider — the three server-side steps
+// that let apps use `cloudflare: true` (DNS-01 certs) and, optionally, ECH. It
+// composes the existing generic verbs; the token travels over ssh stdin only.
+func cmdServerCloudflare(args []string) error {
+	host := []string{}
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		host, args = args[n-1:], args[:n-1]
+	}
+	if len(args) != 0 {
+		return fmt.Errorf("usage: homeport server cloudflare [deploy@host]")
+	}
+	target, err := serverTarget(host)
+	if err != nil {
+		return err
+	}
+	token, err := readSecretLine("Cloudflare API token (Zone → DNS → Edit; input hidden, Enter submits): ")
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("no token provided — create one at Cloudflare → My Profile → API Tokens (Zone:DNS:Edit)")
+	}
+	const hd = "sudo /usr/local/bin/homeportd "
+
+	step("installing the caddy-dns/cloudflare plugin")
+	if err := sshRun(target, hd+"caddy-plugin-add github.com/caddy-dns/cloudflare"); err != nil {
+		return err
+	}
+	step("storing the DNS token for Caddy (HOMEPORT_DNS_CLOUDFLARE)")
+	if err := sshRunIn(target, hd+"caddy-env-set HOMEPORT_DNS_CLOUDFLARE", token+"\n"); err != nil {
+		return err
+	}
+	step("setting Cloudflare as the global DNS provider")
+	if err := sshRun(target, hd+"global-dns cloudflare"); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(os.Stderr, "\ncloudflare ready. Next:")
+	fmt.Fprintln(os.Stderr, "  • add `cloudflare: true` to each app's homeport.yaml (DNS-01 certs that survive the proxy)")
+	fmt.Fprintln(os.Stderr, "  • lock the origin to Cloudflare:  homeport server firewall allow cloudflare")
+	fmt.Fprintln(os.Stderr, "  • optional privacy:  homeport server ech <public-name>")
+	return nil
 }
 
 // readSecretLine reads ONE line of secret input — like a password prompt:

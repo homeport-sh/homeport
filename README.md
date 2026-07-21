@@ -136,6 +136,7 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
 | `tls` | `auto` | `manual` (cert via `homeport tls set`) or `dns:<provider>` (DNS-01 via a caddy-dns plugin) — see [Bring your own cert](#bring-your-own-cert) |
 | `dns_token_env` † | `HOMEPORT_DNS_<PROVIDER>` | env var holding the DNS token for `tls: dns:*`; `none` for SDK-env providers |
+| `cloudflare` | `false` | shorthand for `tls: dns:cloudflare` (DNS-01 certs that survive the CF proxy); pair with `homeport server cloudflare` |
 | `headers` | — | opt-in response headers (a `Name: value` map) — homeport sets none on its own; see [Response headers](#response-headers) |
 
 ¹ `build.command`/`build.artifact` default only for binary apps; a `static` site has no build step by default.
@@ -229,6 +230,30 @@ standard SDK env vars (e.g. route53 with `AWS_ACCESS_KEY_ID` — set those via
 `caddy-env` too). Tokens travel over ssh stdin, live root-owned on the box,
 and reach Caddy through a systemd `EnvironmentFile` — never argv, never git.
 Use a token scoped to DNS-edit on the one zone.
+
+### Behind Cloudflare, in one command
+
+Cloudflare is common enough to get a shortcut. `server cloudflare` does the
+three server-side steps above at once — installs the plugin, stores the token
+(prompted, hidden), and sets Cloudflare as the global DNS provider:
+
+```sh
+homeport server cloudflare        # paste a Zone → DNS → Edit token, press Enter
+```
+
+Then each app opts in with one line — pure shorthand for `tls: dns:cloudflare`,
+setting nothing else on your behalf:
+
+```yaml
+cloudflare: true
+```
+
+Certs now issue and renew over the DNS API, straight through the orange-cloud
+proxy. Optionally lock the origin so attackers can't bypass the edge:
+
+```sh
+homeport server firewall allow cloudflare
+```
 
 ## DNS records (no per-app management)
 
