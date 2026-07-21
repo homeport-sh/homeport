@@ -525,17 +525,88 @@ emit_tls() {
   esac
 }
 
+# emit_redirect_from <app> <primary> — one tiny site block per alias domain in
+# $REDIRECT_FROM (comma list): a 301 to the primary, path preserved. Lives in
+# the app's own fragment so aliases are created/updated/removed with the app.
+# Aliases inherit the app's TLS mode (a CF origin cert or same-zone DNS-01
+# covers them; with auto, Caddy just issues a cert per alias).
+emit_redirect_from() {
+  local app=$1 primary=$2 alias
+  [[ -n ${REDIRECT_FROM:-} ]] || return 0
+  local IFS=','
+  for alias in $REDIRECT_FROM; do
+    [[ -n $alias ]] || continue
+    printf '%s {\n' "$alias"
+    emit_tls $'\t' "$app"
+    printf '\tredir https://%s{uri} permanent\n' "$primary"
+    printf '}\n'
+  done
+}
+
+# host_owned_by <host> <exclude-app> — echo the app (if any) that already owns
+# <host> as its domain, a serving alias, or a redirect alias.
+host_owned_by() {
+  local host=$1 exclude=$2 _cfg _oapp v
+  for _cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $_cfg && $_cfg != "$HOMEPORT_ETC/$exclude/config" ]] || continue
+    _oapp=$(basename "$(dirname "$_cfg")")
+    v=$(sed -n 's/^DOMAIN=//p' "$_cfg")
+    [[ $v == "$host" ]] && { echo "$_oapp"; return; }
+    v=$(sed -n 's/^ALIASES=//p' "$_cfg")
+    [[ ",$v," == *",$host,"* ]] && { echo "$_oapp"; return; }
+    v=$(sed -n 's/^REDIRECT_FROM=//p' "$_cfg")
+    [[ ",$v," == *",$host,"* ]] && { echo "$_oapp"; return; }
+  done
+}
+
+# host_alias_owner <host> <exclude-app> — like host_owned_by but only scans the
+# alias lists (a primary DOMAIN match is handled separately by the add paths,
+# which have gateway-sharing semantics for it).
+host_alias_owner() {
+  local host=$1 exclude=$2 _cfg _oapp v
+  for _cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $_cfg && $_cfg != "$HOMEPORT_ETC/$exclude/config" ]] || continue
+    _oapp=$(basename "$(dirname "$_cfg")")
+    v=$(sed -n 's/^ALIASES=//p' "$_cfg")
+    [[ ",$v," == *",$host,"* ]] && { echo "$_oapp"; return; }
+    v=$(sed -n 's/^REDIRECT_FROM=//p' "$_cfg")
+    [[ ",$v," == *",$host,"* ]] && { echo "$_oapp"; return; }
+  done
+}
+
+# validate_extra_hosts <app> <primary> <csv> <label> — shared checks for the
+# aliases/redirect_from lists: each entry must look like a domain, differ from
+# the primary, and not be owned by any other app on the box (as its domain, a
+# serving alias, or a redirect alias).
+validate_extra_hosts() {
+  local app=$1 primary=$2 csv=$3 label=$4 alias owner
+  [[ -n $csv ]] || return 0
+  local IFS=','
+  for alias in $csv; do
+    [[ -n $alias ]] || continue
+    valid_domain "$alias"
+    [[ $alias != "$primary" ]] || die "$label: '$alias' is the app's own domain"
+    owner=$(host_owned_by "$alias" "$app")
+    [[ -z $owner ]] || die "$label: '$alias' is already used by app '$owner'"
+  done
+}
+
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
 # fragment (a whole-host site block). mode: template | idle | plain.
 # Used by cmd_add and the autoscaler (which rewrites on every scale event).
 write_caddy() {
-  local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams
+  local app=$1 domain=$2 port=$3 mode=$4 count=${5:-1} upstreams hosts
   upstreams=$(app_upstreams "$port" "$mode" "$count")
-  { printf '%s {\n\tencode zstd gzip\n' "$domain"
+  # serving aliases share the site block: "a.com, b.com { … }" — Caddy issues
+  # a cert per hostname automatically.
+  hosts=$domain
+  [[ -n ${ALIASES:-} ]] && hosts="$domain, ${ALIASES//,/, }"
+  { printf '%s {\n\tencode zstd gzip\n' "$hosts"
     emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     emit_reverse_proxy $'\t' "$mode" "$upstreams"
     printf '}\n'
+    emit_redirect_from "$app" "$domain"
   } > "$CADDY_DIR/$app.caddy"
 }
 
@@ -557,9 +628,11 @@ write_caddy_internal() {
 # an SPA also falls back to the app shell (200.html preferred, else index.html —
 # both listed so Caddy picks whichever the build produced, no stat needed).
 write_caddy_static() {
-  local app=$1 domain=$2 spa=$3 fallback=""
+  local app=$1 domain=$2 spa=$3 fallback="" hosts
   [[ $spa == 1 ]] && fallback=" /200.html /index.html"
-  { printf '%s {\n' "$domain"
+  hosts=$domain
+  [[ -n ${ALIASES:-} ]] && hosts="$domain, ${ALIASES//,/, }"
+  { printf '%s {\n' "$hosts"
     printf '\tencode zstd gzip\n'
     emit_tls $'\t' "$app"
     emit_user_headers $'\t'
@@ -567,20 +640,25 @@ write_caddy_static() {
     printf '\ttry_files {path} {path}.html {path}/%s\n' "$fallback"
     printf '\tfile_server\n'
     printf '}\n'
+    emit_redirect_from "$app" "$domain"
   } > "$CADDY_DIR/$app.caddy"
 }
 
 # cmd_add_static <app> <domain> <spa> — register a static site: a Caddy
 # file_server on its own domain, no systemd unit, no app user, no port bound.
 cmd_add_static() {
-  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-} tls_mode=${5:-} tls_dns_env=${6:-}
+  local app=$1 domain=$2 spa=${3:-} headers_b64=${4:-} tls_mode=${5:-} tls_dns_env=${6:-} redirect_from=${7:-} aliases=${8:-}
   [[ $domain == - || -z $domain ]] && die "a static site needs a domain"
   valid_domain "$domain"
   [[ $headers_b64 == - ]] && headers_b64=""
   [[ $tls_mode == - ]] && tls_mode=""
   [[ $tls_dns_env == - ]] && tls_dns_env=""
+  [[ $redirect_from == - ]] && redirect_from=""
+  [[ $aliases == - ]] && aliases=""
   validate_headers "$headers_b64"
   validate_tls_mode "$app" "$tls_mode" "$tls_dns_env"
+  validate_extra_hosts "$app" "$domain" "$redirect_from" "redirect_from"
+  validate_extra_hosts "$app" "$domain" "$aliases" "aliases"
   [[ $spa == 1 ]] || spa=""
   # host-ownership conflict: the domain must be free (not another app's whole
   # host, not a gateway host) — mirrors the binary-app check.
@@ -591,6 +669,9 @@ cmd_add_static() {
     _oapp=$(basename "$(dirname "$_cfg")")
     die "domain $domain is already used by app '$_oapp'"
   done
+  local _aowner
+  _aowner=$(host_alias_owner "$domain" "$app")
+  [[ -z $_aowner ]] || die "domain $domain is already an alias of app '$_aowner'"
 
   local port keep=5 was_binary=0
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
@@ -623,10 +704,12 @@ KEEP=$keep
 HEADERS_B64=$headers_b64
 TLS_MODE=$tls_mode
 TLS_DNS_ENV=$tls_dns_env
+REDIRECT_FROM=$redirect_from
+ALIASES=$aliases
 EOF
   # fresh values for emit_user_headers/emit_tls — load_app (above, for an
   # existing app) would have sourced the OLD values over them.
-  HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env
+  HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env REDIRECT_FROM=$redirect_from ALIASES=$aliases
   # fragment write is transactional: a fragment that fails validation must not
   # stay on disk, or the NEXT caddy restart (any restart!) fails to boot.
   local _frag="$CADDY_DIR/$app.caddy" _fragbak="" _hadfrag=0
@@ -1114,7 +1197,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-} redirect_from=${22:-} aliases=${23:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -1122,11 +1205,15 @@ cmd_add() {
   [[ $headers_b64 == - ]] && headers_b64=""
   [[ $tls_mode == - ]] && tls_mode=""
   [[ $tls_dns_env == - ]] && tls_dns_env=""
+  [[ $redirect_from == - ]] && redirect_from=""
+  [[ $aliases == - ]] && aliases=""
   validate_headers "$headers_b64"
   validate_tls_mode "$app" "$tls_mode" "$tls_dns_env"
+  validate_extra_hosts "$app" "$domain" "$redirect_from" "redirect_from"
+  validate_extra_hosts "$app" "$domain" "$aliases" "aliases"
   # static sites are a wholly different shape (Caddy file_server, no process) —
   # handle them in their own function, leaving the binary-app path below untouched.
-  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64" "$tls_mode" "$tls_dns_env"; return; }
+  [[ $static == 1 ]] && { cmd_add_static "$app" "$domain" "$spa" "$headers_b64" "$tls_mode" "$tls_dns_env" "$redirect_from" "$aliases"; return; }
   [[ $sandbox == - ]] && sandbox=""
   [[ $strategy == - ]] && strategy=""
   [[ $health_timeout == - ]] && health_timeout=""
@@ -1185,6 +1272,9 @@ cmd_add() {
         [[ -n $_opath ]] && die "domain $domain is a gateway host (app '$_oapp' mounts $_opath) — give this app a path: too"
       fi
     done
+    local _aowner
+    _aowner=$(host_alias_owner "$domain" "$app")
+    [[ -z $_aowner ]] || die "domain $domain is already an alias of app '$_aowner'"
   fi
   # anchored + charset-locked: HEALTH_PATH is written to config and source'd as
   # root, so an un-validated value here is arbitrary root command substitution.
@@ -1231,7 +1321,7 @@ cmd_add() {
   # load_app (above) may have sourced the OLD config over freshly-parsed values
   # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
   # the values for THIS add so they get written and take effect.
-  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env
+  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env REDIRECT_FROM=$redirect_from ALIASES=$aliases
   AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
@@ -1264,6 +1354,8 @@ HEALTH_TIMEOUT=$health_timeout
 HEADERS_B64=$headers_b64
 TLS_MODE=$tls_mode
 TLS_DNS_ENV=$tls_dns_env
+REDIRECT_FROM=$redirect_from
+ALIASES=$aliases
 EOF
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.

@@ -133,6 +133,22 @@ eq "dns_default_env dashes" "$(dns_default_env "azure-dns")" "HOMEPORT_DNS_AZURE
 TLS_MODE="" TLS_DNS_ENV=""
 rm -rf "$TLS_CERT_DIR"
 
+# --- multi-domain serving + redirect_from aliases ---
+ALIASES="www.m.example.com,m.example.net"
+REDIRECT_FROM="old.m.example.com"
+write_caddy multi m.example.com 8108 plain 1
+mcfg=$(cat "$CADDY_DIR/multi.caddy")
+has "multi-domain host line" "$mcfg" "m.example.com, www.m.example.com, m.example.net {"
+has "redirect alias block"   "$mcfg" "old.m.example.com {"
+has "redirect 301 target"    "$mcfg" 'redir https://m.example.com{uri} permanent'
+write_caddy_static multi m.example.com ""
+has "static multi-domain hosts" "$(cat "$CADDY_DIR/multi.caddy")" "m.example.com, www.m.example.com, m.example.net {"
+ALIASES="" REDIRECT_FROM=""
+write_caddy multi m.example.com 8108 plain 1
+if [[ "$(cat "$CADDY_DIR/multi.caddy")" == *"redir "* ]]; then
+  printf 'FAIL redirect blocks emitted with empty REDIRECT_FROM\n'; fails=$((fails + 1))
+else printf 'ok   no redirect blocks when unset\n'; fi
+
 # --- valid_caddy_module: plugin names become URL params + argv — the gate ---
 ok_mod()  { valid_caddy_module "$1" && printf 'ok   mod accept %s\n' "$1" || { printf 'FAIL mod accept %s\n' "$1"; fails=$((fails + 1)); }; }
 bad_mod() { valid_caddy_module "$1" && { printf 'FAIL mod reject %s\n' "$1"; fails=$((fails + 1)); } || printf 'ok   mod reject %s\n' "$1"; }

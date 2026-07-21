@@ -40,13 +40,51 @@ type autoscaleConfig struct {
 // on reports whether autoscaling is configured (max set).
 func (a autoscaleConfig) on() bool { return a.Max > 0 }
 
+// flexStrings accepts a YAML scalar ("a.com" or "a.com, b.com") or sequence
+// ([a.com, b.com]) — so `domain:` reads naturally in every shape.
+type flexStrings []string
+
+func (f *flexStrings) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		for _, part := range strings.Split(s, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				*f = append(*f, p)
+			}
+		}
+	case yaml.SequenceNode:
+		var list []string
+		if err := n.Decode(&list); err != nil {
+			return err
+		}
+		for _, s := range list {
+			if p := strings.TrimSpace(s); p != "" {
+				*f = append(*f, p)
+			}
+		}
+	default:
+		return fmt.Errorf("domain must be a string or a list of strings")
+	}
+	return nil
+}
+
 type config struct {
-	App         string          `yaml:"app"`
-	Server      string          `yaml:"server"`
-	Domain      string          `yaml:"domain"`
+	App     string      `yaml:"app"`
+	Server  string      `yaml:"server"`
+	Domains flexStrings `yaml:"domain"` // one or more; the FIRST is canonical
+	// Domain is the canonical (first) domain — what status prints, what
+	// redirect_from targets, what gateway hosts key on. Set from Domains.
+	Domain string `yaml:"-"`
 	Path        string          `yaml:"path"`
 	Static      string          `yaml:"static"` // a directory → Caddy file_server, no process
 	SPA         *bool           `yaml:"spa"`    // nil = auto-detect; true/false override the fallback
+	// alias domains that 301 to this app's domain (www → apex, brand domains).
+	// Each gets its own cert + redirect block, and lives/dies with the app.
+	RedirectFrom []string `yaml:"redirect_from"`
 	Run         string          `yaml:"run"`
 	Release     string          `yaml:"release"`
 	PostRelease string          `yaml:"post_release"`
@@ -142,7 +180,6 @@ func parseConfig(data []byte) (*config, error) {
 		ptr  *string
 	}{
 		{"server", &cfg.Server},
-		{"domain", &cfg.Domain},
 		{"app", &cfg.App},
 		{"path", &cfg.Path},
 		{"idle_timeout", &cfg.IdleTimeout},
@@ -169,6 +206,19 @@ func parseConfig(data []byte) (*config, error) {
 		cfg.Health.Path = "/"
 	}
 	cfg.Server = normalizeServer(cfg.Server)
+	// domain: accepts one or many — env-expand each, then the FIRST becomes
+	// the canonical cfg.Domain and the rest serve as extra hostnames on the
+	// same site block (a cert per hostname, courtesy of Caddy).
+	for i := range cfg.Domains {
+		v, err := expandEnvStrict("domain", cfg.Domains[i])
+		if err != nil {
+			return nil, err
+		}
+		cfg.Domains[i] = v
+	}
+	if len(cfg.Domains) > 0 {
+		cfg.Domain = cfg.Domains[0]
+	}
 	// An empty domain implies internal, and vice versa — normalize so the
 	// rest of the CLI (and homeportd) can key on either.
 	if cfg.Domain == "" {
@@ -243,6 +293,39 @@ func parseConfig(data []byte) (*config, error) {
 		return nil, fmt.Errorf("%s: static is files-only (no process) — remove run/idle/replicas/autoscale/sandbox/strategy/resources", configFile)
 	case cfg.isStatic() && (!staticDirRe.MatchString(cfg.Static) || strings.Contains(cfg.Static, "..")):
 		return nil, fmt.Errorf("%s: static must be a relative directory (e.g. ./dist, no .. or leading /), got %q", configFile, cfg.Static)
+	case len(cfg.RedirectFrom) > 0 && (cfg.Internal || cfg.Domain == ""):
+		return nil, fmt.Errorf("%s: redirect_from needs a public domain to redirect TO", configFile)
+	case len(cfg.RedirectFrom) > 0 && cfg.Path != "":
+		return nil, fmt.Errorf("%s: redirect_from isn't for path-mounted apps — the gateway host owns the domain", configFile)
+	case len(cfg.RedirectFrom) > 20:
+		return nil, fmt.Errorf("%s: redirect_from supports at most 20 aliases (got %d)", configFile, len(cfg.RedirectFrom))
+	case len(cfg.Domains) > 20:
+		return nil, fmt.Errorf("%s: domain supports at most 20 hostnames (got %d)", configFile, len(cfg.Domains))
+	case len(cfg.Domains) > 1 && cfg.Path != "":
+		return nil, fmt.Errorf("%s: a path-mounted app takes exactly one domain — the gateway host owns it", configFile)
+	}
+	// every hostname this app claims — the domain list (serving) and the
+	// redirect_from list (301s) — must be well-formed and mutually distinct.
+	seen := map[string]bool{}
+	for _, d := range cfg.Domains {
+		if !domainRe.MatchString(d) {
+			return nil, fmt.Errorf("%s: %q doesn't look like a domain", configFile, d)
+		}
+		if seen[d] {
+			return nil, fmt.Errorf("%s: domain lists %q twice", configFile, d)
+		}
+		seen[d] = true
+	}
+	for _, alias := range cfg.RedirectFrom {
+		switch {
+		case !domainRe.MatchString(alias):
+			return nil, fmt.Errorf("%s: redirect_from %q doesn't look like a domain", configFile, alias)
+		case alias == cfg.Domain:
+			return nil, fmt.Errorf("%s: redirect_from includes the app's own domain %q — that's a redirect loop", configFile, alias)
+		case seen[alias]:
+			return nil, fmt.Errorf("%s: %q is listed both as a served domain and in redirect_from", configFile, alias)
+		}
+		seen[alias] = true
 	}
 	if err := validateHeaders(configFile, cfg.Headers); err != nil {
 		return nil, err
@@ -341,7 +424,17 @@ func (c *config) addArgs() []string {
 		encodeHeaders(c.Headers), // arg 19: user response headers (base64 "Name: value" lines)
 		tlsArg(c.TLS),            // arg 20: "manual" | "dns:<provider>" | "-" (auto)
 		dashIfEmpty(c.DNSTokenEnv), // arg 21: token env var override for dns: mode
+		dashIfEmpty(strings.Join(c.RedirectFrom, ",")), // arg 22: alias domains that 301 here (comma-safe: commas can't appear in a domain)
+		dashIfEmpty(strings.Join(c.extraDomains(), ",")), // arg 23: extra SERVED hostnames (domain list beyond the first)
 	}
+}
+
+// extraDomains returns the served hostnames beyond the canonical first one.
+func (c *config) extraDomains() []string {
+	if len(c.Domains) > 1 {
+		return c.Domains[1:]
+	}
+	return nil
 }
 
 // tlsArg renders the TLS mode as homeportd's positional token: "manual"

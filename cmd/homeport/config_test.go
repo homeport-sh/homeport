@@ -79,6 +79,13 @@ func TestParseConfigRejects(t *testing.T) {
 		{"static + process field", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ./dist\nreplicas: 3\n", "files-only"},
 		{"static + path", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ./dist\npath: /docs\n", "path-mounting"},
 		{"static traversal", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ../secrets\n", "relative directory"},
+		// multi-domain + redirect_from:
+		{"domain listed twice", "app: web\nserver: deploy@1.2.3.4\ndomain: [a.example.com, a.example.com]\n", "twice"},
+		{"multi-domain + path", "app: web\nserver: deploy@1.2.3.4\ndomain: [a.example.com, b.example.com]\npath: /api\n", "exactly one domain"},
+		{"redirect loop", "app: web\nserver: deploy@1.2.3.4\ndomain: a.example.com\nredirect_from: [a.example.com]\n", "redirect loop"},
+		{"redirect overlaps served", "app: web\nserver: deploy@1.2.3.4\ndomain: [a.example.com, b.example.com]\nredirect_from: [b.example.com]\n", "both"},
+		{"redirect_from internal", "app: web\nserver: deploy@1.2.3.4\ninternal: true\nredirect_from: [w.example.com]\n", "public domain"},
+		{"bad redirect domain", "app: web\nserver: deploy@1.2.3.4\ndomain: a.example.com\nredirect_from: ['not a domain']\n", "domain"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -120,6 +127,31 @@ func TestParseConfigAccepts(t *testing.T) {
 	for i, y := range ok {
 		if _, err := parseConfig([]byte(y)); err != nil {
 			t.Errorf("case %d should be valid, got: %v", i, err)
+		}
+	}
+}
+
+func TestParseConfigMultiDomain(t *testing.T) {
+	for label, y := range map[string]string{
+		"list":  "app: web\nserver: deploy@1.2.3.4\ndomain: [example.com, www.example.com]\nredirect_from: [old.example.com]\n",
+		"comma": "app: web\nserver: deploy@1.2.3.4\ndomain: example.com, www.example.com\nredirect_from: [old.example.com]\n",
+	} {
+		cfg, err := parseConfig([]byte(y))
+		if err != nil {
+			t.Fatalf("%s form rejected: %v", label, err)
+		}
+		if cfg.Domain != "example.com" {
+			t.Errorf("%s: canonical domain should be first, got %q", label, cfg.Domain)
+		}
+		if extras := cfg.extraDomains(); len(extras) != 1 || extras[0] != "www.example.com" {
+			t.Errorf("%s: extras = %v, want [www.example.com]", label, extras)
+		}
+		args := cfg.addArgs()
+		if args[len(args)-1] != "www.example.com" { // extras csv
+			t.Errorf("%s: extras arg = %q", label, args[len(args)-1])
+		}
+		if args[len(args)-2] != "old.example.com" { // redirect_from csv
+			t.Errorf("%s: redirect_from arg = %q", label, args[len(args)-2])
 		}
 	}
 }
@@ -200,9 +232,9 @@ func TestAddArgsPositions(t *testing.T) {
 	if args[4] != "512M" {
 		t.Errorf("memory should be arg 4, got %q", args[4])
 	}
-	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa> <headers> <tls> <dns-env>
-	tail := args[len(args)-8:]
-	want := []string{"relaxed", "recreate", "60s", "-", "-", "-", "-", "-"} // not static, spa off, no headers, auto tls
+	// trailing block: … <sandbox> <strategy> <health-timeout> <static> <spa> <headers> <tls> <dns-env> <redirect-from> <extra-domains>
+	tail := args[len(args)-10:]
+	want := []string{"relaxed", "recreate", "60s", "-", "-", "-", "-", "-", "-", "-"} // not static, spa off, no headers, auto tls
 	for i := range want {
 		if tail[i] != want[i] {
 			t.Errorf("tail arg %d = %q, want %q (full tail: %v)", i, tail[i], want[i], tail)
@@ -218,20 +250,20 @@ func TestAddArgsStatic(t *testing.T) {
 	spa := true
 	cfg := &config{App: "docs", Domain: "docs.example.com", Static: "./dist", SPA: &spa, spaResolved: true, Health: healthConfig{Path: "/"}, Replicas: 1}
 	args := cfg.addArgs()
-	if args[len(args)-5] != "1" { // static
-		t.Errorf("static marker should be '1', got %q", args[len(args)-5])
+	if args[len(args)-7] != "1" { // static
+		t.Errorf("static marker should be '1', got %q", args[len(args)-7])
 	}
-	if args[len(args)-4] != "1" { // spa
-		t.Errorf("spa should be '1', got %q", args[len(args)-4])
+	if args[len(args)-6] != "1" { // spa
+		t.Errorf("spa should be '1', got %q", args[len(args)-6])
 	}
-	if args[len(args)-3] != "-" { // no headers
-		t.Errorf("headers should be '-' when unset, got %q", args[len(args)-3])
+	if args[len(args)-5] != "-" { // no headers
+		t.Errorf("headers should be '-' when unset, got %q", args[len(args)-5])
 	}
-	if args[len(args)-2] != "-" { // auto tls
-		t.Errorf("tls should be '-' when unset, got %q", args[len(args)-2])
+	if args[len(args)-4] != "-" { // auto tls
+		t.Errorf("tls should be '-' when unset, got %q", args[len(args)-4])
 	}
-	if args[len(args)-1] != "-" { // no dns token env
-		t.Errorf("dns-env should be '-' when unset, got %q", args[len(args)-1])
+	if args[len(args)-3] != "-" { // no dns token env
+		t.Errorf("dns-env should be '-' when unset, got %q", args[len(args)-3])
 	}
 }
 
@@ -244,9 +276,9 @@ func TestAddArgsHeaders(t *testing.T) {
 		},
 	}
 	args := cfg.addArgs()
-	dec, err := base64.StdEncoding.DecodeString(args[len(args)-3]) // headers is 3rd-from-last (tls, dns-env follow)
+	dec, err := base64.StdEncoding.DecodeString(args[len(args)-5]) // headers arg (tls, dns-env, redirect-from, extras follow)
 	if err != nil {
-		t.Fatalf("headers arg is not base64: %q", args[len(args)-3])
+		t.Fatalf("headers arg is not base64: %q", args[len(args)-5])
 	}
 	// sorted by glob then name; tab-separated glob<TAB>name<TAB>value.
 	// "/*" sorts before "/_app/*" ('*' 0x2A < '_' 0x5F).
@@ -255,8 +287,8 @@ func TestAddArgsHeaders(t *testing.T) {
 		t.Errorf("decoded headers = %q, want %q", dec, want)
 	}
 	cfg.Headers = nil
-	if a := cfg.addArgs(); a[len(a)-3] != "-" {
-		t.Errorf("no headers should render '-', got %q", a[len(a)-3])
+	if a := cfg.addArgs(); a[len(a)-5] != "-" {
+		t.Errorf("no headers should render '-', got %q", a[len(a)-5])
 	}
 }
 
@@ -307,18 +339,18 @@ func TestParseCIDRList(t *testing.T) {
 
 func TestAddArgsTLS(t *testing.T) {
 	cfg := &config{App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1, TLS: "manual"}
-	if a := cfg.addArgs(); a[len(a)-2] != "manual" {
-		t.Errorf("tls: manual should render 'manual', got %q", a[len(a)-2])
+	if a := cfg.addArgs(); a[len(a)-4] != "manual" {
+		t.Errorf("tls: manual should render 'manual', got %q", a[len(a)-4])
 	}
 	cfg.TLS = "auto"
-	if a := cfg.addArgs(); a[len(a)-2] != "-" {
-		t.Errorf("tls: auto should render '-', got %q", a[len(a)-2])
+	if a := cfg.addArgs(); a[len(a)-4] != "-" {
+		t.Errorf("tls: auto should render '-', got %q", a[len(a)-4])
 	}
 	cfg.TLS = "dns:cloudflare"
 	cfg.DNSTokenEnv = "CF_API_TOKEN"
 	a := cfg.addArgs()
-	if a[len(a)-2] != "dns:cloudflare" || a[len(a)-1] != "CF_API_TOKEN" {
-		t.Errorf("dns mode should pass through mode+env, got %q %q", a[len(a)-2], a[len(a)-1])
+	if a[len(a)-4] != "dns:cloudflare" || a[len(a)-3] != "CF_API_TOKEN" {
+		t.Errorf("dns mode should pass through mode+env, got %q %q", a[len(a)-4], a[len(a)-3])
 	}
 }
 

@@ -114,7 +114,8 @@ the full set. Fields marked † expand `${VAR}` from the environment at load tim
 |---|---|---|
 | `app` † | — | app name (lowercase, digits, dashes, ≤20 chars) |
 | `server` † | — | `deploy@host` (a bare host defaults the user to `deploy@`) |
-| `domain` † | — | public hostname (Caddy + auto-TLS); omit for internal |
+| `domain` † | — | public hostname(s) — a string, comma list, or YAML list; the **first is canonical**, the rest serve the same app (a cert each). Omit for internal |
+| `redirect_from` | — | domains that **301** to the canonical domain (www → apex, old brand domains); certs + redirects live with the app |
 | `internal` | `false` | private app — loopback only, reached via `homeport tunnel` |
 | `path` † | — | mount under a shared `domain` (API gateway); prefix is stripped |
 | `static` | — | serve a directory of files via Caddy (no process); see [Static sites](#static-sites-no-binary) |
@@ -166,6 +167,23 @@ Path-scoping is what lets you long-cache fingerprinted assets *without* caching
 your HTML (so deploys still show up immediately). Globs, names and values are
 validated against injection into the generated Caddy config: a name is a plain
 token, a value is one line without `"`, `\`, `{`, or `}`.
+
+## Multiple domains & www redirects
+
+`domain:` takes one or more hostnames — the first is canonical, the rest serve
+the same app (Caddy issues a cert per hostname). `redirect_from:` lists domains
+that 301 to the canonical one instead of serving:
+
+```yaml
+domain: example.com                 # or: [example.com, example.net]
+redirect_from: [www.example.com]    # www → apex, path preserved
+```
+
+Use `redirect_from` for www/canonical variants (serving identical content on
+two hostnames splits your search ranking); use multiple `domain:` entries only
+when the app genuinely lives on several domains. Both lists are owned by the
+app — certs and redirects are created with it and removed with it, and no
+other app on the box can claim those hostnames.
 
 ## Bring your own cert
 
