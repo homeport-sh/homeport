@@ -276,7 +276,15 @@ homeport server ech off
 ```
 
 (Each step refuses to run with an actionable error if the previous one is
-missing, so you can't half-configure it.)
+missing, so you can't half-configure it — and a token that the global config
+references can't be removed out from under it either.)
+
+One thing validation **can't** catch (for `dns-records` and `ech` alike): a
+wrong-but-well-formed token. Caddy checks the token's shape at load, not its
+validity — homeport won't call your DNS provider's API to probe it. After
+enabling, confirm the records actually appeared in your DNS dashboard, and
+check `homeport logs`-style on the box with `journalctl -u caddy` for provider
+errors if they didn't.
 
 Browsers only use ECH when DNS-over-HTTPS is enabled, so treat it as
 defense-in-depth. It shines on a box hosting many domains — outside observers
