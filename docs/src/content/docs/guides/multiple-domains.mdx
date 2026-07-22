@@ -5,6 +5,8 @@ sidebar:
   order: 3
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 `domain:` takes one or more hostnames — the first is canonical, the rest serve
 the same app (Caddy issues a cert per hostname). `redirect_from:` lists domains
 that **301** to the canonical one instead of serving.

@@ -5,51 +5,56 @@ sidebar:
   order: 3
 ---
 
+import { Steps, Aside } from '@astrojs/starlight/components';
+
 Never touched a VPS before? This takes you from a fresh box to a live app with
 automatic HTTPS.
 
 <Steps>
-  <Step title="Create a server">
-    On Hetzner Cloud (or any provider): add a server and pick the latest Ubuntu
-    LTS (26.04). The cheapest shared box is fine. Add your SSH key when prompted
-    and copy the server's IP.
-  </Step>
-  <Step title="Bootstrap it">
-    From your laptop:
+1. **Create a server**
 
-    ```sh
-    homeport bootstrap root@<ip>
-    ```
+   On Hetzner Cloud (or any provider): add a server and pick the latest Ubuntu
+   LTS (26.04). The cheapest shared box is fine. Add your SSH key when prompted
+   and copy the server's IP.
 
-    This hardens the box (firewall, key-only SSH, no root login, fail2ban,
-    automatic security updates), installs Caddy for automatic HTTPS, and
-    installs `homeportd`, the server-side helper. It's idempotent — safe to
-    re-run. You can also paste `bootstrap/bootstrap.sh` into Hetzner's *user
-    data* field at creation and the box sets itself up on first boot.
-  </Step>
-  <Step title="Point DNS">
-    Add an `A` record for your domain to the server's IP. Certificates issue
-    automatically once it resolves.
+2. **Bootstrap it**
 
-    <Aside type="tip" title="No domain handy?">
-      Use `<app>.<your-ip-with-dashes>.sslip.io` — e.g.
-      `web.203-0-113-9.sslip.io` for `203.0.113.9`.
-      [sslip.io](https://sslip.io) resolves it to your IP with zero setup, and
-      Caddy still gets a real Let's Encrypt cert. Great for a first try; use
-      your own domain for production.
-    </Aside>
-  </Step>
-  <Step title="Deploy">
-    In your project:
+   From your laptop:
 
-    ```sh
-    homeport init      # writes homeport.yaml, auto-detecting the project type
-    homeport deploy    # build → upload → health-checked activate
-    ```
+   ```sh
+   homeport bootstrap root@<ip>
+   ```
 
-    `init` auto-detects Go, Rust, Next, Nuxt, SvelteKit, TanStack Start, and
-    Bun. Open your domain — it's live.
-  </Step>
+   This hardens the box (firewall, key-only SSH, no root login, fail2ban,
+   automatic security updates), installs Caddy for automatic HTTPS, and
+   installs `homeportd`, the server-side helper. It's idempotent — safe to
+   re-run. You can also paste `bootstrap/bootstrap.sh` into Hetzner's *user
+   data* field at creation and the box sets itself up on first boot.
+
+3. **Point DNS**
+
+   Add an `A` record for your domain to the server's IP. Certificates issue
+   automatically once it resolves.
+
+   <Aside type="tip" title="No domain handy?">
+     Use `<app>.<your-ip-with-dashes>.sslip.io` — e.g.
+     `web.203-0-113-9.sslip.io` for `203.0.113.9`.
+     [sslip.io](https://sslip.io) resolves it to your IP with zero setup, and
+     Caddy still gets a real Let's Encrypt cert. Great for a first try; use
+     your own domain for production.
+   </Aside>
+
+4. **Deploy**
+
+   In your project:
+
+   ```sh
+   homeport init      # writes homeport.yaml, auto-detecting the project type
+   homeport deploy    # build → upload → health-checked activate
+   ```
+
+   `init` auto-detects Go, Rust, Next, Nuxt, SvelteKit, TanStack Start, and
+   Bun. Open your domain — it's live.
 </Steps>
 
 ## What just happened

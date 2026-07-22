@@ -38,9 +38,9 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 
 ## Quick start (never touched a VPS before?)
 
-1. **Create a server** — e.g. Hetzner Cloud → Add Server → Ubuntu 24.04,
-   the cheapest shared box is fine. Add your SSH key when prompted. Copy
-   the server's IP.
+1. **Create a server** — e.g. Hetzner Cloud → Add Server → the latest Ubuntu
+   LTS (26.04), the cheapest shared box is fine. Add your SSH key when
+   prompted. Copy the server's IP.
 2. **Bootstrap it** (from your laptop):
    ```
    homeport bootstrap root@<ip>

@@ -6,6 +6,8 @@ sidebar:
   badge: Start here
 ---
 
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
 homeport deploys single-binary web apps — Go, Rust, `bun --compile`, anything
 that ships as one executable — to your own VPS. No Docker, no registry, no
 agent, no runtime installed on the server. One command hardens a fresh box;
@@ -27,19 +29,19 @@ file copy plus a symlink flip: atomic, instantly rollback-able, and the server
 needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 
 <CardGrid>
-  <Card title="Nothing on the server" icon="ph:hard-drives">
+  <Card title="Nothing on the server">
     The box runs SSH and Caddy. Your app is one executable behind a health
     check. No daemon of ours runs as root beyond a tightly-scoped helper.
   </Card>
-  <Card title="Atomic deploys" icon="ph:swap">
+  <Card title="Atomic deploys">
     Upload the new release next to the old one, health-check it, then flip a
     symlink. Rollback is flipping it back — old releases stay on the box.
   </Card>
-  <Card title="Hardened by default" icon="ph:shield-check">
+  <Card title="Hardened by default">
     `bootstrap` sets up key-only SSH, no root login, a firewall, fail2ban, and
     automatic security updates before anything ships.
   </Card>
-  <Card title="Your keys, your box" icon="ph:key">
+  <Card title="Your keys, your box">
     Secrets travel over ssh stdin, never argv or git. A leaked CI key is scoped
     to one app and can't take the server.
   </Card>
@@ -48,16 +50,16 @@ needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
 ## Where to next
 
 <CardGrid>
-  <Card title="Install" icon="ph:download">
+  <Card title="Install" icon="laptop">
     Get the `homeport` CLI on your laptop or CI — see [Installation](/installation).
   </Card>
-  <Card title="Quick start" icon="ph:rocket-launch">
+  <Card title="Quick start" icon="rocket">
     Never touched a VPS? Go from a bare box to a live app — see [Quick start](/quick-start).
   </Card>
-  <Card title="Configuration" icon="ph:file-text">
+  <Card title="Configuration" icon="document">
     Every `homeport.yaml` field in one table — see [Configuration](/configuration).
   </Card>
-  <Card title="Commands" icon="ph:terminal">
+  <Card title="Commands" icon="open-book">
     The full CLI surface — see [Commands](/reference/commands).
   </Card>
 </CardGrid>

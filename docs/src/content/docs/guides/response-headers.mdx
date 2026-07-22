@@ -5,6 +5,8 @@ sidebar:
   order: 6
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 homeport never sets response headers on your behalf — no security or cache
 headers are forced onto your app. If you want them, opt in with a `headers:`
 map, keyed by **path glob** then header name, emitted verbatim on the app's site

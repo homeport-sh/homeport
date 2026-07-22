@@ -1,0 +1,10 @@
+---
+// Override Starlight's <Head> to add Astro's client-side router, giving
+// SPA-like navigation (no full reloads). Starlight is view-transitions aware,
+// so its header/sidebar persist and content cross-fades cleanly.
+import Default from '@astrojs/starlight/components/Head.astro';
+import { ClientRouter } from 'astro:transitions';
+---
+
+<Default><slot /></Default>
+<ClientRouter />

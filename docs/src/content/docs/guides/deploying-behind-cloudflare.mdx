@@ -5,6 +5,8 @@ sidebar:
   order: 1
 ---
 
+import { Steps, Aside } from '@astrojs/starlight/components';
+
 Putting an app behind Cloudflare's proxy (orange-cloud) means Cloudflare
 terminates TLS at the edge, so the usual HTTP-01 certificate challenge can't
 reach your origin. homeport handles this with **DNS-01 certificates** — Caddy
@@ -65,26 +67,29 @@ so a bad policy can only break web traffic, not lock you out.
 ## The whole flow
 
 <Steps>
-  <Step title="Set up the server">
-    ```sh
-    homeport server cloudflare
-    ```
-  </Step>
-  <Step title="Opt the app in">
-    ```yaml title="homeport.yaml"
-    cloudflare: true
-    ```
-  </Step>
-  <Step title="Deploy">
-    ```sh
-    homeport deploy
-    ```
-  </Step>
-  <Step title="Lock the origin (optional)">
-    ```sh
-    homeport server firewall allow cloudflare
-    ```
-  </Step>
+1. **Set up the server**
+
+   ```sh
+   homeport server cloudflare
+   ```
+
+2. **Opt the app in**
+
+   ```yaml title="homeport.yaml"
+   cloudflare: true
+   ```
+
+3. **Deploy**
+
+   ```sh
+   homeport deploy
+   ```
+
+4. **Lock the origin (optional)**
+
+   ```sh
+   homeport server firewall allow cloudflare
+   ```
 </Steps>
 
 ## Encrypted Client Hello

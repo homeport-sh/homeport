@@ -1,0 +1,26 @@
+---
+title: homeport
+description: Deploy single-binary web apps to your own VPS — no Docker, no registry, nothing on the server but your binary.
+template: splash
+hero:
+  tagline: Deploy single-binary web apps to your own VPS. No Docker, no registry, no runtime on the server. One command hardens a fresh box; one command deploys.
+  actions:
+    - text: Get started
+      link: /quick-start/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/homeport-sh/homeport
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why binaries
+
+<CardGrid>
+	<Card title="Nothing on the server">The box runs SSH and Caddy; your app is one executable behind a health check.</Card>
+	<Card title="Atomic deploys">Upload beside the old release, health-check, flip a symlink. Rollback is flipping it back.</Card>
+	<Card title="Hardened by default">Bootstrap sets up key-only SSH, no root login, a firewall, fail2ban, auto security updates.</Card>
+	<Card title="Your keys, your box">Secrets travel over ssh stdin, never argv or git. A leaked CI key is scoped to one app.</Card>
+</CardGrid>
