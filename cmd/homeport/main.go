@@ -33,6 +33,8 @@ func main() {
 		err = cmdDeploy(rest)
 	case "rollback":
 		err = cmdRollback(rest)
+	case "remove":
+		err = cmdRemove(rest)
 	case "secrets":
 		err = cmdSecrets(rest)
 	case "apps":
@@ -79,6 +81,17 @@ func hasFlag(args []string, flag string) bool {
 	return false
 }
 
+// withoutFlag returns args with every occurrence of flag removed.
+func withoutFlag(args []string, flag string) []string {
+	out := args[:0:0]
+	for _, a := range args {
+		if a != flag {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func usage() {
 	fmt.Print(`homeport — deploy single-binary web apps to your own VPS
 
@@ -92,6 +105,7 @@ setup (once per project):
 everyday:
   homeport deploy [--no-build]     build → upload → health-checked activate (auto-reverts)
   homeport rollback [release]      instant rollback to the previous (or given) release
+  homeport remove [app]            delete an app + its releases, env, and user (confirms; --yes to skip)
   homeport secrets set K=V ...     set/update env values (merge)
   homeport secrets rm KEY ...      remove env values
   homeport secrets push [file|-]   merge a .env file or stdin (CI-friendly)
@@ -105,7 +119,7 @@ everyday:
   homeport mcp                  serve the CLI as MCP tools (stdio) for AI agents
   homeport tls set <cert> <key> serve a bring-your-own cert (with tls: manual) — e.g. behind a proxy
   homeport server update        push this CLI's bundled homeportd to the box
-  homeport server cloudflare    one-shot behind-Cloudflare setup: DNS plugin + token + provider
+  homeport server cloudflare    one-shot behind-Cloudflare setup: DNS plugin + token + provider (--lock also firewalls to CF)
   homeport server plugins       add/rm Caddy plugins (official caddyserver.com builds, no toolchain)
   homeport server firewall      restrict 80/443 to CIDRs (allow cloudflare = CF edge ranges) — SSH untouched
   homeport server caddy-env     set DNS-provider tokens for tls: dns:<provider> (DNS-01 certs)

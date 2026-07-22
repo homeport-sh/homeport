@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func cmdDeploy(args []string) error {
@@ -78,4 +80,62 @@ func cmdRollback(args []string) error {
 		homeportdArgs = append(homeportdArgs, args[0])
 	}
 	return sshRun(cfg.Server, cfg.homeportd(homeportdArgs...))
+}
+
+// cmdRemove deletes an app and everything it owns — releases, env, systemd
+// units, and its user. Destructive and irreversible, so it confirms by having
+// you retype the app name (unless --yes). With no app argument it removes the
+// app defined by the local homeport.yaml; you can also name an app explicitly
+// (handy from outside its project dir) and point it at a box with deploy@host.
+//
+//	homeport remove [app] [deploy@host] [--yes]
+func cmdRemove(args []string) error {
+	yes := hasFlag(args, "--yes")
+	args = withoutFlag(args, "--yes")
+
+	var explicitHost string
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		explicitHost, args = args[n-1], args[:n-1]
+	}
+
+	var app, server string
+	switch len(args) {
+	case 0: // fall back to the local project config
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		app, server = cfg.App, cfg.Server
+		if explicitHost != "" {
+			server = normalizeServer(explicitHost)
+		}
+	case 1: // explicit app name
+		app = args[0]
+		if !appRe.MatchString(app) {
+			return fmt.Errorf("invalid app name %q (lowercase letters, digits, dashes)", app)
+		}
+		if explicitHost != "" {
+			server = normalizeServer(explicitHost)
+		} else {
+			cfg, err := loadConfig()
+			if err != nil {
+				return fmt.Errorf("removing %q needs a server — pass deploy@host, or run inside its project dir (%w)", app, err)
+			}
+			server = cfg.Server
+		}
+	default:
+		return fmt.Errorf("usage: homeport remove [app] [deploy@host] [--yes]")
+	}
+	if err := validServer(server); err != nil {
+		return err
+	}
+
+	if !yes {
+		fmt.Fprintf(os.Stderr, "This permanently removes app %q and all its releases, env, and user on %s.\nType the app name to confirm: ", app, server)
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if strings.TrimSpace(line) != app {
+			return fmt.Errorf("aborted — the name did not match")
+		}
+	}
+	return sshRun(server, "sudo /usr/local/bin/homeportd remove "+app+" --yes")
 }

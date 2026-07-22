@@ -412,3 +412,15 @@ func TestDashIfEmpty(t *testing.T) {
 		t.Errorf("dashIfEmpty wrong")
 	}
 }
+
+func TestWithoutFlag(t *testing.T) {
+	got := withoutFlag([]string{"a", "--lock", "b", "--lock"}, "--lock")
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("withoutFlag should drop every --lock, got %v", got)
+	}
+	// no-op when the flag is absent (and must not alias/mutate the input)
+	in := []string{"deploy@1.2.3.4"}
+	if out := withoutFlag(in, "--lock"); len(out) != 1 || out[0] != "deploy@1.2.3.4" {
+		t.Errorf("withoutFlag with no match should return args unchanged, got %v", out)
+	}
+}

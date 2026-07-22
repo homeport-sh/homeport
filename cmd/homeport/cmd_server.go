@@ -28,7 +28,7 @@ import (
 // `plugins` swaps Caddy for an official caddyserver.com build with the named
 // plugin modules baked in (nothing compiles on the box).
 func cmdServer(args []string) error {
-	const use = "usage: homeport server <update | cloudflare | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals> [deploy@host]"
+	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals> [deploy@host]"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", use)
 	}
@@ -217,12 +217,14 @@ func cmdServerFirewall(args []string) error {
 // that let apps use `cloudflare: true` (DNS-01 certs) and, optionally, ECH. It
 // composes the existing generic verbs; the token travels over ssh stdin only.
 func cmdServerCloudflare(args []string) error {
+	lock := hasFlag(args, "--lock")
+	args = withoutFlag(args, "--lock")
 	host := []string{}
 	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
 		host, args = args[n-1:], args[:n-1]
 	}
 	if len(args) != 0 {
-		return fmt.Errorf("usage: homeport server cloudflare [deploy@host]")
+		return fmt.Errorf("usage: homeport server cloudflare [--lock] [deploy@host]")
 	}
 	target, err := serverTarget(host)
 	if err != nil {
@@ -250,9 +252,31 @@ func cmdServerCloudflare(args []string) error {
 		return err
 	}
 
+	// --lock is opt-in because restricting 80/443 to Cloudflare drops all other
+	// traffic — it breaks any grey/direct app and any app still on HTTP-01. Only
+	// safe when the whole box serves through the proxy, so it's never the default.
+	if lock {
+		step("locking the origin to Cloudflare's edge ranges (80/443)")
+		data, err := fetchCloudflareCIDRs()
+		if err != nil {
+			return err
+		}
+		cidrs, err := parseCIDRList(data)
+		if err != nil {
+			return err
+		}
+		if err := sshRunIn(target, hd+"firewall-set", strings.Join(cidrs, "\n")+"\n"); err != nil {
+			return err
+		}
+	}
+
 	fmt.Fprintln(os.Stderr, "\ncloudflare ready. Next:")
 	fmt.Fprintln(os.Stderr, "  • add `cloudflare: true` to each app's homeport.yaml (DNS-01 certs that survive the proxy)")
-	fmt.Fprintln(os.Stderr, "  • lock the origin to Cloudflare:  homeport server firewall allow cloudflare")
+	if lock {
+		fmt.Fprintln(os.Stderr, "  • origin locked to Cloudflare — reopen with `homeport server firewall clear`")
+	} else {
+		fmt.Fprintln(os.Stderr, "  • lock the origin to Cloudflare:  homeport server cloudflare --lock  (or `server firewall allow cloudflare`)")
+	}
 	fmt.Fprintln(os.Stderr, "  • optional privacy:  homeport server ech <public-name>")
 	return nil
 }
