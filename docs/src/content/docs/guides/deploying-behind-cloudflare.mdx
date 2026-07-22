@@ -1,0 +1,102 @@
+---
+title: Deploying behind Cloudflare
+description: Run an app behind the Cloudflare proxy — DNS-01 certs, one-command setup, and an origin locked to Cloudflare's edge.
+sidebar:
+  order: 1
+---
+
+Putting an app behind Cloudflare's proxy (orange-cloud) means Cloudflare
+terminates TLS at the edge, so the usual HTTP-01 certificate challenge can't
+reach your origin. homeport handles this with **DNS-01 certificates** — Caddy
+proves ownership through the DNS API — plus a one-command setup and an optional
+origin firewall.
+
+## One-command server setup
+
+`server cloudflare` does the three server-side steps at once: installs the
+`caddy-dns/cloudflare` plugin, stores your DNS token, and sets Cloudflare as
+the global DNS provider.
+
+```sh
+homeport server cloudflare        # paste a Zone → DNS → Edit token, press Enter
+```
+
+The token travels over ssh **stdin** — never argv, never logs, never git — and
+lives root-owned on the box.
+
+<Aside type="tip" title="Creating the token">
+  In the Cloudflare dashboard: **My Profile → API Tokens → Create Token**, with
+  permissions **Zone → Zone → Read** and **Zone → DNS → Edit**, scoped to the
+  one zone.
+</Aside>
+
+## Opt each app in
+
+Add one line to the app's `homeport.yaml`:
+
+```yaml title="homeport.yaml"
+cloudflare: true
+```
+
+It's pure shorthand for `tls: dns:cloudflare` — DNS-01 certs that issue and
+renew straight through the proxy — and sets nothing else on your behalf.
+
+## Lock the origin to Cloudflare
+
+Running behind an edge proxy only helps if attackers can't skip it: your origin
+IP is usually in public DNS history. Restrict web ingress to Cloudflare's edge
+ranges in one step:
+
+```sh
+homeport server firewall allow cloudflare
+```
+
+This fetches Cloudflare's current published ranges (v4 + v6) and locks 80/443
+to them — dropped in the kernel before a handshake. **SSH is never touched**,
+so a bad policy can only break web traffic, not lock you out.
+
+<Aside type="caution" title="Certs still work — but only via DNS-01">
+  Once the origin only accepts Cloudflare traffic, Let's Encrypt can't reach it
+  over HTTP-01. That's exactly why you pair the firewall with `cloudflare: true`
+  (DNS-01) or `tls: manual`. homeport won't warn about `dns:` or `manual`
+  apps — only ones still on plain automatic HTTPS.
+</Aside>
+
+## The whole flow
+
+<Steps>
+  <Step title="Set up the server">
+    ```sh
+    homeport server cloudflare
+    ```
+  </Step>
+  <Step title="Opt the app in">
+    ```yaml title="homeport.yaml"
+    cloudflare: true
+    ```
+  </Step>
+  <Step title="Deploy">
+    ```sh
+    homeport deploy
+    ```
+  </Step>
+  <Step title="Lock the origin (optional)">
+    ```sh
+    homeport server firewall allow cloudflare
+    ```
+  </Step>
+</Steps>
+
+## Encrypted Client Hello
+
+For direct-served (grey-cloud) hosts, Caddy can also publish
+[Encrypted Client Hello](https://caddyserver.com/docs/caddyfile/options), which
+encrypts the SNI so the hostname a visitor opens doesn't leak. It needs the
+same DNS provider setup as above:
+
+```sh
+homeport server ech ech.example.com     # a "public name" you control
+```
+
+Proxied hosts get ECH from Cloudflare's edge automatically — `server ech` is
+for hosts you serve directly.

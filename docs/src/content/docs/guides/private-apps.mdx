@@ -1,0 +1,32 @@
+---
+title: Private apps
+description: Run an app with no public URL — loopback only, reached from other apps or over an SSH tunnel.
+sidebar:
+  order: 5
+---
+
+Omit `domain:` and set `internal: true` and the app binds to `127.0.0.1` with
+**no Caddy fragment and nothing on 80/443**.
+
+```yaml title="homeport.yaml"
+internal: true
+```
+
+Reach it two ways:
+
+- **From other apps on the box** — `http://127.0.0.1:<port>` (service-to-service).
+- **From your laptop** — `homeport tunnel` forwards a local port over SSH:
+
+```sh
+homeport tunnel            # → http://localhost:<port>  (Ctrl-C to close)
+homeport tunnel 8080       # pick the local port
+```
+
+`homeport tunnel` works for public apps too, when you want private access
+without going through the internet.
+
+<Aside type="note" title="Internal apps scale too">
+  An internal app can run `replicas` — Caddy load-balances it on loopback, so
+  callers keep using `127.0.0.1:<port>` but get HA and more cores. See
+  [Resources & scaling](/guides/resources-and-scaling).
+</Aside>

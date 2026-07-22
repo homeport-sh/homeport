@@ -1,0 +1,74 @@
+---
+title: Configuration
+description: Every homeport.yaml field in one place — the full reference.
+sidebar:
+  order: 4
+---
+
+`homeport init` writes a commented starter; this is the complete field set.
+Fields marked † expand `${VAR}` from the environment at load time (a
+referenced-but-unset variable is a hard error).
+
+| Field | Default | What it does |
+|---|---|---|
+| `app` † | — | app name (lowercase, digits, dashes, ≤20 chars) |
+| `server` † | — | `deploy@host` (a bare host defaults the user to `deploy@`) |
+| `domain` † | — | public hostname(s) — a string, comma list, or YAML list; the **first is canonical**, the rest serve the same app (a cert each). Omit for internal |
+| `redirect_from` | — | domains that **301** to the canonical domain (www → apex, old brand domains) |
+| `internal` | `false` | private app — loopback only, reached via `homeport tunnel` |
+| `path` † | — | mount under a shared `domain` (API gateway); prefix is stripped |
+| `static` | — | serve a directory of files via Caddy (no process) |
+| `spa` | *(auto)* | `true`/`false` override the SPA catch-all fallback for `static` |
+| `build.command` | `bun run build`¹ | build step run locally / in CI |
+| `build.artifact` | `server` | path to the Linux binary the build produces |
+| `health.path` | `/` | must return 200 before a release is promoted |
+| `health.timeout` | `30s` | how long to wait for that 200 |
+| `run` | — | launch args appended to the binary; `$PORT`/`$HOST` substituted |
+| `release` | — | pre-activate hook (migrations) — fails the deploy if it fails |
+| `post_release` | — | post-activate hook (best-effort; warns, never reverts) |
+| `resources.memory` † | — | cgroup cap, e.g. `512M`, `1G` |
+| `resources.cpu` † | — | cgroup cap, e.g. `150%` (= 1.5 cores) |
+| `idle` | `false` | scale-to-zero (socket-activated); with `idle_timeout` † (`5m`) |
+| `replicas` | `1` | fixed instance count (1–20), load-balanced + rolling |
+| `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
+| `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
+| `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
+| `tls` | `auto` | `manual` (cert via `homeport tls set`) or `dns:<provider>` (DNS-01 via a caddy-dns plugin) |
+| `dns_token_env` † | `HOMEPORT_DNS_<PROVIDER>` | env var holding the DNS token for `tls: dns:*`; `none` for SDK-env providers |
+| `cloudflare` | `false` | shorthand for `tls: dns:cloudflare` (DNS-01 certs that survive the CF proxy) |
+| `headers` | — | opt-in response headers (a `Name: value` map) — homeport sets none on its own |
+
+¹ `build.command` / `build.artifact` default only for binary apps; a `static`
+site has no build step by default.
+
+<Aside type="note" title="Secrets aren't in this file">
+  Secrets go through `homeport secrets` and live only on the server — never in
+  `homeport.yaml`. See [Commands](/reference/commands).
+</Aside>
+
+`idle`, `replicas`, and `autoscale` are mutually exclusive scaling axes — pick
+one.
+
+## A minimal example
+
+```yaml title="homeport.yaml"
+app: web
+server: deploy@203.0.113.9
+domain: example.com
+build:
+  command: go build -o server .
+health:
+  path: /healthz
+```
+
+## Behind Cloudflare
+
+```yaml title="homeport.yaml"
+app: web
+server: deploy@203.0.113.9
+domain: [example.com, www.example.com]
+cloudflare: true          # DNS-01 certs that renew through the proxy
+```
+
+See [Deploying behind Cloudflare](/guides/deploying-behind-cloudflare) for the
+one-command server setup that makes `cloudflare: true` work.

@@ -1,0 +1,44 @@
+---
+title: Installation
+description: Install the homeport CLI on macOS or Linux — Homebrew, a one-line script, or a prebuilt binary.
+sidebar:
+  order: 2
+---
+
+`homeport` runs on your laptop or CI. The server needs nothing installed but
+SSH — the CLI does everything else over the wire.
+
+## Homebrew (macOS / Linux)
+
+```sh
+brew install homeport-sh/tap/homeport
+```
+
+Upgrades come through `brew upgrade homeport`.
+
+## Install script (Linux / macOS)
+
+```sh
+curl -fsSL https://homeport.sh/install | sh
+```
+
+## Prebuilt binary
+
+Grab the archive for your OS and architecture from the
+[releases page](https://github.com/homeport-sh/homeport/releases), unpack it,
+and put `homeport` on your `PATH`. Builds ship for macOS and Linux on both
+`amd64` and `arm64`.
+
+<Aside type="tip" title="Verify it">
+  Run `homeport version` — it prints the CLI version, which tracks the release
+  tag exactly.
+</Aside>
+
+## What runs where
+
+| Machine | Needs |
+|---|---|
+| Your laptop / CI | the `homeport` CLI |
+| The server | SSH only (Caddy + the `homeportd` helper are installed by `bootstrap`) |
+
+Next: go from a bare VPS to a live app in [Quick start](/quick-start).

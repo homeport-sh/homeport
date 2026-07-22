@@ -1,0 +1,30 @@
+# homeport deploy config for the docs site — safe to commit.
+# Served static (Astro build → a folder of files → Caddy file_server, no
+# process on the box). docs.homeport.sh is proxied through Cloudflare (the
+# *.homeport.sh wildcard is orange-cloud, SSL mode Full strict), so the origin
+# cert comes via DNS-01 — `cloudflare: true` (dogfooding homeport's own
+# Cloudflare preset; same effect as the website's tls: dns:cloudflare).
+app: docs
+server: deploy@116.203.183.59
+domain: docs.homeport.sh
+cloudflare: true
+
+static: ./dist
+
+# Opt-in response headers (homeport sets none on its own), keyed by path glob.
+# "/*" = every response: the same security set the website uses. The Astro
+# content-hashed asset dir (/_astro/*, filenames carry a hash) gets a 1-year
+# immutable cache; HTML, /fonts (not hashed), and /pagefind (search index,
+# rebuilt each deploy) deliberately do NOT, so new content shows up immediately.
+headers:
+  "/*":
+    Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options: nosniff
+    X-Frame-Options: SAMEORIGIN
+    Referrer-Policy: strict-origin-when-cross-origin
+    Cross-Origin-Opener-Policy: same-origin
+  "/_astro/*":
+    Cache-Control: "public, max-age=31536000, immutable"
+
+build:
+  command: bun run build

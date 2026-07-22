@@ -1,0 +1,95 @@
+---
+title: Resources & scaling
+description: cgroup limits, scale-to-zero, replicas, blue/green deploys, and CPU autoscaling.
+sidebar:
+  order: 9
+---
+
+Everything here is optional — an app runs as a single always-on instance with
+no limits by default.
+
+## Resource limits
+
+```yaml title="homeport.yaml"
+resources:
+  memory: 512M   # hard cap; throttled at 90%, OOM-killed at 100%
+  cpu: 150%      # 150% = 1.5 cores
+```
+
+These become systemd cgroup directives (`MemoryMax` / `MemoryHigh` /
+`CPUQuota`) — the same kernel mechanism Docker uses for `--memory` / `--cpus`.
+Omit the block for no limits. `homeport stats` shows the cap next to live usage.
+
+## Scale to zero
+
+```yaml title="homeport.yaml"
+idle: true
+idle_timeout: 5m   # default 5m
+```
+
+For **low-traffic** apps. systemd holds the app's port and starts the binary on
+the first request, then stops it after `idle_timeout` of no traffic — **zero RAM
+while asleep**, so a box can hold far more mostly-idle apps. Implemented with
+systemd socket activation + `systemd-socket-proxyd`, so it works for any binary.
+
+The first request after idle pays the cold-start (fast for Go, ~1s for a big
+JS-framework binary).
+
+<Aside type="caution">
+  Don't use `idle` on a busy or latency-sensitive app — it never idles out
+  anyway, and you'd just add a proxy hop. Always-on apps (the default) bind the
+  port directly, no proxy.
+</Aside>
+
+## Replicas & rolling deploys
+
+```yaml title="homeport.yaml"
+replicas: 3
+```
+
+Runs N instances (systemd template units), load-balanced by Caddy (`least_conn`
++ passive health checks that pull a dead replica out). Deploys become **rolling
+and zero-downtime**: instances restart one at a time, health-checked, while the
+others keep serving.
+
+Works for **public and internal apps alike** — a public app is balanced behind
+its domain; an internal app is balanced on loopback, so callers keep using
+`127.0.0.1:<port>` but get HA and more cores. Size replicas to the box's cores;
+they mainly help single-process runtimes (Node/Bun) use more cores. Mutually
+exclusive with `idle`.
+
+## Zero-downtime activation (blue/green)
+
+A single-instance **public** app deploys **blue/green by default** — no config.
+The new release starts on a private port while the old one keeps serving; once
+it passes its health check, Caddy flips to it and the old instance retires.
+Traffic never drops; an unhealthy release never gets the flip (verified: 0/400
+requests dropped across a live flip).
+
+Two instances coexist for a few seconds during each deploy — fine for stateless
+web apps, but a **singleton** (holds an exclusive lock, or a scheduler that must
+never double-run) can't tolerate it:
+
+```yaml title="homeport.yaml"
+strategy: recreate   # restart in place (brief downtime, never 2 at once)
+```
+
+Multi-instance apps already deploy rolling; internal and path-mounted
+single-instance apps restart in place (give them `replicas: 2` for
+zero-downtime); `idle` apps use socket activation.
+
+## Autoscaling
+
+```yaml title="homeport.yaml"
+autoscale:
+  min: 1
+  max: 4
+  target_cpu: 70   # scale up above, down below; default 70
+```
+
+A systemd timer samples each replica's CPU every 20s and adjusts the running
+count between `min` and `max`, with hysteresis and a 60s cooldown so it can't
+flap. **Scales on CPU, not memory** — replicas add cores, so CPU is the signal
+scaling actually relieves. Most useful for single-process runtimes (Node/Bun):
+idle runs `min` replicas, load bursts to `max`. Ceiling is the box's cores.
+Mutually exclusive with `idle` and fixed `replicas`.

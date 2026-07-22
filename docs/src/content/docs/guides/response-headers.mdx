@@ -1,0 +1,35 @@
+---
+title: Response headers
+description: Opt in to security and cache headers, path-scoped — homeport sets none on your behalf.
+sidebar:
+  order: 6
+---
+
+homeport never sets response headers on your behalf — no security or cache
+headers are forced onto your app. If you want them, opt in with a `headers:`
+map, keyed by **path glob** then header name, emitted verbatim on the app's site
+(static or proxied).
+
+```yaml title="homeport.yaml"
+headers:
+  "/*": # every response
+    Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+    X-Frame-Options: SAMEORIGIN
+    X-Content-Type-Options: nosniff
+  "/_astro/*": # content-hashed assets — safe to cache forever
+    Cache-Control: "public, max-age=31536000, immutable"
+```
+
+`"/*"` applies to every response; any other glob scopes the headers to matching
+paths. Path-scoping is what lets you long-cache fingerprinted assets *without*
+caching your HTML, so deploys still show up immediately.
+
+<Aside type="caution" title="Match your framework's asset path">
+  The content-hashed directory differs by tool — `/_astro/*` for Astro,
+  `/_app/immutable/*` for SvelteKit, `/assets/*` for many Vite builds. Point the
+  immutable rule at whichever your build actually emits, or it caches nothing.
+</Aside>
+
+Globs, names, and values are validated against injection into the generated
+Caddy config: a name is a plain token, a value is one line without `"`, `\`,
+`{`, or `}`.

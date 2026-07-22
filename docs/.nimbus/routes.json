@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "base": "/",
+  "knownRoutes": [
+    "/",
+    "/configuration",
+    "/guides/databases",
+    "/guides/deploying-behind-cloudflare",
+    "/guides/multiple-domains",
+    "/guides/path-routing",
+    "/guides/private-apps",
+    "/guides/resources-and-scaling",
+    "/guides/response-headers",
+    "/guides/static-sites",
+    "/guides/tls-certificates",
+    "/guides/web-firewall",
+    "/installation",
+    "/introduction",
+    "/quick-start",
+    "/reference/commands"
+  ],
+  "opaqueNamespaces": []
+}

@@ -1,0 +1,26 @@
+---
+title: Databases
+description: homeport is app-tier only — connect to any managed database with a connection string in secrets.
+sidebar:
+  order: 10
+---
+
+homeport is **app-tier only** — it deploys your binary; the database lives
+elsewhere. That's the model: the box is cattle, state is not on it. You connect
+via a **connection string in secrets**, the universal interface to every
+provider:
+
+```sh
+homeport secrets set DATABASE_URL="postgres://user:pass@host/db?sslmode=require"
+```
+
+That one line works with **Neon, Supabase, PlanetScale, Turso, DigitalOcean
+managed DB, RDS — anything** — with no provider-specific setup. homeport
+intentionally has **no per-provider integration and no backup feature**: those
+balloon into per-vendor, per-engine surface for marginal value.
+
+<Aside type="tip" title="Locking down access">
+  Allowlist the box's IP in your database provider's firewall / trusted sources,
+  and prefer `sslmode=require` (or stricter) so the connection is encrypted in
+  transit.
+</Aside>

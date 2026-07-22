@@ -1,0 +1,65 @@
+---
+title: Commands
+description: The full homeport CLI surface — deploy, secrets, status, and server management.
+sidebar:
+  order: 1
+---
+
+## Core
+
+| Command | What it does |
+|---|---|
+| `homeport bootstrap root@<ip>` | harden a fresh Ubuntu VPS, install Caddy + homeportd |
+| `homeport init` | write `homeport.yaml`, auto-detecting the project type |
+| `homeport deploy [--no-build]` | build → upload → activate with a health check; auto-reverts on failure |
+| `homeport rollback [release]` | instant rollback (old binaries are kept on the box) |
+| `homeport status [--json]` | state, live release, available releases |
+| `homeport apps [server] [--json]` | fleet view: every app on a server (no project dir needed) |
+| `homeport stats` | live resource usage — app memory/cpu/tasks, releases disk, host headroom |
+| `homeport logs [-f] [-n N]` | app logs (journald) |
+| `homeport tunnel [localPort]` | forward a local port to the app (private / internal apps) |
+
+## Secrets
+
+Values are sent over ssh stdin, never argv, and live only on the server.
+
+| Command | What it does |
+|---|---|
+| `homeport secrets set K=V ...` | set env values |
+| `homeport secrets rm KEY ...` | remove keys from the app's env |
+| `homeport secrets push [file\|-]` | merge a whole `.env` file (or stdin) into the env |
+| `homeport secrets sync [file\|-]` | declarative full replace — drops keys not in the input |
+| `homeport secrets list [--json]` | list env keys; values never leave the server |
+
+## Server management
+
+| Command | What it does |
+|---|---|
+| `homeport server update` | push this CLI's bundled homeportd to the box |
+| `homeport server cloudflare` | one-shot behind-Cloudflare setup: DNS plugin + token + provider |
+| `homeport server plugins [add\|rm …]` | manage Caddy plugins (official caddyserver.com builds, no toolchain) |
+| `homeport server firewall [allow <file\|cloudflare>\|clear]` | restrict 80/443 to CIDR ranges — SSH untouched |
+| `homeport server caddy-env <NAME>` | set DNS-provider tokens for `tls: dns:<provider>` |
+| `homeport server dns <provider>` | global DNS module for DNS-01 certs + ECH publication |
+| `homeport server ech <public-name>` | Encrypted Client Hello (needs `server dns`) |
+
+## Certificates & lifecycle
+
+| Command | What it does |
+|---|---|
+| `homeport tls set <cert> <key>` | serve a bring-your-own cert (with `tls: manual`) |
+| `homeport tls clear` | revert to automatic HTTPS |
+| `homeport ci setup github` | dedicated CI deploy key + pinned host key + Actions workflow |
+| `homeport mcp` | serve these commands as MCP tools (stdio) for AI agents |
+| `ssh deploy@<ip> sudo homeportd remove <app> --yes` | delete an app, its releases, env, and user |
+
+## Trust model
+
+A full-access deploy key can run any homeportd command (including
+`server update`, which replaces the root-side helper) — so it's an admin
+credential for its box; treat it like a root key.
+
+CI keys are different: `homeport ci setup` issues a key **scoped to one app**
+via an SSH forced command — it can deploy and manage that app and *nothing
+else* (no `remove`, no `self-update`, no other app, no shell). A leaked CI key
+can't take the box.

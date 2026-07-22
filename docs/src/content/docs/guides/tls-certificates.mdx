@@ -1,0 +1,60 @@
+---
+title: TLS certificates
+description: Automatic HTTPS by default, plus bring-your-own certs and DNS-01 for any provider.
+sidebar:
+  order: 7
+---
+
+By default Caddy provisions a Let's Encrypt cert automatically over HTTP-01 —
+nothing to configure. Two other modes cover the cases automatic HTTPS can't.
+
+## Bring your own cert
+
+Automatic HTTPS can't work when something in front of your box **terminates
+TLS** — most commonly a Cloudflare proxy (orange-cloud). Serve a cert you
+provide instead:
+
+```yaml title="homeport.yaml"
+tls: manual   # serve an uploaded cert, don't provision one via ACME
+```
+
+Then upload the cert + key — they travel over ssh **stdin**, never argv; the
+private key is treated like a secret:
+
+```sh
+homeport tls set fullchain.pem privkey.pem   # e.g. a Cloudflare Origin Certificate
+homeport tls clear                           # revert to automatic HTTPS
+```
+
+homeport never installs a cert on its own — this is entirely opt-in. Pair it
+with Cloudflare's SSL/TLS mode set to **Full (strict)**. (`tls: manual` needs a
+public domain — not for internal or path-mounted apps.)
+
+## DNS-01 certificates (any provider)
+
+Instead of a hand-managed cert, let Caddy issue **real, auto-renewing Let's
+Encrypt certs via DNS-01** — it proves ownership by writing a TXT record through
+your DNS provider's API, so it works behind a TLS-terminating proxy. Generic
+across every [caddy-dns](https://github.com/caddy-dns) provider:
+
+```sh
+homeport server plugins add github.com/caddy-dns/cloudflare   # 1. the provider plugin
+homeport server caddy-env HOMEPORT_DNS_CLOUDFLARE             # 2. API token (via stdin)
+```
+
+```yaml title="homeport.yaml"
+tls: dns:cloudflare        # 3. per app — or dns:digitalocean, dns:route53, …
+```
+
+The token env var defaults to `HOMEPORT_DNS_<PROVIDER>`; set `dns_token_env:` to
+use a different name, or `dns_token_env: none` for providers that read standard
+SDK env vars (e.g. route53 with `AWS_ACCESS_KEY_ID` — set those via `caddy-env`
+too). Tokens travel over ssh stdin, live root-owned on the box, and reach Caddy
+through a systemd `EnvironmentFile` — never argv, never git. Use a token scoped
+to DNS-edit on the one zone.
+
+<Aside type="tip" title="On Cloudflare?">
+  `cloudflare: true` is shorthand for `tls: dns:cloudflare`, and
+  `homeport server cloudflare` does the plugin + token + provider setup in one
+  command — see [Deploying behind Cloudflare](/guides/deploying-behind-cloudflare).
+</Aside>

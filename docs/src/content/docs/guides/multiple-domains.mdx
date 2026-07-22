@@ -1,0 +1,31 @@
+---
+title: Multiple domains & redirects
+description: Serve one app on several hostnames, and 301 www or brand domains to a canonical one.
+sidebar:
+  order: 3
+---
+
+`domain:` takes one or more hostnames — the first is canonical, the rest serve
+the same app (Caddy issues a cert per hostname). `redirect_from:` lists domains
+that **301** to the canonical one instead of serving.
+
+```yaml title="homeport.yaml"
+domain: example.com                 # or: [example.com, example.net]
+redirect_from: [www.example.com]    # www → apex, path preserved
+```
+
+## Which to use
+
+- **`redirect_from`** for www/canonical variants. Serving identical content on
+  two hostnames splits your search ranking, so send one to the other.
+- **Multiple `domain:` entries** only when the app genuinely lives on several
+  domains and each should serve.
+
+Both lists are owned by the app — certs and redirects are created with it and
+removed with it, and no other app on the box can claim those hostnames.
+
+<Aside type="tip" title="Behind Cloudflare">
+  When the zone is proxied, remember each served hostname needs a DNS-01 origin
+  cert — set `cloudflare: true`. See
+  [Deploying behind Cloudflare](/guides/deploying-behind-cloudflare).
+</Aside>

@@ -1,0 +1,63 @@
+---
+title: Introduction
+description: Deploy single-binary web apps to your own VPS — no Docker, no registry, nothing on the server but your binary.
+sidebar:
+  order: 1
+  badge: Start here
+---
+
+homeport deploys single-binary web apps — Go, Rust, `bun --compile`, anything
+that ships as one executable — to your own VPS. No Docker, no registry, no
+agent, no runtime installed on the server. One command hardens a fresh box;
+one command deploys.
+
+```sh
+homeport bootstrap root@1.2.3.4    # once per server
+homeport init                      # once per project
+homeport secrets push .env         # if you have secrets
+homeport deploy                    # build → upload → health-checked activate
+```
+
+A €4/mo Hetzner box comfortably hosts a dozen apps this way.
+
+## Why binaries
+
+The artifact you tested is byte-for-byte the artifact that runs. Deploys are a
+file copy plus a symlink flip: atomic, instantly rollback-able, and the server
+needs nothing installed — no Node, no Bun, no Go, no `apt install` drift.
+
+<CardGrid>
+  <Card title="Nothing on the server" icon="ph:hard-drives">
+    The box runs SSH and Caddy. Your app is one executable behind a health
+    check. No daemon of ours runs as root beyond a tightly-scoped helper.
+  </Card>
+  <Card title="Atomic deploys" icon="ph:swap">
+    Upload the new release next to the old one, health-check it, then flip a
+    symlink. Rollback is flipping it back — old releases stay on the box.
+  </Card>
+  <Card title="Hardened by default" icon="ph:shield-check">
+    `bootstrap` sets up key-only SSH, no root login, a firewall, fail2ban, and
+    automatic security updates before anything ships.
+  </Card>
+  <Card title="Your keys, your box" icon="ph:key">
+    Secrets travel over ssh stdin, never argv or git. A leaked CI key is scoped
+    to one app and can't take the server.
+  </Card>
+</CardGrid>
+
+## Where to next
+
+<CardGrid>
+  <Card title="Install" icon="ph:download">
+    Get the `homeport` CLI on your laptop or CI — see [Installation](/installation).
+  </Card>
+  <Card title="Quick start" icon="ph:rocket-launch">
+    Never touched a VPS? Go from a bare box to a live app — see [Quick start](/quick-start).
+  </Card>
+  <Card title="Configuration" icon="ph:file-text">
+    Every `homeport.yaml` field in one table — see [Configuration](/configuration).
+  </Card>
+  <Card title="Commands" icon="ph:terminal">
+    The full CLI surface — see [Commands](/reference/commands).
+  </Card>
+</CardGrid>

@@ -1,0 +1,44 @@
+---
+title: Static sites
+description: Serve a folder of files — SPA, docs, or landing page — with no process on the box.
+sidebar:
+  order: 2
+---
+
+A folder of files — an SPA, a docs site, a landing page — needs no process at
+all. Point `static:` at the built directory and Caddy serves it directly
+(automatic HTTPS, compression, ETags), so there's *nothing* running on the box
+but the file server.
+
+```yaml title="homeport.yaml"
+app: docs
+domain: docs.example.com
+static: ./dist            # the built directory
+build:
+  command: npm run build  # optional — omit for plain HTML
+# spa: true               # optional override; auto-detected by default
+```
+
+`homeport deploy` builds (if `build.command` is set), tars the directory,
+streams it up, and flips an atomic symlink — the new files are live instantly,
+**zero downtime, no reload**. Rollback is a flip.
+
+## SPA vs multi-page is auto-detected
+
+Client-routed apps get the right catch-all fallback; static-per-route sites
+don't.
+
+| Your build | Detected | Behaviour |
+|---|---|---|
+| SvelteKit `adapter-static` (SPA) → `200.html` | **SPA** | unmatched routes serve the app shell |
+| Vite / CRA → lone `index.html` | **SPA** | ″ |
+| Next `output: export`, Astro, Hugo, Docusaurus → per-route `.html` | **multi-page** | clean URLs (`/about` → `about.html`); unmatched → 404 |
+
+Set `spa: true` / `false` to override.
+
+<Aside type="note" title="No process means no process knobs">
+  Static apps are public (a domain, no `internal`) and have nothing running, so
+  `run`, `idle`, `replicas`, `autoscale`, `sandbox`, and `resources` don't
+  apply. If your app needs SSR, API routes, or server functions, it isn't
+  static — deploy it as a **binary** (e.g. what `*-bun-compile` produces).
+</Aside>
