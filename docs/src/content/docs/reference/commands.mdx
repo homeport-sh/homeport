@@ -13,6 +13,7 @@ sidebar:
 | `homeport init` | write `homeport.yaml`, auto-detecting the project type |
 | `homeport deploy [--no-build]` | build → upload → activate with a health check; auto-reverts on failure |
 | `homeport rollback [release]` | instant rollback (old binaries are kept on the box) |
+| `homeport remove [app]` | delete an app + its releases, env, and user (confirms by retyping the name; `--yes` to skip) |
 | `homeport status [--json]` | state, live release, available releases |
 | `homeport apps [server] [--json]` | fleet view: every app on a server (no project dir needed) |
 | `homeport stats` | live resource usage — app memory/cpu/tasks, releases disk, host headroom |
@@ -36,7 +37,7 @@ Values are sent over ssh stdin, never argv, and live only on the server.
 | Command | What it does |
 |---|---|
 | `homeport server update` | push this CLI's bundled homeportd to the box |
-| `homeport server cloudflare` | one-shot behind-Cloudflare setup: DNS plugin + token + provider |
+| `homeport server cloudflare [--lock]` | one-shot behind-Cloudflare setup: DNS plugin + token + provider (`--lock` also firewalls 80/443 to Cloudflare) |
 | `homeport server plugins [add\|rm …]` | manage Caddy plugins (official caddyserver.com builds, no toolchain) |
 | `homeport server firewall [allow <file\|cloudflare>\|clear]` | restrict 80/443 to CIDR ranges — SSH untouched |
 | `homeport server caddy-env <NAME>` | set DNS-provider tokens for `tls: dns:<provider>` |

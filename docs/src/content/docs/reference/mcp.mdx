@@ -1,0 +1,65 @@
+---
+title: AI agents (MCP)
+description: Serve homeport's commands as Model Context Protocol tools so an AI agent can deploy, roll back, read logs, and manage secrets.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`homeport mcp` runs homeport as an [MCP](https://modelcontextprotocol.io) server
+over stdio, exposing its everyday commands as tools an AI agent can call — so an
+assistant can deploy, roll back, read logs, and manage secrets for you.
+
+```sh
+homeport mcp
+```
+
+It's **project-scoped**: every tool operates on the app defined by the
+`homeport.yaml` in the working directory the server is started from — the same
+model as the CLI. Deploys build locally and ship over your SSH access, exactly
+as if you ran the command yourself.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `status` | app state (systemd), domain/path, port, live + available releases |
+| `apps` | fleet view — every app on this project's server, with state and exposure |
+| `deploy` | build → upload → health-checked activate (auto-reverts on failure) |
+| `rollback` | instantly activate the previous release (or a specific one) |
+| `logs` | recent app logs from journald |
+| `stats` | live resource usage — app memory/cpu/tasks, releases disk, host headroom |
+| `secrets_list` | list env keys + value lengths (values never leave the server) |
+| `secrets_set` | set/update env values (merges; restarts a running app) |
+| `secrets_rm` | remove env keys (restarts a running app) |
+
+## Wiring it into a client
+
+Start the server from your project directory so it picks up the right
+`homeport.yaml`.
+
+**Claude Code:**
+
+```sh
+claude mcp add homeport -- homeport mcp
+```
+
+**Generic MCP client** (config JSON):
+
+```json
+{
+  "mcpServers": {
+    "homeport": {
+      "command": "homeport",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+<Aside type="caution" title="It has your access">
+  The MCP server runs the local `homeport` CLI, which uses your SSH key and can
+  deploy, change secrets, and roll back the project's app. Only connect it to an
+  agent you trust, and run it from the project directory you intend to manage.
+</Aside>

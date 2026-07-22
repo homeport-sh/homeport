@@ -208,7 +208,7 @@
 			<span>{install}</span>
 			<span class="ml-1 text-mist-dim">{copied ? '✓ copied' : '⧉'}</span>
 		</button>
-		<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
+		<a href="https://docs.homeport.sh" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
 			Read the docs →
 		</a>
 	</div>
@@ -492,7 +492,7 @@
 		</button>
 
 		<div class="mt-8 flex flex-wrap justify-center gap-3">
-			<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
+			<a href="https://docs.homeport.sh/quick-start" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
 				Get started →
 			</a>
 			<a href="#fleet" class="btn btn-ghost rounded-none">See the fleet</a>
