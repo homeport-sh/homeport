@@ -26,3 +26,27 @@ balloon into per-vendor, per-engine surface for marginal value.
   and prefer `sslmode=require` (or stricter) so the connection is encrypted in
   transit.
 </Aside>
+
+## Why no backup feature?
+
+Because a backup feature can't stay small. The moment homeport backs up SQLite,
+"homeport does backups" becomes the promise — and Postgres, MySQL, Redis,
+retention policies, and restore testing walk in behind it, each with its own
+tooling and failure modes. Backup is the worst feature to half-support: you
+find out it was broken on the day you needed it.
+
+So the line is drawn where it can hold: **homeport doesn't manage data.** Keep
+state in a managed database — you get point-in-time recovery, failover, and
+upgrades run by people whose whole job that is. The box stays disposable, and
+disaster recovery is already complete: `bootstrap` → `deploy` → point at your
+database. Nothing on the box was irreplaceable.
+
+## What about SQLite on the box?
+
+Running SQLite in your app's state directory works — it's just a file, and
+`$STATE_DIR` persists across deploys. But understand what you're opting into:
+the data now lives on a box homeport treats as disposable, and **homeport will
+not back it up**. If you go this route, own the data story yourself — your
+provider's VPS snapshots, or [Litestream](https://litestream.io) streaming the
+WAL to object storage. Both run fine alongside homeport; neither is managed by
+it.
