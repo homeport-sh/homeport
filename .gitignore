@@ -10,11 +10,4 @@ examples/**/*.bun-build
 examples/**/.tanstack
 
 # personal scratchpad
-todo.MD
-
-# private notes kept locally, never published (repo is public)
-docs-old/
-
-# backup of the abandoned Nimbus docs attempt (its source is in git history;
-# kept locally for reference, not re-committed)
-docs-nimbus/
+todo.md
