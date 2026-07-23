@@ -4,7 +4,7 @@ go 1.26.5
 
 require gopkg.in/yaml.v3 v3.0.1
 
-require golang.org/x/term v0.45.0 // indirect
+require golang.org/x/term v0.45.0
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect

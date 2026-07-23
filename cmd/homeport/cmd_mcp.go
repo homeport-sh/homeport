@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/term"
 )
 
 // cmdMCP serves the Homeport CLI over MCP (stdio), turning any MCP client
@@ -154,6 +156,14 @@ func cmdMCP(args []string) error {
 		}
 		return selfExec(ctx, 60*time.Second, append([]string{"secrets", "rm"}, args.Keys...)...)
 	})
+
+	// Run by hand in a terminal, this just waits silently for a client — which
+	// looks hung. Print a hint to stderr (never stdout — the protocol owns it)
+	// only when attached to a TTY, so it stays silent when a client pipes it in.
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintln(os.Stderr, "homeport MCP server — speaking MCP over stdin/stdout, waiting for a client.")
+		fmt.Fprintln(os.Stderr, "This isn't interactive; an MCP client (e.g. `claude mcp add homeport -- homeport mcp`) drives it. Ctrl-C to quit.")
+	}
 
 	// EOF on stdin is the normal client-initiated shutdown, not a failure.
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil && !errors.Is(err, io.EOF) {
