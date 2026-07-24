@@ -13,16 +13,15 @@ const config = defineConfig({
     devtools(),
     nitro({
       preset: "bun",
-      // Compiling to ONE binary (bun build --compile) means .output/public is
-      // left behind — so the public assets must live inside the server bundle.
-      // serveStatic:"inline" embeds them (served from memory, no disk needed),
-      // inlineDynamicImports collapses to a single entry bun --compile accepts,
-      // and compressPublicAssets pre-gzips them.
+      // Compiling to ONE binary (bun build --compile) leaves .output/public
+      // behind, so the public assets must live inside the server bundle.
+      // serveStatic:"inline" embeds them (served from memory, no disk needed);
+      // inlineDynamicImports collapses the output to the single entry file that
+      // bun --compile accepts. Both are top-level Nitro options.
       serveStatic: "inline",
-      compressPublicAssets: true,
+      inlineDynamicImports: true,
       rollupConfig: {
         external: [/^@sentry\//],
-        output: { inlineDynamicImports: true },
       },
     }),
     tailwindcss(),

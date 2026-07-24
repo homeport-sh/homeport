@@ -23,12 +23,13 @@ build:
   # bun-linux-arm64 for ARM servers, or drop --target when building on the same
   # architecture as the server (e.g. in CI).
   #
-  # The binary lands in dist/ (gitignored), NOT the project root: Nitro's
-  # convention dir is server/, so a root-level file named `server` shadows it
-  # and breaks the next build ("stream did not contain valid UTF-8").
-  command: bun --bun run build && bun build --compile --bytecode --production --minify --sourcemap --target=bun-linux-x64 --outfile dist/server .output/server/index.mjs
+  # The binary is named `app` and lands in dist/ (gitignored), deliberately:
+  # Nitro's convention dir is server/, so a root-level file named `server` would
+  # shadow it and break the next build ("stream did not contain valid UTF-8").
+  # dist/app sidesteps that entirely.
+  command: bun --bun run build && bun build --compile --bytecode --production --minify --sourcemap --target=bun-linux-x64 --outfile dist/app .output/server/index.mjs
   # path to the single Linux executable the build produces
-  artifact: dist/server
+  artifact: dist/app
 
 health:
   # a deploy is only promoted once this path returns 200 on the new binary

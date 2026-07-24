@@ -128,11 +128,21 @@ func detectProject() projectInfo {
 			// dev branches that reference unbundled deps like @vue/shared.
 			nitroBuild := "bun --bun run build && " +
 				"bun build --compile --bytecode --production --minify --sourcemap " +
-				"--target=bun-linux-x64 --outfile server .output/server/index.mjs"
+				"--target=bun-linux-x64 --outfile dist/app .output/server/index.mjs"
 			nitroNote := func(fw, presetHint string) string {
 				return `# ` + fw + ` builds through Nitro. This compiles the Nitro server
-# output into one binary, and REQUIRES the Nitro "bun" preset:
+# output into one binary, and REQUIRES three top-level Nitro options:
 #   ` + presetHint + `
+# preset:'bun' targets Bun; serveStatic:'inline' embeds .output/public into
+# the binary (without it, --compile drops that folder and CSS/JS 500 at
+# runtime); inlineDynamicImports:true collapses the output to the single
+# file --compile accepts.
+#
+# The binary is named 'app' and lands in dist/, deliberately: Nitro's
+# convention dir is server/, so a root-level file named 'server' would shadow
+# it and break the next build ("stream did not contain valid UTF-8"). dist/app
+# sidesteps that entirely (and matches every other homeport framework).
+#
 # --target=bun-linux-x64 cross-compiles for a standard x86-64 Linux box;
 # use bun-linux-arm64 for ARM servers, or drop --target when building on
 # the same architecture as the server (e.g. in CI).`
@@ -143,8 +153,8 @@ func detectProject() projectInfo {
 					kind:        "nuxt",
 					app:         sanitizeAppName(pkg.Name),
 					build:       nitroBuild,
-					artifact:    "server",
-					note:        nitroNote("Nuxt", `nitro: { preset: 'bun' }   // in nuxt.config.ts`),
+					artifact:    "dist/app",
+					note:        nitroNote("Nuxt", `nitro: { preset: 'bun', serveStatic: 'inline', inlineDynamicImports: true }   // in nuxt.config.ts`),
 					ciToolchain: bunCI,
 				}
 			}
@@ -154,8 +164,8 @@ func detectProject() projectInfo {
 					kind:        "tanstack-start",
 					app:         sanitizeAppName(pkg.Name),
 					build:       nitroBuild,
-					artifact:    "server",
-					note:        nitroNote("TanStack Start", `nitro({ preset: 'bun' })   // in vite.config.ts`),
+					artifact:    "dist/app",
+					note:        nitroNote("TanStack Start", `nitro({ preset: 'bun', serveStatic: 'inline', inlineDynamicImports: true })   // in vite.config.ts`),
 					ciToolchain: bunCI,
 				}
 			}
