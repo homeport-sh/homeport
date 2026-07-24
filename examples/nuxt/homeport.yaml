@@ -5,17 +5,30 @@ server: deploy@your-server-ip
 # private app: remove this line and set  internal: true  — the app binds to
 # loopback and is reached with  homeport tunnel , nothing on 80/443.
 domain: nuxt.example.com
+# Set this when the domain is proxied through Cloudflare (orange cloud): it's
+# shorthand for tls: dns:cloudflare, so Caddy issues/renews the origin cert via
+# DNS-01 (the proxy blocks the HTTP-01 challenge Caddy would otherwise use).
+# Drop it for a directly-resolving domain — TLS is automatic either way.
+cloudflare: true
 
 build:
-  # Nuxt builds through Nitro. This compiles the Nitro server
-  # output into one binary, and REQUIRES the Nitro "bun" preset:
-  #   nitro: { preset: 'bun' }   // in nuxt.config.ts
-  # --target=bun-linux-x64 cross-compiles for a standard x86-64 Linux box;
-  # use bun-linux-arm64 for ARM servers, or drop --target when building on
-  # the same architecture as the server (e.g. in CI).
-  command: bun --bun run build && bun build --compile --bytecode --production --minify --sourcemap --target=bun-linux-x64 --outfile server .output/server/index.mjs
+  # Nuxt builds through Nitro. This compiles the Nitro server output into one
+  # binary, and REQUIRES three top-level Nitro options (see nuxt.config.ts):
+  # nitro: { preset: 'bun', serveStatic: 'inline', inlineDynamicImports: true }.
+  # Without serveStatic:'inline' the binary ships without .output/public, so CSS
+  # /JS 500 on the server.
+  #
+  # --target=bun-linux-x64 cross-compiles for a standard x86-64 Linux box; use
+  # bun-linux-arm64 for ARM servers, or drop --target when building on the same
+  # architecture as the server (e.g. in CI).
+  #
+  # The binary is named `app` and lands in dist/ (gitignored), deliberately:
+  # Nitro's convention dir is server/, so a root-level file named `server` would
+  # shadow it and break the next build ("stream did not contain valid UTF-8").
+  # dist/app sidesteps that entirely.
+  command: bun --bun run build && bun build --compile --bytecode --production --minify --sourcemap --target=bun-linux-x64 --outfile dist/app .output/server/index.mjs
   # path to the single Linux executable the build produces
-  artifact: server
+  artifact: dist/app
 
 health:
   # a deploy is only promoted once this path returns 200 on the new binary
