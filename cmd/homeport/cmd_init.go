@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // projectInfo is what init auto-detects so homeport.yaml starts out correct
@@ -255,6 +257,60 @@ func sanitizeAppName(name string) string {
 	return name
 }
 
+// domainBehindCloudflare reports whether every address the domain resolves to
+// sits inside Cloudflare's edge ranges — i.e. the domain is proxied (orange
+// cloud), so the app needs a DNS-01 origin cert (cloudflare: true); the proxy
+// blocks the HTTP-01 challenge Caddy would otherwise use. Requiring ALL
+// addresses avoids a false positive on split/grey-cloud DNS, where HTTP-01
+// still works. Best-effort: any lookup or fetch failure returns false, so
+// init keeps working offline.
+func domainBehindCloudflare(domain string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", domain)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	data, err := fetchCloudflareCIDRs()
+	if err != nil {
+		return false
+	}
+	return ipsAllWithin(ips, parseCIDRs(data))
+}
+
+func parseCIDRs(data []byte) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(line); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}
+
+func ipsAllWithin(ips []net.IP, nets []*net.IPNet) bool {
+	if len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		inside := false
+		for _, n := range nets {
+			if n.Contains(ip) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return false
+		}
+	}
+	return true
+}
+
 func cmdInit(args []string) error {
 	if _, err := os.Stat(configFile); err == nil && !hasFlag(args, "--force") {
 		return fmt.Errorf("%s already exists (use --force to overwrite)", configFile)
@@ -317,6 +373,30 @@ func cmdInit(args []string) error {
 		return fmt.Errorf("%q doesn't look like a domain", domain)
 	}
 
+	// Proxied through Cloudflare? Then HTTP-01 can't reach the origin and the
+	// app needs a DNS-01 origin cert — detect it here so the config starts out
+	// correct instead of failing its first deploy with a certificate error.
+	cloudflare := hasFlag(args, "--cloudflare")
+	if !cloudflare && domainBehindCloudflare(domain) {
+		cloudflare = true
+		step("domain is proxied through Cloudflare → setting cloudflare: true (DNS-01 origin certs)")
+	}
+	cfBlock := `
+# Behind the Cloudflare proxy (orange cloud)? set cloudflare: true — shorthand
+# for tls: dns:cloudflare (DNS-01 origin certs; the proxy blocks HTTP-01).
+# One-time server setup (DNS plugin + token): homeport server cloudflare
+# cloudflare: true
+`
+	if cloudflare {
+		cfBlock = `
+# This domain is proxied through Cloudflare (orange cloud) — detected at init.
+# cloudflare: true is shorthand for tls: dns:cloudflare — Caddy issues/renews
+# the origin cert via DNS-01, since the proxy blocks HTTP-01. Needs the
+# one-time server setup (DNS plugin + token): homeport server cloudflare
+cloudflare: true
+`
+	}
+
 	// Static site → a files-only homeport.yaml (Caddy serves the built dir; no
 	// process, no binary artifact). SPA vs multi-page is auto-detected at deploy.
 	if det.static != "" {
@@ -324,7 +404,7 @@ func cmdInit(args []string) error {
 app: %s
 server: %s
 domain: %s
-
+%s
 # Detected a %s build: a folder of files, served directly by Caddy (auto HTTPS,
 # no process on the box). SPA vs multi-page is auto-detected from the output;
 # uncomment to force it.
@@ -333,7 +413,7 @@ static: %s
 
 build:
   command: %s
-`, app, server, domain, det.kind, det.static, det.build)
+`, app, server, domain, cfBlock, det.kind, det.static, det.build)
 		if err := os.WriteFile(configFile, []byte(staticYAML), 0o644); err != nil {
 			return err
 		}
@@ -359,7 +439,7 @@ server: %s
 # tip: server/domain/app/path/resources expand ${VAR} from the environment, so
 # one file can serve staging & prod from CI (an unset var is a hard error).
 domain: %s
-
+%s
 # Optional path mount: put several apps behind ONE domain, each at a prefix
 # (an API gateway). Give each app the same domain: and a distinct path:.
 # Caddy strips the prefix, so the app sees /users, not /api/users.
@@ -419,7 +499,7 @@ health:
 # 127.0.0.1:<port>). Sized to the box's cores — more replicas don't add
 # capacity a single box doesn't have.
 # replicas: 3
-`, app, server, domain, indentComment(det.note), det.build, det.artifact)
+`, app, server, domain, cfBlock, indentComment(det.note), det.build, det.artifact)
 
 	if err := os.WriteFile(configFile, []byte(yaml), 0o644); err != nil {
 		return err
