@@ -5,8 +5,6 @@ sidebar:
   order: 1
 ---
 
-import { Steps, Aside } from '@astrojs/starlight/components';
-
 Putting an app behind Cloudflare's proxy (orange-cloud) means Cloudflare
 terminates TLS at the edge, so the usual HTTP-01 certificate challenge can't
 reach your origin. homeport handles this with **DNS-01 certificates** — Caddy

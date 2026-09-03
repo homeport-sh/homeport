@@ -8,9 +8,15 @@ astro dev --background
 
 Manage the background server with `astro dev stop`, `astro dev status`, and `astro dev logs`.
 
+## This site
+
+Built on Nimbus (`@cloudflare/nimbus-docs`). Read `AGENT.md` in this
+directory first — it covers the file layout, the MDX component registry, and
+the authoring rules specific to Nimbus. Component reference: https://nimbus-docs.com
+
 ## Documentation
 
-Full documentation: https://docs.astro.build
+Full Astro documentation: https://docs.astro.build
 
 Consult these guides before working on related tasks:
 

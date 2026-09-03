@@ -1,49 +1,38 @@
-# Starlight Starter Kit: Basics
+# homeport docs
 
-[![Built with Starlight](https://astro.badg.es/v2/built-with-starlight/tiny.svg)](https://starlight.astro.build)
+The documentation site for [homeport](https://github.com/homeport-sh/homeport),
+live at <https://docs.homeport.sh>.
 
-```
-bun create astro@latest -- --template starlight
-```
+Built on [Nimbus](https://nimbus-docs.com) (`@cloudflare/nimbus-docs`) — an
+Astro + MDX docs framework. The UI components under `src/components/ui/` are
+copied into this repo by design and are ours to edit; the npm package supplies
+the content schemas, sidebar/TOC, MDX→markdown, and build hooks.
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## Commands
 
-## 🚀 Project Structure
+| Command             | Action                                                  |
+| :------------------ | :------------------------------------------------------ |
+| `bun install`       | Install dependencies                                     |
+| `bun run dev`       | Dev server on `localhost:4321`                           |
+| `bun run build`     | Build to `./dist/` (also runs Pagefind + sitemap)        |
+| `bun run preview`   | Preview the build locally                                |
+| `bun run typecheck` | `astro check`                                            |
+| `bun run lint:docs` | Nimbus content lint (frontmatter shape, internal links)  |
 
-Inside of your Astro + Starlight project, you'll see the following folders and files:
+## Writing
 
-```
-.
-├── public/
-├── src/
-│   ├── assets/
-│   ├── content/
-│   │   └── docs/
-│   └── content.config.ts
-├── astro.config.mjs
-├── package.json
-└── tsconfig.json
-```
+Pages are `.mdx` under `src/content/docs/`; the tree is the URL structure.
+`Aside`, `Card`, `CardGrid`, `Steps`/`Step`, `Tabs`/`TabItem` and
+`PackageManagers` are available in any page without an import — they're
+registered as MDX globals in `src/components.ts`.
 
-Starlight looks for `.md` or `.mdx` files in the `src/content/docs/` directory. Each file is exposed as a route based on its file name.
+Frontmatter needs `title`; `description` and `sidebar.order` are the other
+two in regular use. The top-level rail order and the Guides/Reference groups
+are set in `astro.config.ts`.
 
-Images can be added to `src/assets/` and embedded in Markdown with a relative link.
+Icons are Iconify names — Phosphor (`ph:*`) is installed.
 
-Static assets, like favicons, can be placed in the `public/` directory.
+## Deploying
 
-## 🧞 Commands
-
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `bun install`             | Installs dependencies                            |
-| `bun dev`             | Starts local dev server at `localhost:4321`      |
-| `bun build`           | Build your production site to `./dist/`          |
-| `bun preview`         | Preview your build locally, before deploying     |
-| `bun astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `bun astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Check out [Starlight’s docs](https://starlight.astro.build/), read [the Astro documentation](https://docs.astro.build), or jump into the [Astro Discord server](https://astro.build/chat).
+`homeport deploy` from this directory; see `homeport.yaml`. The site is static,
+served by Caddy on the box with no process running.

@@ -12,10 +12,14 @@ cloudflare: true
 static: ./dist
 
 # Opt-in response headers (homeport sets none on its own), keyed by path glob.
-# "/*" = every response: the same security set the website uses. The Astro
-# content-hashed asset dir (/_astro/*, filenames carry a hash) gets a 1-year
-# immutable cache; HTML, /fonts (not hashed), and /pagefind (search index,
-# rebuilt each deploy) deliberately do NOT, so new content shows up immediately.
+# "/*" = every response: the same security set the website uses. Only
+# /_astro/* is cached immutably — those filenames carry a content hash.
+# Everything else deliberately opts out so new content shows up immediately:
+# HTML, /fonts and /favicon.svg (not hashed), /pagefind (search index,
+# rebuilt each deploy), /llms.txt + /llms-full.txt + the per-page .md
+# alternates (agent surfaces, must track content), and /_nimbus/shiki.css
+# (Nimbus emits it at a fixed name, so a theme change would otherwise be
+# stuck in caches for a year).
 headers:
   "/*":
     Strict-Transport-Security: "max-age=31536000; includeSubDomains"
