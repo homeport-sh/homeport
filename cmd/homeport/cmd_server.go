@@ -28,7 +28,7 @@ import (
 // `plugins` swaps Caddy for an official caddyserver.com build with the named
 // plugin modules baked in (nothing compiles on the box).
 func cmdServer(args []string) error {
-	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals> [deploy@host]"
+	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals | origin-auth [set|off]> [deploy@host]"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", use)
 	}
@@ -58,6 +58,8 @@ func cmdServer(args []string) error {
 		return cmdServerGlobals(args[0], args[1:])
 	case "cloudflare":
 		return cmdServerCloudflare(args[1:])
+	case "origin-auth":
+		return cmdServerOriginAuth(args[1:])
 	default:
 		return fmt.Errorf("%s", use)
 	}
@@ -279,6 +281,50 @@ func cmdServerCloudflare(args []string) error {
 	}
 	fmt.Fprintln(os.Stderr, "  • optional privacy:  homeport server ech <public-name>")
 	return nil
+}
+
+// originSecretRe mirrors homeportd's valid_origin_secret: the value is written
+// into a Caddyfile, so nothing that could end a quote or a block.
+var originSecretRe = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
+
+// cmdServerOriginAuth makes every public site on the box require a secret
+// header that a Cloudflare Transform Rule on YOUR zone adds:
+//
+//	homeport server origin-auth              on/off (the secret is never printed)
+//	homeport server origin-auth set          secret from stdin (or a hidden prompt)
+//	homeport server origin-auth off          stop requiring it
+//
+// Why: locking 80/443 to Cloudflare's ranges proves a request came through
+// Cloudflare, not through your zone — any Cloudflare account can point a
+// proxied hostname at your IP. Add the Transform Rule (set static request
+// header X-Origin-Auth) BEFORE `set`, or every site drops all traffic.
+func cmdServerOriginAuth(args []string) error {
+	host := []string{}
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		host, args = args[n-1:], args[:n-1]
+	}
+	target, err := serverTarget(host)
+	if err != nil {
+		return err
+	}
+	const hd = "sudo /usr/local/bin/homeportd "
+	switch {
+	case len(args) == 0:
+		return sshRun(target, hd+"origin-auth-status")
+	case len(args) == 1 && args[0] == "off":
+		return sshRun(target, hd+"origin-auth-clear")
+	case len(args) == 1 && args[0] == "set":
+		secret, err := readSecretLine("X-Origin-Auth secret (the value in your Cloudflare Transform Rule; input hidden): ")
+		if err != nil {
+			return err
+		}
+		if !originSecretRe.MatchString(secret) {
+			return fmt.Errorf("secret must be 32–128 characters of A-Z a-z 0-9 _ - (generate one: python3 -c 'import secrets; print(secrets.token_urlsafe(32))')")
+		}
+		return sshRunIn(target, hd+"origin-auth-set", secret+"\n")
+	default:
+		return fmt.Errorf("usage: homeport server origin-auth [set | off] [deploy@host]")
+	}
 }
 
 // readSecretLine reads ONE line of secret input — like a password prompt:
