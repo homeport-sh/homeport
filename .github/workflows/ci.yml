@@ -48,3 +48,7 @@ jobs:
 
       - name: origin-auth against real caddy
         run: REQUIRE_CADDY=1 bash test/caddy_origin_auth_test.sh
+
+      # As root so the "another local user is refused" case runs too.
+      - name: admin API off TCP, against real caddy
+        run: sudo REQUIRE_CADDY=1 bash test/caddy_admin_test.sh

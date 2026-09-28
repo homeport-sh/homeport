@@ -172,9 +172,20 @@ if [[ $g == *"{env."* ]]; then
 else printf 'ok   globals: no env placeholder when none\n'; fi
 GDNS_PROVIDER="" GDNS_ENV="" GECH=""
 write_caddy_globals
-if [[ -f $CADDY_GLOBALS_FRAG ]]; then
-  printf 'FAIL globals: fragment survives with nothing set\n'; fails=$((fails + 1))
-else printf 'ok   globals: fragment removed when empty\n'; fi
+# The admin API is Caddy's control plane: whoever can reach it can replace the
+# whole config (drop origin-auth, take over another app's hostname). On TCP
+# loopback that is every local user and every app. A unix socket in caddy's
+# 0750 home is reachable by caddy and root only — so the block always exists.
+g=$(cat "$CADDY_GLOBALS_FRAG" 2>/dev/null)
+has "globals: admin on a private unix socket even with nothing else set" "$g" $'\tadmin unix//var/lib/caddy/admin.sock|0600\n'
+has "globals: still a global options block" "$g" $'{\n'
+if [[ $g == *"localhost:2019"* || $g == *"admin off"* ]]; then
+  printf 'FAIL globals: admin left on TCP (or off — which breaks reloads)\n'; fails=$((fails + 1))
+else printf 'ok   globals: admin not on TCP\n'; fi
+GDNS_PROVIDER=cloudflare GDNS_ENV=HOMEPORT_DNS_CLOUDFLARE
+write_caddy_globals
+has "globals: admin kept alongside dns" "$(cat "$CADDY_GLOBALS_FRAG")" "admin unix//var/lib/caddy/admin.sock|0600"
+GDNS_PROVIDER="" GDNS_ENV=""
 # 00-globals must sort before every site fragment so the block lands first
 first=$(printf '00-globals.caddy\n00-homeport.caddy\nweb.caddy\n_gw_x.caddy\n' | LC_ALL=C sort | head -1)
 eq "globals sorts first" "$first" "00-globals.caddy"
@@ -302,6 +313,14 @@ has "cgate: deny uppercase app"   "$(cgate "sudo $hd upload Web r1")"        "de
 has "cgate: deny shell in app"    "$(cgate "sudo $hd upload a;id r1")"       "deny"
 # ci-gate's per-app pin is unchanged by sharing the allow-list
 has "gate: still pinned to app"   "$(gate web "sudo $hd activate shop r1")"  "deny"
+
+# --- app units: no cloud metadata service --------------------------------------
+# 169.254.169.254 serves the droplet's user-data and metadata to anyone on the
+# box who asks. An app has no business there; a compromised one would.
+for sb in "" relaxed; do
+  body=$(app=imds user=imds HOMEPORT_ROOT=/opt/homeport SANDBOX=$sb emit_service_body 8140)
+  has "units: metadata endpoint denied (sandbox=${sb:-default})" "$body" "IPAddressDeny=169.254.0.0/16"
+done
 
 # --- origin auth: prove a request came through OUR Cloudflare zone ---
 # Cloudflare's IP ranges are shared by every customer, so a firewall that

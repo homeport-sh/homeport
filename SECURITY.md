@@ -27,6 +27,13 @@ that lets a deploy key escalate beyond its documented scope.
 - Secrets travel over SSH stdin, never argv or a remote shell; app binaries are
   root-owned so the app user can execute but not modify what it runs; each app
   runs in a locked-down systemd sandbox.
+- **An app's code must not be able to reach past its own app** — not the
+  proxy's control plane (Caddy's admin API listens on a unix socket in caddy's
+  0750 home, reachable by caddy and root only; never on TCP loopback), not the
+  cloud metadata service (169.254.0.0/16 is denied to every app unit, including
+  `sandbox: relaxed`), and not another app's files. An app that can reconfigure
+  Caddy can switch off origin-auth or take another app's hostname; that is a
+  break worth reporting.
 
 ## Supported versions
 

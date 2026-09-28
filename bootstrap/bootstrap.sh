@@ -164,12 +164,13 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.4.0
+HOMEPORTD_VERSION=0.5.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
 HOMEPORT_ETC=/etc/homeport/apps
 CADDY_DIR=/etc/caddy/homeport.d
+CADDYFILE=/etc/caddy/Caddyfile
 TLS_CERT_DIR=/etc/caddy/homeport.d/certs   # bring-your-own certs live here, per app
 CADDY_ENV_FILE=/etc/caddy/homeport.env     # env vars for Caddy (DNS tokens), root-owned 600
 BASE_PORT=8100
@@ -309,6 +310,9 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+# No cloud metadata service (169.254.169.254 hands out the droplet's user-data
+# and metadata to anyone on the box). Applies even to sandbox: relaxed.
+IPAddressDeny=169.254.0.0/16
 EOF
   # Extra sandbox (default). Shrinks what a compromised binary — including a
   # third-party one — can reach. Skipped for `sandbox: relaxed`, which a binary
@@ -462,7 +466,7 @@ caddy_validate() {
   if [[ -f $CADDY_ENV_FILE ]]; then
     while IFS= read -r line; do [[ -n $line ]] && envargs+=("$line"); done < "$CADDY_ENV_FILE"
   fi
-  env ${envargs[@]+"${envargs[@]}"} "$bin" validate --config /etc/caddy/Caddyfile >/dev/null 2>&1
+  env ${envargs[@]+"${envargs[@]}"} "$bin" validate --config "$CADDYFILE" >/dev/null 2>&1
 }
 
 # validate_tls_mode <app> <mode> <token_env> — gate the tls positional args.
@@ -1326,15 +1330,20 @@ GECH=$GECH
 EOF
 }
 
+# CADDY_ADMIN — where Caddy's admin API listens. Never TCP: on loopback it is
+# reachable by every local user and every app, and it can replace the whole
+# config. A unix socket inside caddy's 0750 home is caddy + root only;
+# `systemctl reload caddy` (ExecReload runs as caddy) reads it from the config.
+CADDY_ADMIN_SOCK=/var/lib/caddy/admin.sock
+# Where a box that predates the socket still listens (Caddy's default).
+CADDY_LEGACY_ADMIN=localhost:2019
+
 # write_caddy_globals — regenerate the global-options fragment from the G*
-# vars; no options set means no fragment at all.
+# vars. Always written: the admin line is not optional.
 write_caddy_globals() {
-  if [[ -z $GDNS_PROVIDER && -z $GECH ]]; then
-    rm -f "$CADDY_GLOBALS_FRAG"
-    return 0
-  fi
   { printf '# managed by homeport — edit via `homeport server dns|ech`\n'
     printf '{\n'
+    printf '\tadmin unix/%s|0600\n' "$CADDY_ADMIN_SOCK"
     if [[ -n $GDNS_PROVIDER ]]; then
       if [[ $GDNS_ENV == none ]]; then
         printf '\tdns %s\n' "$GDNS_PROVIDER"
@@ -1345,6 +1354,26 @@ write_caddy_globals() {
     [[ -n $GECH ]] && printf '\tech %s\n' "$GECH"
     printf '}\n'
   } > "$CADDY_GLOBALS_FRAG"
+}
+
+# ensure_caddy_admin_socket — one-time move of a running Caddy's admin API off
+# TCP. `caddy reload` dials the address in the NEW config, which the running
+# Caddy isn't listening on yet, so this one reload goes to the old address.
+# Never dies: a box that can't migrate keeps working as before, and says so.
+ensure_caddy_admin_socket() {
+  [[ -d $CADDY_DIR ]] || return 0
+  grep -qs "admin unix/$CADDY_ADMIN_SOCK" "$CADDY_GLOBALS_FRAG" && return 0
+  local had=0 old=""
+  [[ -f $CADDY_GLOBALS_FRAG ]] && { old=$(cat "$CADDY_GLOBALS_FRAG"); had=1; }
+  load_globals
+  write_caddy_globals
+  if caddy_validate && caddy reload --config "$CADDYFILE" --adapter caddyfile \
+       --address "$CADDY_LEGACY_ADMIN" --force >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ $had == 1 ]]; then printf '%s\n' "$old" > "$CADDY_GLOBALS_FRAG"; else rm -f "$CADDY_GLOBALS_FRAG"; fi
+  echo "warning: could not move Caddy's admin API to $CADDY_ADMIN_SOCK — it is still on TCP loopback" >&2
+  return 0
 }
 
 # _globals_commit — shared transactional tail: regenerate, validate under the
@@ -2745,6 +2774,7 @@ EOF
 main() {
   [[ $(id -u) -eq 0 ]] || die "must run as root (the homeport CLI calls this via sudo)"
   ensure_origin_auth_snippet
+  ensure_caddy_admin_socket
   local cmd=${1:-}
   shift || true
   case $cmd in
@@ -2818,6 +2848,9 @@ main() {
   setup_caddy
   install_homeportd
   setup_dirs_and_sudo
+  # homeportd's first run moves Caddy's admin API off TCP loopback (and writes
+  # the origin-auth snippet) — do it now rather than on the first deploy.
+  /usr/local/bin/homeportd version >/dev/null
 
   local ip
   ip=$(curl -4fsS --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
