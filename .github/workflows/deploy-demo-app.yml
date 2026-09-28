@@ -44,8 +44,8 @@ jobs:
           bun build --compile --bytecode --production --minify --sourcemap \
             --target=bun-linux-x64 --outfile dist/app .output/server/index.mjs
 
-      # @main until a real deploy has landed; @v1 is tagged after that.
-      - uses: homeport-sh/deploy@main
+      # v1: tagged once real deploys had landed through @main.
+      - uses: homeport-sh/deploy@v1
         with:
           app: demo-app
           artifact: examples/tanstack-start/dist/app
