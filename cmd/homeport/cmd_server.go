@@ -406,7 +406,39 @@ func fetchCloudflareCIDRs() ([]byte, error) {
 		buf.Write(bytes.TrimSpace(body))
 		buf.WriteByte('\n')
 	}
+	cidrs, err := parseCIDRList(buf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("Cloudflare's IP list didn't parse — refusing to apply it: %w", err)
+	}
+	if err := checkCloudflareCIDRs(cidrs); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
+}
+
+// checkCloudflareCIDRs fails closed on a list that can't be Cloudflare's whole
+// edge: a truncated or garbled fetch applied as the policy would narrow the
+// allow-list and blackhole every proxied site, and a catch-all would silently
+// reopen the origin. Cloudflare publishes ~15 IPv4 ranges; fewer than 10 is a
+// bad fetch, not a change worth trusting.
+func checkCloudflareCIDRs(cidrs []string) error {
+	v4 := 0
+	for _, c := range cidrs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			return fmt.Errorf("Cloudflare IP list has an invalid range %q — refusing to apply it", c)
+		}
+		if p.Bits() == 0 {
+			return fmt.Errorf("Cloudflare IP list contains the catch-all %s — refusing to apply it", c)
+		}
+		if p.Addr().Is4() {
+			v4++
+		}
+	}
+	if v4 < 10 {
+		return fmt.Errorf("Cloudflare IP list looks truncated (%d IPv4 ranges, expected ~15) — refusing to apply it; try again", v4)
+	}
+	return nil
 }
 
 // httpGetLimited GETs a URL with a short timeout and caps the body it reads.
