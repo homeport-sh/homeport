@@ -1,0 +1,51 @@
+# Deploys examples/tanstack-start to the hosted platform as `demo-app`.
+#
+# No secrets: the deploy action authenticates with this run's OIDC token, and
+# the platform pins the app to this repository's numeric ID and to
+# refs/heads/main. A fork, another repo, or another branch gets a 403.
+name: Deploy demo-app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - examples/tanstack-start/**
+      - .github/workflows/deploy-demo-app.yml
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+# One deploy at a time; a newer push waits rather than racing an activate.
+concurrency:
+  group: deploy-demo-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/tanstack-start
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: install
+        run: bun install --frozen-lockfile
+
+      # amd64: box-1 is x86-64, and the platform refuses a binary for any
+      # other architecture at /complete.
+      - name: build
+        run: |
+          bun --bun run build
+          bun build --compile --bytecode --production --minify --sourcemap \
+            --target=bun-linux-x64 --outfile dist/app .output/server/index.mjs
+
+      # @main until a real deploy has landed; @v1 is tagged after that.
+      - uses: homeport-sh/deploy@main
+        with:
+          app: demo-app
+          artifact: examples/tanstack-start/dist/app
