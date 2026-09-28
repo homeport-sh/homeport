@@ -62,6 +62,59 @@ so a bad policy can only break web traffic, not lock you out.
   apps — only ones still on plain automatic HTTPS.
 </Aside>
 
+## Prove the request came through your zone
+
+The firewall proves a request came *through Cloudflare* — not through **your**
+Cloudflare zone. Those ranges are shared by every Cloudflare customer, so
+anyone can add a proxied record in their own account pointing at your IP, and
+override the `Host` header to reach any site on the box.
+
+Close that with a secret header only your zone adds:
+
+<Steps>
+1. **Generate a secret**
+
+   ```sh
+   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+2. **Add it at Cloudflare first** — Rules → Transform Rules → *Modify Request
+   Header*: for all incoming requests, **set static** header `X-Origin-Auth` to
+   the secret.
+
+3. **Then enforce it on the box** (input hidden, or pipe it in)
+
+   ```sh
+   homeport server origin-auth set
+   ```
+</Steps>
+
+Every public site on the box — whole-host apps, path-mounted gateways
+(including each path, and the "no route" fallback), static sites and redirect
+aliases — now drops any request without the exact header, closing the
+connection with no response. Caddy strips the header before proxying, so your
+app never sees the secret and can't leak it into its logs.
+
+```sh
+homeport server origin-auth        # on / off — the secret is never printed
+homeport server origin-auth off    # stop requiring it
+```
+
+<Aside type="caution" title="Order matters">
+  Add the Transform Rule **before** `origin-auth set` — the other way round,
+  every site on the box drops all traffic until the rule exists.
+</Aside>
+
+### Rotating the secret
+
+The box can accept two values at once, so a rotation drops nothing:
+
+```sh
+homeport server origin-auth set --keep-previous   # new value; the old one still works
+# now change the Transform Rule at Cloudflare to the new value
+homeport server origin-auth retire                # only the new value works
+```
+
 ## The whole flow
 
 <Steps>
@@ -87,6 +140,12 @@ so a bad policy can only break web traffic, not lock you out.
 
    ```sh
    homeport server firewall allow cloudflare
+   ```
+
+5. **Require your zone's header (optional)** — add the Transform Rule, then
+
+   ```sh
+   homeport server origin-auth set
    ```
 </Steps>
 

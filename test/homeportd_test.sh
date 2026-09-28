@@ -303,6 +303,107 @@ has "cgate: deny shell in app"    "$(cgate "sudo $hd upload a;id r1")"       "de
 # ci-gate's per-app pin is unchanged by sharing the allow-list
 has "gate: still pinned to app"   "$(gate web "sudo $hd activate shop r1")"  "deny"
 
+# --- origin auth: prove a request came through OUR Cloudflare zone ---
+# Cloudflare's IP ranges are shared by every customer, so a firewall that
+# allows them only proves "came via Cloudflare". Anyone can point their own
+# proxied hostname at our IP (and override Host). A secret header added by a
+# Transform Rule on our zone proves the rest. Every public site must check it —
+# including inside each gateway handle block, because Caddy runs handle_path
+# BEFORE a site-level abort, which would otherwise make gateways a bypass.
+write_caddy oa oa.example.com 8110 plain 1
+has "oa: proxied site checks origin" "$(cat "$CADDY_DIR/oa.caddy")" "import homeport_origin_auth"
+for m in plain template idle; do
+  has "oa: $m proxy strips the header" "$(emit_reverse_proxy '' "$m" ' 127.0.0.1:1')" "header_up -X-Origin-Auth"
+done
+write_caddy_static oas oas.example.com 0
+has "oa: static site checks origin" "$(cat "$CADDY_DIR/oas.caddy")" "import homeport_origin_auth"
+eq  "oa: every redirect host checks origin" \
+    "$(REDIRECT_FROM=a.example.com,b.example.com emit_redirect_from oar oar.example.com | grep -c 'import homeport_origin_auth')" "2"
+# redir sorts BEFORE abort in Caddy's directive order, so the check and the
+# redirect must sit in a route (literal order) or aliases answer without it.
+rd=$(REDIRECT_FROM=a.example.com emit_redirect_from oar oar.example.com)
+eq  "oa: redirect check precedes redir inside a route" \
+    "$(awk '/route \{/{r=1} r&&/import homeport_origin_auth/{i=NR} r&&/redir /{d=NR} END{print (r && i && d && i<d) ? "yes" : "no"}' <<<"$rd")" "yes"
+write_caddy_internal oai 8111 1
+eq  "oa: loopback service does not" "$(grep -c 'homeport_origin_auth' "$CADDY_DIR/oai.caddy")" "0"
+# gateway: the check must be the first thing inside EVERY handle block
+oa_etc=$(mktemp -d); saved_etc=${HOMEPORT_ETC:-}; HOMEPORT_ETC=$oa_etc
+mkdir -p "$oa_etc/ga" "$oa_etc/gb"
+printf 'DOMAIN=gw.example.com\nPATH_PREFIX=/a\nPORT=8120\n' > "$oa_etc/ga/config"
+printf 'DOMAIN=gw.example.com\nPATH_PREFIX=/b/c\nPORT=8121\n' > "$oa_etc/gb/config"
+write_gateway gw.example.com
+gwf=$(ls "$CADDY_DIR"/_gw_*.caddy 2>/dev/null | head -1)
+eq  "oa: gateway has a handle per app + fallback" "$(grep -cE '^\s*handle(_path)? ' "$gwf")" "3"
+eq  "oa: every gateway handle opens with the check" \
+    "$(awk '/^[[:space:]]*handle(_path)? /{want=1; next} want{ if ($0 ~ /import homeport_origin_auth/) ok++; want=0 } END{print ok+0}' "$gwf")" "3"
+HOMEPORT_ETC=$saved_etc; rm -rf "$oa_etc"
+# the snippet: defined (empty) when off, so every import resolves
+off=$(origin_auth_snippet "")
+has "oa: off still defines the snippet" "$off" "(homeport_origin_auth) {"
+eq  "oa: off enforces nothing" "$(grep -c abort <<<"$off")" "0"
+on=$(origin_auth_snippet "Zx9_k-3QpL7mN2vR8tY4wE6uI1oA5sD0fG_hJ-kLzXc")
+has "oa: on matches the exact header" "$on" 'not header X-Origin-Auth "Zx9_k-3QpL7mN2vR8tY4wE6uI1oA5sD0fG_hJ-kLzXc"'
+has "oa: on aborts the rest" "$on" "abort @homeport_origin_unauthenticated"
+# the secret lands in a Caddyfile: anything that could close a quote or a
+# block would be config injection, so the charset is closed
+oasec() { (valid_origin_secret "$1") >/dev/null 2>&1 && echo ok || echo deny; }
+eq "oa: accepts a 43-char base64url secret" "$(oasec Zx9_k-3QpL7mN2vR8tY4wE6uI1oA5sD0fG_hJ-kLzXc)" "ok"
+eq "oa: rejects short"      "$(oasec short-secret)"                              "deny"
+eq "oa: rejects a quote"    "$(oasec 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"x')"  "deny"
+eq "oa: rejects a brace"    "$(oasec 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}')"  "deny"
+eq "oa: rejects a space"    "$(oasec 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa a')" "deny"
+eq "oa: rejects a newline"  "$(oasec $'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\na')" "deny"
+eq "oa: rejects \$"         "$(oasec 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$x')" "deny"
+
+# rotation overlap: two accepted values while the Cloudflare rule is switched
+A=Zx9_k-3QpL7mN2vR8tY4wE6uI1oA5sD0fG_hJ-kLzXc B=Qq1_w-2ErT3yU4iO5pA6sD7fG8hJ9kL0zX1cV2bN3m
+two=$(origin_auth_snippet "$A" "$B")
+eq  "oa: overlap accepts both" "$(grep -c 'not header X-Origin-Auth' <<<"$two")" "2"
+eq  "oa: current values parsed back" "$(origin_auth_values <<<"$two" | paste -sd, -)" "$A,$B"
+eq  "oa: off parses to nothing" "$(origin_auth_snippet "" | origin_auth_values | wc -l | tr -d ' ')" "0"
+# on/off state lives in the snippet file alone; ensure never clobbers "on"
+ORIGIN_AUTH_FRAG=$CADDY_DIR/00-origin-auth.caddy; rm -f "$ORIGIN_AUTH_FRAG"
+ensure_origin_auth_snippet
+eq  "oa: ensure creates it off" "$(origin_auth_on && echo on || echo off)" "off"
+origin_auth_snippet "Zx9_k-3QpL7mN2vR8tY4wE6uI1oA5sD0fG_hJ-kLzXc" > "$ORIGIN_AUTH_FRAG"
+ensure_origin_auth_snippet
+eq  "oa: ensure keeps it on" "$(origin_auth_on && echo on || echo off)" "on"
+has "oa: status never prints the secret" "$(cmd_origin_auth_status)" "origin-auth: on"
+eq  "oa: status never prints the secret (value)" "$(cmd_origin_auth_status | grep -c Zx9_k)" "0"
+# the snippet sorts before every app/gateway fragment (Caddy globs lexically,
+# and a snippet must be defined before it is imported)
+eq  "oa: snippet sorts first" "$(printf '%s\n' 00-origin-auth.caddy _gw_x.caddy a.caddy 0app.caddy | LC_ALL=C sort | head -1)" "00-origin-auth.caddy"
+# only the box owner may toggle it — never CI or the platform
+has "oa: ci-gate denies set"   "$(gate web "sudo $hd origin-auth-set")"   "deny"
+has "oa: cert-gate denies set" "$(cgate "sudo $hd origin-auth-clear")"    "deny"
+# apply: re-renders fragments that predate the feature, and on a validation
+# failure restores EVERY fragment byte-for-byte (a half-applied change leaves
+# some sites open and others unreachable).
+ap_fails=0
+( fails=0; ap_etc=$(mktemp -d); HOMEPORT_ETC=$ap_etc
+  mkdir -p "$ap_etc/legacy"
+  printf 'DOMAIN=legacy.example.com\nPORT=8130\n' > "$ap_etc/legacy/config"
+  printf 'legacy.example.com {\n\treverse_proxy 127.0.0.1:8130\n}\n' > "$CADDY_DIR/legacy.caddy"
+  chown() { :; }; chmod() { :; }; systemctl() { :; }
+  before=$(cat "$CADDY_DIR"/*.caddy | cksum)
+  caddy_validate() { return 1; }
+  ( printf '%s\n' "$A" | cmd_origin_auth_set ) >/dev/null 2>&1 && { echo "FAIL oa: apply should die on invalid config"; fails=$((fails + 1)); }
+  eq "oa: failed apply restores every fragment" "$(cat "$CADDY_DIR"/*.caddy | cksum)" "$before"
+  caddy_validate() { return 0; }
+  printf '%s\n' "$A" | cmd_origin_auth_set >/dev/null
+  has "oa: apply re-renders legacy sites" "$(cat "$CADDY_DIR/legacy.caddy")" "import homeport_origin_auth"
+  eq  "oa: apply turns it on" "$(origin_auth_on && echo on || echo off)" "on"
+  printf '%s\n' "$B" | cmd_origin_auth_set --keep-previous >/dev/null
+  eq  "oa: keep-previous holds both, newest first" "$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | paste -sd, -)" "$B,$A"
+  cmd_origin_auth_retire >/dev/null
+  eq  "oa: retire keeps only the newest" "$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | paste -sd, -)" "$B"
+  rm -rf "$ap_etc" "$CADDY_DIR/legacy.caddy"
+  exit "$fails" ) || ap_fails=$?
+fails=$((fails + ap_fails))
+origin_auth_snippet "$A" "$B" > "$ORIGIN_AUTH_FRAG"
+has "oa: status flags a rotation in progress" "$(cmd_origin_auth_status)" "rotation in progress"
+rm -f "$ORIGIN_AUTH_FRAG"
+
 # --- C1 regression: health path is source'd as root, so it MUST reject any
 #     shell-active character (this was a root RCE via a scoped CI key's `add`) ---
 hp_ok() { [[ ${1:-} =~ ^/[A-Za-z0-9._/-]*$ ]]; }

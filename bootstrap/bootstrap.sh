@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.3.2
+HOMEPORTD_VERSION=0.4.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -375,16 +375,21 @@ app_upstreams() {
 # block (write_gateway).
 emit_reverse_proxy() {
   local ind=$1 mode=$2 upstreams=$3
+  # header_up -X-Origin-Auth: the origin-auth secret proves a request came
+  # through our Cloudflare zone; the app never needs it, so it never sees it
+  # (and cannot leak it into its logs). Done here rather than with
+  # request_header, which Caddy would order before the check and so strip the
+  # header the check is looking for.
   case $mode in
     template)
       # lb_try_duration retries a request that hit a down/restarting replica on
       # a live upstream — what makes rolling deploys/scaling zero-downtime.
-      printf '%sreverse_proxy%s {\n%s\tlb_policy least_conn\n%s\tlb_try_duration 4s\n%s\tlb_try_interval 250ms\n%s\tfail_duration 10s\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" "$ind" "$ind" "$ind" ;;
+      printf '%sreverse_proxy%s {\n%s\theader_up -X-Origin-Auth\n%s\tlb_policy least_conn\n%s\tlb_try_duration 4s\n%s\tlb_try_interval 250ms\n%s\tfail_duration 10s\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" "$ind" "$ind" "$ind" "$ind" ;;
     idle)
       # keepalive off so Caddy doesn't hold socket-proxyd open past idle.
-      printf '%sreverse_proxy%s {\n%s\ttransport http {\n%s\t\tkeepalive off\n%s\t}\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" "$ind" "$ind" ;;
+      printf '%sreverse_proxy%s {\n%s\theader_up -X-Origin-Auth\n%s\ttransport http {\n%s\t\tkeepalive off\n%s\t}\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" "$ind" "$ind" "$ind" ;;
     *)
-      printf '%sreverse_proxy%s\n' "$ind" "$upstreams" ;;
+      printf '%sreverse_proxy%s {\n%s\theader_up -X-Origin-Auth\n%s}\n' "$ind" "$upstreams" "$ind" "$ind" ;;
   esac
 }
 
@@ -548,8 +553,12 @@ emit_redirect_from() {
     [[ -n $alias ]] || continue
     printf '%s {\n' "$alias"
     emit_tls $'\t' "$app"
-    printf '\tredir https://%s{uri} permanent\n' "$primary"
-    printf '}\n'
+    # route keeps written order: Caddy sorts redir BEFORE abort, so outside a
+    # route the origin check would run after the redirect was already sent.
+    printf '\troute {\n'
+    emit_origin_auth $'\t\t'
+    printf '\t\tredir https://%s{uri} permanent\n' "$primary"
+    printf '\t}\n}\n'
   done
 }
 
@@ -603,6 +612,141 @@ validate_extra_hosts() {
   done
 }
 
+# --- origin auth -------------------------------------------------------------
+# A firewall that allows Cloudflare's ranges proves a request came via
+# Cloudflare — not via OUR zone: those ranges are shared by every customer, and
+# anyone can point their own proxied hostname at this IP and override Host.
+# A secret header injected by a Transform Rule on our zone proves the rest.
+#
+# Every public site imports one snippet, defined in a file that sorts before
+# every app fragment. It is empty while origin auth is off, so every import
+# always resolves and turning it on or off rewrites one file.
+ORIGIN_AUTH_FRAG=$CADDY_DIR/00-origin-auth.caddy
+
+# emit_origin_auth <indent> — the check, as the first line of a site block or
+# of a handle block. Gateways need it INSIDE each handle: Caddy runs
+# handle/handle_path before a site-level abort, so a site-level check there
+# would run after the request had already been proxied.
+emit_origin_auth() { printf '%simport homeport_origin_auth\n' "$1"; }
+
+# origin_auth_snippet <secret|""> [previous] — the snippet definition. Two
+# values = a rotation in progress, accepted either way while the Cloudflare
+# rule is switched over. Lines in a matcher block are ANDed, so "not A, not B"
+# drops a request only when it carries neither. (The one-line header matcher
+# takes a single value.)
+origin_auth_snippet() {
+  printf '# managed by homeport — edit via `homeport server origin-auth`\n'
+  printf '(homeport_origin_auth) {\n'
+  if [[ -n ${1:-} ]]; then
+    printf '\t@homeport_origin_unauthenticated {\n'
+    printf '\t\tnot header X-Origin-Auth "%s"\n' "$1"
+    [[ -n ${2:-} ]] && printf '\t\tnot header X-Origin-Auth "%s"\n' "$2"
+    printf '\t}\n'
+    printf '\tabort @homeport_origin_unauthenticated\n'
+  fi
+  printf '}\n'
+}
+
+# origin_auth_values — the accepted values in a snippet on stdin, one per line,
+# newest first. The snippet is ours and its values are charset-validated, so a
+# plain match is exact.
+origin_auth_values() {
+  sed -n 's/^[[:space:]]*not header X-Origin-Auth "\([A-Za-z0-9_-]*\)"$/\1/p'
+}
+
+# valid_origin_secret <s> — the secret is written into a Caddyfile, so the
+# charset is closed: nothing that could end a quote or a block. 32–128 chars.
+valid_origin_secret() {
+  [[ ${1:-} =~ ^[A-Za-z0-9_-]{32,128}$ ]] || die "origin-auth secret must be 32–128 characters of A-Z a-z 0-9 _ -"
+}
+
+# ensure_origin_auth_snippet — make sure the snippet exists (as "off" if never
+# set), so a freshly rendered site's import resolves on boxes that predate it.
+ensure_origin_auth_snippet() {
+  [[ -d $CADDY_DIR && ! -f $ORIGIN_AUTH_FRAG ]] || return 0
+  origin_auth_snippet "" > "$ORIGIN_AUTH_FRAG"
+}
+
+# origin_auth_on — is enforcement on? The snippet file is the only state.
+origin_auth_on() { [[ -n $(origin_auth_values < "$ORIGIN_AUTH_FRAG" 2>/dev/null) ]]; }
+
+# _origin_auth_apply <secret|""> — write the snippet, re-render every public
+# site (fragments written before this feature existed have no import line),
+# validate, and reload — or restore every fragment and die. All-or-nothing: a
+# half-applied change would leave some sites open and others unreachable.
+_origin_auth_apply() {
+  local secret=$1 msg=$2 prev=${3:-} snap cfg app
+  snap=$(mktemp -d)
+  cp -p "$CADDY_DIR"/*.caddy "$snap"/ 2>/dev/null || true
+  origin_auth_snippet "$secret" "$prev" > "$ORIGIN_AUTH_FRAG"
+  # 640 root:caddy — the secret is a credential; only caddy needs to read it.
+  chown root:caddy "$ORIGIN_AUTH_FRAG"; chmod 640 "$ORIGIN_AUTH_FRAG"
+  for cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $cfg ]] || continue
+    app=$(basename "$(dirname "$cfg")")
+    # subshell: load_app sets globals (ALIASES, TLS_MODE…) that must not leak
+    # from one app into the next one's render.
+    ( load_app "$app"; [[ -n ${DOMAIN:-} ]] || exit 0; rewrite_app_caddy "$app" ) \
+      || { _origin_auth_restore "$snap"; die "origin-auth: re-rendering '$app' failed — rolled back"; }
+  done
+  if ! caddy_validate; then
+    _origin_auth_restore "$snap"
+    die "origin-auth: generated Caddy config failed validation — rolled back, nothing changed"
+  fi
+  rm -rf "$snap"
+  systemctl reload caddy
+  echo "$msg"
+}
+
+_origin_auth_restore() {
+  local snap=$1
+  rm -f "$CADDY_DIR"/*.caddy
+  cp -p "$snap"/*.caddy "$CADDY_DIR"/ 2>/dev/null || true
+  rm -rf "$snap"
+}
+
+# cmd_origin_auth_set [--keep-previous] — secret on stdin (never argv: it would
+# show in ps and in the SSH command line). Once on, EVERY public site on this
+# box drops a request without the header — so add the Transform Rule at
+# Cloudflare first. To rotate without dropping traffic: set the new value with
+# --keep-previous (both accepted), switch the Cloudflare rule, then retire.
+cmd_origin_auth_set() {
+  local secret prev=""
+  secret=$(head -c 256 | tr -d '\r\n')
+  valid_origin_secret "$secret"
+  if [[ ${1:-} == --keep-previous ]]; then
+    prev=$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | head -1)
+    [[ -n $prev ]] || die "origin-auth is off — there is no previous value to keep"
+    [[ $prev != "$secret" ]] || die "that is already the current value"
+    _origin_auth_apply "$secret" "origin-auth: rotating — the new AND the previous value are accepted. Switch the Cloudflare rule, then: homeport server origin-auth retire" "$prev"
+    return
+  fi
+  [[ -z ${1:-} ]] || die "usage: origin-auth-set [--keep-previous] (secret on stdin)"
+  _origin_auth_apply "$secret" "origin-auth: on — requests without the X-Origin-Auth header are now dropped"
+}
+
+# cmd_origin_auth_retire — end a rotation: accept only the newest value.
+cmd_origin_auth_retire() {
+  local cur
+  cur=$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | head -1)
+  [[ -n $cur ]] || die "origin-auth is off — nothing to retire"
+  [[ $(origin_auth_values < "$ORIGIN_AUTH_FRAG" | wc -l) -gt 1 ]] || { echo "origin-auth: no rotation in progress — nothing to retire"; return 0; }
+  _origin_auth_apply "$cur" "origin-auth: previous value retired — only the new one is accepted"
+}
+
+cmd_origin_auth_clear() {
+  _origin_auth_apply "" "origin-auth: off — public sites accept any request that reaches them"
+}
+
+# cmd_origin_auth_status — on/off only. The value never leaves the box.
+cmd_origin_auth_status() {
+  local n
+  n=$(origin_auth_values < "$ORIGIN_AUTH_FRAG" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ $n -gt 1 ]]; then echo "origin-auth: on — rotation in progress ($n values accepted; finish with: homeport server origin-auth retire)"
+  elif [[ $n -eq 1 ]]; then echo "origin-auth: on"
+  else echo "origin-auth: off"; fi
+}
+
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
 # fragment (a whole-host site block). mode: template | idle | plain.
 # Used by cmd_add and the autoscaler (which rewrites on every scale event).
@@ -614,6 +758,7 @@ write_caddy() {
   hosts=$domain
   [[ -n ${ALIASES:-} ]] && hosts="$domain, ${ALIASES//,/, }"
   { printf '%s {\n\tencode zstd gzip\n' "$hosts"
+    emit_origin_auth $'\t'
     emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     emit_reverse_proxy $'\t' "$mode" "$upstreams"
@@ -646,6 +791,7 @@ write_caddy_static() {
   [[ -n ${ALIASES:-} ]] && hosts="$domain, ${ALIASES//,/, }"
   { printf '%s {\n' "$hosts"
     printf '\tencode zstd gzip\n'
+    emit_origin_auth $'\t'
     emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     printf '\troot * %s/%s/current\n' "$HOMEPORT_ROOT" "$app"
@@ -1352,10 +1498,13 @@ write_gateway() {
     for r in "${sorted[@]}"; do
       IFS=$'\t' read -r path mode ups <<<"$r"
       printf '\thandle_path %s/* {\n' "$path"
+      emit_origin_auth $'\t\t'
       emit_reverse_proxy $'\t\t' "$mode" "$ups"
       printf '\t}\n'
     done
-    printf '\thandle {\n\t\trespond "no route for this path" 404\n\t}\n'
+    printf '\thandle {\n'
+    emit_origin_auth $'\t\t'
+    printf '\t\trespond "no route for this path" 404\n\t}\n'
     printf '}\n'
   } > "$frag"
 }
@@ -2583,6 +2732,10 @@ homeportd — root-side homeport helper (run via sudo)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
   global-ech-rotate                  rotate ECH keys & re-publish (fixes late-added records)
   global-list                        show the managed global options
+  origin-auth-set [--keep-previous]  require X-Origin-Auth (secret on stdin) on every public site
+  origin-auth-retire                 end a rotation: drop the previous value
+  origin-auth-clear                  stop requiring it
+  origin-auth-status                 on/off (never prints the secret)
   self-update                        replace homeportd with a validated script from stdin
   version [--json]                   homeportd version and API level
   remove <app> --yes                 delete app, releases, env, user
@@ -2591,6 +2744,7 @@ EOF
 
 main() {
   [[ $(id -u) -eq 0 ]] || die "must run as root (the homeport CLI calls this via sudo)"
+  ensure_origin_auth_snippet
   local cmd=${1:-}
   shift || true
   case $cmd in
@@ -2627,6 +2781,10 @@ main() {
     global-ech)     cmd_global_ech "$@" ;;
     global-ech-rotate) cmd_global_ech_rotate "$@" ;;
     global-list)    cmd_global_list "$@" ;;
+    origin-auth-set)    cmd_origin_auth_set "$@" ;;
+    origin-auth-clear)  cmd_origin_auth_clear "$@" ;;
+    origin-auth-retire) cmd_origin_auth_retire "$@" ;;
+    origin-auth-status) cmd_origin_auth_status "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;
     remove)   cmd_remove "$@" ;;
