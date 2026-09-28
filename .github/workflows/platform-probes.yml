@@ -4,9 +4,9 @@
 #
 #   negative: a replayed OIDC token → 403; an arm64 binary for an x86-64
 #             box → 422 at /complete.
-#   overlap:  two deploys of demo-app at once → exactly one goes live, the
-#             other fails on the app's deploy lock (never an interleaved
-#             activate).
+#   overlap:  two deploys of demo-app completed at the same instant → both go
+#             live one after the other (deploying windows never overlap —
+#             never an interleaved activate).
 name: Platform probes
 
 on:
@@ -40,7 +40,7 @@ jobs:
           call() { # <token> <method> <path> [body] → "<body>\n<code>"
             { printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$1"
               printf 'request = "%s"\nurl = "%s%s"\nwrite-out = "\\n%%{http_code}"\nsilent\n' "$2" "$API" "$3"
-              [ -n "${4:-}" ] && printf 'data = "%s"\n' "${4//\"/\\\"}"
+              if [ -n "${4:-}" ]; then printf 'data = "%s"\n' "${4//\"/\\\"}"; fi
             } | curl --config -
           }
           code() { printf '%s' "$1" | tail -n1; }
@@ -92,34 +92,64 @@ jobs:
   overlap:
     needs: build
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [a, b]
-    outputs:
-      a: ${{ steps.result.outputs.a }}
-      b: ${{ steps.result.outputs.b }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: demo-app
-      - uses: homeport-sh/deploy@main
-        id: deploy
-        continue-on-error: true
-        with:
-          app: demo-app
-          artifact: app
-      - id: result
-        run: echo "${{ matrix.lane }}=${{ steps.deploy.outputs.status || 'error' }}" >> "$GITHUB_OUTPUT"
-
-  overlap-verdict:
-    needs: overlap
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          echo "lane a: ${{ needs.overlap.outputs.a }}  lane b: ${{ needs.overlap.outputs.b }}"
-          live=0
-          for s in "${{ needs.overlap.outputs.a }}" "${{ needs.overlap.outputs.b }}"; do [ "$s" = live ] && live=$((live+1)); done
-          if [ "$live" = 1 ]; then echo "ok   exactly one concurrent deploy went live"; exit 0; fi
-          if [ "$live" = 2 ]; then echo "::warning::both went live — the deploys did not overlap in time (inconclusive, not a failure of the lock)"; exit 0; fi
-          echo "::error::no deploy went live"; exit 1
+      - name: two completes at the same instant
+        run: |
+          set -euo pipefail
+          mint() {
+            printf 'header = "Authorization: Bearer %s"\nurl = "%s&audience=%s"\n' \
+              "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" "$AUD" \
+              | curl -sSf --config - | jq -r .value
+          }
+          call() { # <token> <method> <path> [body] → "<body>\n<code>"
+            { printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$1"
+              printf 'request = "%s"\nurl = "%s%s"\nwrite-out = "\\n%%{http_code}"\nsilent\n' "$2" "$API" "$3"
+              if [ -n "${4:-}" ]; then printf 'data = "%s"\n' "${4//\"/\\\"}"; fi
+            } | curl --config -
+          }
+          body() { printf '%s' "$1" | sed '$d'; }
+          open='{"app":"'"$APP"'"}'
+          # open + upload both first, so only the completes race
+          for lane in a b; do
+            r=$(call "$(mint)" POST /v1/deployments "$open")
+            body "$r" > "open-$lane.json"
+            curl -sSf -o /dev/null -X PUT --upload-file app "$(jq -r .upload_url "open-$lane.json")"
+            echo "lane $lane: $(jq -r .deployment_id "open-$lane.json") uploaded"
+          done
+          complete() {
+            call "$(jq -r .completion_token "open-$1.json")" POST "/v1/deployments/$(jq -r .deployment_id "open-$1.json")/complete" \
+              | tail -n1 > "complete-$1.code"
+          }
+          complete a & complete b & wait
+          echo "complete codes: a=$(cat complete-a.code) b=$(cat complete-b.code)"
+          # Observe both lanes every 0.5s. M0 runs ONE sequential worker (a
+          # deploy that meets the app lock is retried next tick), so the
+          # correct outcome is both live with deploying windows that never
+          # overlap — an interleaved activate is the failure.
+          watch() { # <lane> → "<first-deploying-ms> <live-ms> <final> <detail>"
+            local l=$1 i r st t start="" tok dep
+            tok=$(jq -r .completion_token "open-$l.json"); dep=$(jq -r .deployment_id "open-$l.json")
+            for i in $(seq 1 600); do
+              r=$(call "$tok" GET "/v1/deployments/$dep"); st=$(body "$r" | jq -r .status); t=$(date +%s%3N)
+              [ "$st" = deploying ] && [ -z "$start" ] && start=$t
+              case $st in
+                live) echo "${start:-$t} $t live -"; return;;
+                failed) echo "${start:-$t} $t failed $(body "$r" | jq -r '.detail // "-"' | tr ' ' _)"; return;;
+              esac
+              sleep 0.5
+            done
+            echo "- - timeout -"
+          }
+          watch a > w-a & watch b > w-b & wait
+          read -r sa la fa da < w-a; read -r sb lb fb db < w-b
+          echo "lane a: $fa deploying $sa → done $la ($da)"
+          echo "lane b: $fb deploying $sb → done $lb ($db)"
+          [ "$fa" = live ] && [ "$fb" = live ] || { echo "::error::expected both live (serialized), got a=$fa b=$fb"; exit 1; }
+          if [ "$la" -le "$sb" ] || [ "$lb" -le "$sa" ]; then
+            echo "ok   both live, deploying windows disjoint (a: $sa–$la, b: $sb–$lb)"
+          else
+            echo "::error::deploying windows overlap — interleaved activate (a: $sa–$la, b: $sb–$lb)"; exit 1
+          fi
