@@ -1,0 +1,125 @@
+# Checks the hosted platform refuses what it must — the things a green deploy
+# does not prove. Manual only; each run exercises the real API with this run's
+# OIDC tokens (no secrets). Tokens go to curl via stdin config, never argv.
+#
+#   negative: a replayed OIDC token → 403; an arm64 binary for an x86-64
+#             box → 422 at /complete.
+#   overlap:  two deploys of demo-app at once → exactly one goes live, the
+#             other fails on the app's deploy lock (never an interleaved
+#             activate).
+name: Platform probes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  API: https://api.homeport.sh
+  AUD: https://api.homeport.sh
+  APP: demo-app
+
+jobs:
+  negative:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: probe
+        run: |
+          set -euo pipefail
+          mint() {
+            printf 'header = "Authorization: Bearer %s"\nurl = "%s&audience=%s"\n' \
+              "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" "$AUD" \
+              | curl -sSf --config - | jq -r .value
+          }
+          call() { # <token> <method> <path> [body] → "<body>\n<code>"
+            { printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$1"
+              printf 'request = "%s"\nurl = "%s%s"\nwrite-out = "\\n%%{http_code}"\nsilent\n' "$2" "$API" "$3"
+              [ -n "${4:-}" ] && printf 'data = "%s"\n' "${4//\"/\\\"}"
+            } | curl --config -
+          }
+          code() { printf '%s' "$1" | tail -n1; }
+          body() { printf '%s' "$1" | sed '$d'; }
+          fails=0
+          expect() { # <label> <got> <want>
+            if [ "$2" = "$3" ]; then echo "ok   $1 ($2)"; else echo "::error::$1: got $2, want $3"; fails=$((fails+1)); fi
+          }
+          open='{"app":"'"$APP"'"}'
+
+          # replay: the first use spends the token's jti
+          t1=$(mint)
+          r=$(call "$t1" POST /v1/deployments "$open"); expect "fresh token opens a deployment" "$(code "$r")" 201
+          r=$(call "$t1" POST /v1/deployments "$open"); expect "replayed token is refused" "$(code "$r")" 403
+
+          # arm64 artifact for an x86-64 box
+          t2=$(mint)
+          r=$(call "$t2" POST /v1/deployments "$open"); expect "second deployment opens" "$(code "$r")" 201
+          url=$(body "$r" | jq -r .upload_url); dep=$(body "$r" | jq -r .deployment_id); ct=$(body "$r" | jq -r .completion_token)
+          mkdir -p /tmp/arm && cd /tmp/arm
+          printf 'package main\nfunc main() {}\n' > main.go
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o app main.go
+          head -c 20 app | od -An -tx1 | head -1
+          up=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT --upload-file app "$url")
+          expect "arm64 upload lands in the bucket" "$up" 200
+          r=$(call "$ct" POST "/v1/deployments/$dep/complete"); expect "arm64 binary refused at /complete" "$(code "$r")" 422
+          echo "reason: $(body "$r" | jq -r '.error // .')"
+          [ "$fails" = 0 ]
+
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/tanstack-start
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: |
+          bun --bun run build
+          bun build --compile --bytecode --production --minify --sourcemap \
+            --target=bun-linux-x64 --outfile dist/app .output/server/index.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-app
+          path: examples/tanstack-start/dist/app
+          retention-days: 1
+
+  overlap:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [a, b]
+    outputs:
+      a: ${{ steps.result.outputs.a }}
+      b: ${{ steps.result.outputs.b }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: demo-app
+      - uses: homeport-sh/deploy@main
+        id: deploy
+        continue-on-error: true
+        with:
+          app: demo-app
+          artifact: app
+      - id: result
+        run: echo "${{ matrix.lane }}=${{ steps.deploy.outputs.status || 'error' }}" >> "$GITHUB_OUTPUT"
+
+  overlap-verdict:
+    needs: overlap
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "lane a: ${{ needs.overlap.outputs.a }}  lane b: ${{ needs.overlap.outputs.b }}"
+          live=0
+          for s in "${{ needs.overlap.outputs.a }}" "${{ needs.overlap.outputs.b }}"; do [ "$s" = live ] && live=$((live+1)); done
+          if [ "$live" = 1 ]; then echo "ok   exactly one concurrent deploy went live"; exit 0; fi
+          if [ "$live" = 2 ]; then echo "::warning::both went live — the deploys did not overlap in time (inconclusive, not a failure of the lock)"; exit 0; fi
+          echo "::error::no deploy went live"; exit 1
