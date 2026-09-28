@@ -28,7 +28,7 @@ import (
 // `plugins` swaps Caddy for an official caddyserver.com build with the named
 // plugin modules baked in (nothing compiles on the box).
 func cmdServer(args []string) error {
-	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals | origin-auth [set|off]> [deploy@host]"
+	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals | origin-auth [set|retire|off]> [deploy@host]"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", use)
 	}
@@ -292,6 +292,8 @@ var originSecretRe = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
 //
 //	homeport server origin-auth              on/off (the secret is never printed)
 //	homeport server origin-auth set          secret from stdin (or a hidden prompt)
+//	homeport server origin-auth set --keep-previous   rotate: accept new AND current
+//	homeport server origin-auth retire       end a rotation: accept only the new one
 //	homeport server origin-auth off          stop requiring it
 //
 // Why: locking 80/443 to Cloudflare's ranges proves a request came through
@@ -299,6 +301,8 @@ var originSecretRe = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
 // proxied hostname at your IP. Add the Transform Rule (set static request
 // header X-Origin-Auth) BEFORE `set`, or every site drops all traffic.
 func cmdServerOriginAuth(args []string) error {
+	keep := hasFlag(args, "--keep-previous")
+	args = withoutFlag(args, "--keep-previous")
 	host := []string{}
 	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
 		host, args = args[n-1:], args[:n-1]
@@ -313,6 +317,8 @@ func cmdServerOriginAuth(args []string) error {
 		return sshRun(target, hd+"origin-auth-status")
 	case len(args) == 1 && args[0] == "off":
 		return sshRun(target, hd+"origin-auth-clear")
+	case len(args) == 1 && args[0] == "retire":
+		return sshRun(target, hd+"origin-auth-retire")
 	case len(args) == 1 && args[0] == "set":
 		secret, err := readSecretLine("X-Origin-Auth secret (the value in your Cloudflare Transform Rule; input hidden): ")
 		if err != nil {
@@ -321,9 +327,13 @@ func cmdServerOriginAuth(args []string) error {
 		if !originSecretRe.MatchString(secret) {
 			return fmt.Errorf("secret must be 32–128 characters of A-Z a-z 0-9 _ - (generate one: python3 -c 'import secrets; print(secrets.token_urlsafe(32))')")
 		}
-		return sshRunIn(target, hd+"origin-auth-set", secret+"\n")
+		verb := hd + "origin-auth-set"
+		if keep {
+			verb += " --keep-previous"
+		}
+		return sshRunIn(target, verb, secret+"\n")
 	default:
-		return fmt.Errorf("usage: homeport server origin-auth [set | off] [deploy@host]")
+		return fmt.Errorf("usage: homeport server origin-auth [set [--keep-previous] | retire | off] [deploy@host]")
 	}
 }
 

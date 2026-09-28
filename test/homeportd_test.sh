@@ -355,6 +355,12 @@ eq "oa: rejects a space"    "$(oasec 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa a
 eq "oa: rejects a newline"  "$(oasec $'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\na')" "deny"
 eq "oa: rejects \$"         "$(oasec 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$x')" "deny"
 
+# rotation overlap: two accepted values while the Cloudflare rule is switched
+A=Zx9_k-3QpL7mN2vR8tY4wE6uI1oA5sD0fG_hJ-kLzXc B=Qq1_w-2ErT3yU4iO5pA6sD7fG8hJ9kL0zX1cV2bN3m
+two=$(origin_auth_snippet "$A" "$B")
+eq  "oa: overlap accepts both" "$(grep -c 'not header X-Origin-Auth' <<<"$two")" "2"
+eq  "oa: current values parsed back" "$(origin_auth_values <<<"$two" | paste -sd, -)" "$A,$B"
+eq  "oa: off parses to nothing" "$(origin_auth_snippet "" | origin_auth_values | wc -l | tr -d ' ')" "0"
 # on/off state lives in the snippet file alone; ensure never clobbers "on"
 ORIGIN_AUTH_FRAG=$CADDY_DIR/00-origin-auth.caddy; rm -f "$ORIGIN_AUTH_FRAG"
 ensure_origin_auth_snippet
@@ -370,6 +376,32 @@ eq  "oa: snippet sorts first" "$(printf '%s\n' 00-origin-auth.caddy _gw_x.caddy 
 # only the box owner may toggle it — never CI or the platform
 has "oa: ci-gate denies set"   "$(gate web "sudo $hd origin-auth-set")"   "deny"
 has "oa: cert-gate denies set" "$(cgate "sudo $hd origin-auth-clear")"    "deny"
+# apply: re-renders fragments that predate the feature, and on a validation
+# failure restores EVERY fragment byte-for-byte (a half-applied change leaves
+# some sites open and others unreachable).
+ap_fails=0
+( fails=0; ap_etc=$(mktemp -d); HOMEPORT_ETC=$ap_etc
+  mkdir -p "$ap_etc/legacy"
+  printf 'DOMAIN=legacy.example.com\nPORT=8130\n' > "$ap_etc/legacy/config"
+  printf 'legacy.example.com {\n\treverse_proxy 127.0.0.1:8130\n}\n' > "$CADDY_DIR/legacy.caddy"
+  chown() { :; }; chmod() { :; }; systemctl() { :; }
+  before=$(cat "$CADDY_DIR"/*.caddy | cksum)
+  caddy_validate() { return 1; }
+  ( printf '%s\n' "$A" | cmd_origin_auth_set ) >/dev/null 2>&1 && { echo "FAIL oa: apply should die on invalid config"; fails=$((fails + 1)); }
+  eq "oa: failed apply restores every fragment" "$(cat "$CADDY_DIR"/*.caddy | cksum)" "$before"
+  caddy_validate() { return 0; }
+  printf '%s\n' "$A" | cmd_origin_auth_set >/dev/null
+  has "oa: apply re-renders legacy sites" "$(cat "$CADDY_DIR/legacy.caddy")" "import homeport_origin_auth"
+  eq  "oa: apply turns it on" "$(origin_auth_on && echo on || echo off)" "on"
+  printf '%s\n' "$B" | cmd_origin_auth_set --keep-previous >/dev/null
+  eq  "oa: keep-previous holds both, newest first" "$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | paste -sd, -)" "$B,$A"
+  cmd_origin_auth_retire >/dev/null
+  eq  "oa: retire keeps only the newest" "$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | paste -sd, -)" "$B"
+  rm -rf "$ap_etc" "$CADDY_DIR/legacy.caddy"
+  exit "$fails" ) || ap_fails=$?
+fails=$((fails + ap_fails))
+origin_auth_snippet "$A" "$B" > "$ORIGIN_AUTH_FRAG"
+has "oa: status flags a rotation in progress" "$(cmd_origin_auth_status)" "rotation in progress"
 rm -f "$ORIGIN_AUTH_FRAG"
 
 # --- C1 regression: health path is source'd as root, so it MUST reject any

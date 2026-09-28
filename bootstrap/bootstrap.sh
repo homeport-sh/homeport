@@ -629,15 +629,29 @@ ORIGIN_AUTH_FRAG=$CADDY_DIR/00-origin-auth.caddy
 # would run after the request had already been proxied.
 emit_origin_auth() { printf '%simport homeport_origin_auth\n' "$1"; }
 
-# origin_auth_snippet <secret|""> — the snippet definition.
+# origin_auth_snippet <secret|""> [previous] — the snippet definition. Two
+# values = a rotation in progress, accepted either way while the Cloudflare
+# rule is switched over. Lines in a matcher block are ANDed, so "not A, not B"
+# drops a request only when it carries neither. (The one-line header matcher
+# takes a single value.)
 origin_auth_snippet() {
   printf '# managed by homeport — edit via `homeport server origin-auth`\n'
   printf '(homeport_origin_auth) {\n'
   if [[ -n ${1:-} ]]; then
-    printf '\t@homeport_origin_unauthenticated not header X-Origin-Auth "%s"\n' "$1"
+    printf '\t@homeport_origin_unauthenticated {\n'
+    printf '\t\tnot header X-Origin-Auth "%s"\n' "$1"
+    [[ -n ${2:-} ]] && printf '\t\tnot header X-Origin-Auth "%s"\n' "$2"
+    printf '\t}\n'
     printf '\tabort @homeport_origin_unauthenticated\n'
   fi
   printf '}\n'
+}
+
+# origin_auth_values — the accepted values in a snippet on stdin, one per line,
+# newest first. The snippet is ours and its values are charset-validated, so a
+# plain match is exact.
+origin_auth_values() {
+  sed -n 's/^[[:space:]]*not header X-Origin-Auth "\([A-Za-z0-9_-]*\)"$/\1/p'
 }
 
 # valid_origin_secret <s> — the secret is written into a Caddyfile, so the
@@ -654,17 +668,17 @@ ensure_origin_auth_snippet() {
 }
 
 # origin_auth_on — is enforcement on? The snippet file is the only state.
-origin_auth_on() { grep -qs '^\s*abort @homeport_origin_unauthenticated' "$ORIGIN_AUTH_FRAG"; }
+origin_auth_on() { [[ -n $(origin_auth_values < "$ORIGIN_AUTH_FRAG" 2>/dev/null) ]]; }
 
 # _origin_auth_apply <secret|""> — write the snippet, re-render every public
 # site (fragments written before this feature existed have no import line),
 # validate, and reload — or restore every fragment and die. All-or-nothing: a
 # half-applied change would leave some sites open and others unreachable.
 _origin_auth_apply() {
-  local secret=$1 msg=$2 snap cfg app
+  local secret=$1 msg=$2 prev=${3:-} snap cfg app
   snap=$(mktemp -d)
   cp -p "$CADDY_DIR"/*.caddy "$snap"/ 2>/dev/null || true
-  origin_auth_snippet "$secret" > "$ORIGIN_AUTH_FRAG"
+  origin_auth_snippet "$secret" "$prev" > "$ORIGIN_AUTH_FRAG"
   # 640 root:caddy — the secret is a credential; only caddy needs to read it.
   chown root:caddy "$ORIGIN_AUTH_FRAG"; chmod 640 "$ORIGIN_AUTH_FRAG"
   for cfg in "$HOMEPORT_ETC"/*/config; do
@@ -691,14 +705,33 @@ _origin_auth_restore() {
   rm -rf "$snap"
 }
 
-# cmd_origin_auth_set — secret on stdin (never argv: it would show in ps and
-# in the SSH command line). Once on, EVERY public site on this box rejects a
-# request without the header — so add the Transform Rule at Cloudflare first.
+# cmd_origin_auth_set [--keep-previous] — secret on stdin (never argv: it would
+# show in ps and in the SSH command line). Once on, EVERY public site on this
+# box drops a request without the header — so add the Transform Rule at
+# Cloudflare first. To rotate without dropping traffic: set the new value with
+# --keep-previous (both accepted), switch the Cloudflare rule, then retire.
 cmd_origin_auth_set() {
-  local secret
+  local secret prev=""
   secret=$(head -c 256 | tr -d '\r\n')
   valid_origin_secret "$secret"
+  if [[ ${1:-} == --keep-previous ]]; then
+    prev=$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | head -1)
+    [[ -n $prev ]] || die "origin-auth is off — there is no previous value to keep"
+    [[ $prev != "$secret" ]] || die "that is already the current value"
+    _origin_auth_apply "$secret" "origin-auth: rotating — the new AND the previous value are accepted. Switch the Cloudflare rule, then: homeport server origin-auth retire" "$prev"
+    return
+  fi
+  [[ -z ${1:-} ]] || die "usage: origin-auth-set [--keep-previous] (secret on stdin)"
   _origin_auth_apply "$secret" "origin-auth: on — requests without the X-Origin-Auth header are now dropped"
+}
+
+# cmd_origin_auth_retire — end a rotation: accept only the newest value.
+cmd_origin_auth_retire() {
+  local cur
+  cur=$(origin_auth_values < "$ORIGIN_AUTH_FRAG" | head -1)
+  [[ -n $cur ]] || die "origin-auth is off — nothing to retire"
+  [[ $(origin_auth_values < "$ORIGIN_AUTH_FRAG" | wc -l) -gt 1 ]] || { echo "origin-auth: no rotation in progress — nothing to retire"; return 0; }
+  _origin_auth_apply "$cur" "origin-auth: previous value retired — only the new one is accepted"
 }
 
 cmd_origin_auth_clear() {
@@ -707,7 +740,11 @@ cmd_origin_auth_clear() {
 
 # cmd_origin_auth_status — on/off only. The value never leaves the box.
 cmd_origin_auth_status() {
-  if origin_auth_on; then echo "origin-auth: on"; else echo "origin-auth: off"; fi
+  local n
+  n=$(origin_auth_values < "$ORIGIN_AUTH_FRAG" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ $n -gt 1 ]]; then echo "origin-auth: on — rotation in progress ($n values accepted; finish with: homeport server origin-auth retire)"
+  elif [[ $n -eq 1 ]]; then echo "origin-auth: on"
+  else echo "origin-auth: off"; fi
 }
 
 # write_caddy <app> <domain> <port> <mode> <count> — (re)write an app's Caddy
@@ -2695,7 +2732,8 @@ homeportd — root-side homeport helper (run via sudo)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
   global-ech-rotate                  rotate ECH keys & re-publish (fixes late-added records)
   global-list                        show the managed global options
-  origin-auth-set                    require X-Origin-Auth (secret on stdin) on every public site
+  origin-auth-set [--keep-previous]  require X-Origin-Auth (secret on stdin) on every public site
+  origin-auth-retire                 end a rotation: drop the previous value
   origin-auth-clear                  stop requiring it
   origin-auth-status                 on/off (never prints the secret)
   self-update                        replace homeportd with a validated script from stdin
@@ -2745,6 +2783,7 @@ main() {
     global-list)    cmd_global_list "$@" ;;
     origin-auth-set)    cmd_origin_auth_set "$@" ;;
     origin-auth-clear)  cmd_origin_auth_clear "$@" ;;
+    origin-auth-retire) cmd_origin_auth_retire "$@" ;;
     origin-auth-status) cmd_origin_auth_status "$@" ;;
     self-update) cmd_self_update "$@" ;;
     version)  cmd_version "$@" ;;

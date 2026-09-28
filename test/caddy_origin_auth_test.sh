@@ -124,5 +124,16 @@ check "on: gateway fallback, right"     gw.test   /zzz  "$SECRET" "[404]"
 check "on: static, right"               st.test   /     "$SECRET" "hello"
 check "on: static, no header"           st.test   /     -         "[conn-dropped]"
 
+# --- rotation overlap: both values accepted, anything else still dropped ------
+NEW=Qq1_w-2ErT3yU4iO5pA6sD7fG8hJ9kL0zX1cV2bN3m
+origin_auth_snippet "$NEW" "$SECRET" > "$ORIGIN_AUTH_FRAG"
+start_caddy
+check "overlap: new value"              site.test /     "$NEW"    "[200]"
+check "overlap: previous value"         site.test /     "$SECRET" "[200]"
+check "overlap: gateway, previous"      gw.test   /a/x  "$SECRET" "path=/x"
+check "overlap: no header"              site.test /     -         "[conn-dropped]"
+check "overlap: wrong value"            site.test /     "nope"    "[conn-dropped]"
+check "overlap: new never reaches app"  site.test /     "$NEW"    "saw-secret=False"
+
 if [[ $fails -gt 0 ]]; then echo "$fails caddy origin-auth test(s) FAILED"; exit 1; fi
 echo "all caddy origin-auth tests passed ($(caddy version | awk '{print $1}'))"

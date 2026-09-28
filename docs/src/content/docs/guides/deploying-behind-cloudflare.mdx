@@ -102,10 +102,18 @@ homeport server origin-auth off    # stop requiring it
 
 <Aside type="caution" title="Order matters">
   Add the Transform Rule **before** `origin-auth set` — the other way round,
-  every site on the box drops all traffic until the rule exists. To rotate, set
-  the rule and the box to the new value back to back; requests in between are
-  dropped.
+  every site on the box drops all traffic until the rule exists.
 </Aside>
+
+### Rotating the secret
+
+The box can accept two values at once, so a rotation drops nothing:
+
+```sh
+homeport server origin-auth set --keep-previous   # new value; the old one still works
+# now change the Transform Rule at Cloudflare to the new value
+homeport server origin-auth retire                # only the new value works
+```
 
 ## The whole flow
 
