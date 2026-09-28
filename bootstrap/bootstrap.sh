@@ -1981,13 +1981,22 @@ cmd_upload() { # <app> <release> — receive the binary on stdin into a release 
 # THIS app — never remove/self-update/key-add, another app, or an interactive
 # shell. Runs as root (via sudo in the authorized_keys line); homeportd
 # re-validates every argument, so re-exec'ing the client's tokens is safe.
-# ci_gate_decision <app> <orig> — pure scoped-key policy. Echoes "allow <off>"
-# (argv index where the homeportd verb starts) or "deny <reason>". No exec/die,
-# so the security policy is unit-testable. Word-splitting is safe: every token
-# the CLI sends is whitespace-free (charset-safe ids/domains, base64 run/release,
-# secrets travel via stdin).
-ci_gate_decision() {
-  local app=$1 orig=$2
+# gate_decision <scope> <orig> — the policy shared by every forced command that
+# re-executes a client's request: a scoped CI key (ci-gate) and a hosted deploy
+# certificate (cert-gate). Pure: echoes "allow <off>" (argv index where the
+# homeportd verb starts) or "deny <reason>"; no exec/die, so it is unit-tested.
+# One allow-list for both, so a verb cannot be open through one door and shut
+# through the other.
+#
+# <scope> is an app name (ci-gate: that app only) or "*" (cert-gate: any app on
+# this box — a certificate is scoped to a box, which is one user's). Box scope
+# still requires a well-formed app name: verbs build paths from it.
+#
+# Word-splitting is safe: every token the CLI and the orchestrator send is
+# whitespace-free (charset-safe ids/domains, base64 run/release, secrets travel
+# via stdin).
+gate_decision() {
+  local scope=$1 orig=$2
   [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
   local -a a; read -ra a <<<"$orig"
   local off
@@ -1997,12 +2006,22 @@ ci_gate_decision() {
   local verb=${a[off]:-} arg1=${a[off+1]:-}
   case $verb in
     upload|upload-static|add|activate|rollback|env|env-sync|env-rm|env-list|status|logs)
-      [[ $arg1 == "$app" ]] || { echo "deny scoped to '$app', not '${arg1:-(none)}'"; return; } ;;
+      if [[ $scope == "*" ]]; then
+        [[ $arg1 =~ ^[a-z][a-z0-9-]{0,19}$ ]] || { echo "deny invalid app name '${arg1:-(none)}'"; return; }
+      else
+        [[ $arg1 == "$scope" ]] || { echo "deny scoped to '$scope', not '${arg1:-(none)}'"; return; }
+      fi ;;
     version) : ;;
     *) echo "deny verb '${verb:-(none)}' is not permitted"; return ;;
   esac
   echo "allow $off"
 }
+
+# ci_gate_decision <app> <orig> — a scoped CI key: one app.
+ci_gate_decision() { gate_decision "$1" "$2"; }
+
+# cert_gate_decision <orig> — a hosted deploy certificate: any app on the box.
+cert_gate_decision() { gate_decision "*" "$1"; }
 
 cmd_ci_gate() {
   local app=${1:-}
@@ -2016,6 +2035,22 @@ cmd_ci_gate() {
     exec /usr/local/bin/homeportd "${a[@]:off}"
   fi
   die "this key is scoped to '$app' — ${d#deny }"
+}
+
+# cmd_cert_gate — the SSH forced command for a hosted deploy certificate, set
+# by the homeport CA's template: `sudo /usr/local/bin/homeportd cert-gate
+# "$SSH_ORIGINAL_COMMAND"`. sshd runs it instead of whatever the client asked
+# for; the request arrives as arg 1 because sudo's env_reset drops the env var.
+# The certificate's principal already confined it to this box, so the gate is
+# box-scoped: any app here, never remove/self-update/key-add or a shell.
+cmd_cert_gate() {
+  local orig=${1:-${SSH_ORIGINAL_COMMAND:-}} d
+  d=$(cert_gate_decision "$orig")
+  if [[ $d == allow\ * ]]; then
+    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
+    exec /usr/local/bin/homeportd "${a[@]:off}"
+  fi
+  die "this certificate may not do that — ${d#deny }"
 }
 
 # cmd_activate_static <app> <release> — promote a static release: an atomic
@@ -2563,6 +2598,7 @@ main() {
     upload)   cmd_upload "$@" ;;
     upload-static) cmd_upload_static "$@" ;;
     ci-gate)  cmd_ci_gate "$@" ;;
+    cert-gate) cmd_cert_gate "$@" ;;
     activate) cmd_activate "$@" ;;
     autoscale) cmd_autoscale "$@" ;;
     rollback) cmd_rollback "$@" ;;

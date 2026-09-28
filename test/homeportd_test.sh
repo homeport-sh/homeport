@@ -270,6 +270,39 @@ has "gate: deny bare sudo"      "$(gate web "sudo bash")"                     "d
 eq  "gate: sudo offset"    "$(gate web "sudo $hd upload web r1")" "allow 2"
 eq  "gate: no-sudo offset" "$(gate web "$hd upload web r1")"      "allow 1"
 
+# --- cert_gate_decision: the box-scoped policy for hosted deploy certificates ---
+# A certificate is scoped to a box — one user's box, every app on it — so the
+# gate drops ci-gate's per-app pin and nothing else. Same verbs, same denials.
+cgate() { cert_gate_decision "$1"; }
+has "cgate: upload any app"       "$(cgate "sudo $hd upload web r1")"        "allow"
+has "cgate: activate another app" "$(cgate "sudo $hd activate shop r1")"     "allow"
+has "cgate: version"              "$(cgate "sudo $hd version")"              "allow"
+has "cgate: no-sudo form"         "$(cgate "$hd status web")"                "allow"
+eq  "cgate: sudo offset"          "$(cgate "sudo $hd upload web r1")"        "allow 2"
+eq  "cgate: no-sudo offset"       "$(cgate "$hd activate web r1")"           "allow 1"
+has "cgate: deny remove"          "$(cgate "sudo $hd remove web --yes")"     "deny"
+has "cgate: deny self-update"     "$(cgate "sudo $hd self-update")"          "deny"
+has "cgate: deny key-add"         "$(cgate "sudo $hd key-add")"              "deny"
+has "cgate: deny key-rm"          "$(cgate "sudo $hd key-rm x")"             "deny"
+has "cgate: deny tls-set"         "$(cgate "sudo $hd tls-set web")"          "deny"
+has "cgate: deny firewall-set"    "$(cgate "sudo $hd firewall-set")"         "deny"
+has "cgate: deny caddy-env-set"   "$(cgate "sudo $hd caddy-env-set X")"      "deny"
+has "cgate: deny global-dns"      "$(cgate "sudo $hd global-dns cloudflare")" "deny"
+has "cgate: deny ci-gate hop"     "$(cgate "sudo $hd ci-gate web x")"        "deny"
+has "cgate: deny cert-gate hop"   "$(cgate "sudo $hd cert-gate x")"          "deny"
+has "cgate: deny arbitrary cmd"   "$(cgate "cat /etc/shadow")"               "deny"
+has "cgate: deny scp"             "$(cgate "scp -t /tmp/x")"                 "deny"
+has "cgate: deny empty (shell)"   "$(cgate "")"                              "deny"
+has "cgate: deny bare sudo"       "$(cgate "sudo bash")"                     "deny"
+# box scope still requires a well-formed app name — "any app" must not become
+# "any argument" to a verb that builds paths from it
+has "cgate: deny missing app"     "$(cgate "sudo $hd activate")"             "deny"
+has "cgate: deny path in app"     "$(cgate "sudo $hd upload ../etc r1")"     "deny"
+has "cgate: deny uppercase app"   "$(cgate "sudo $hd upload Web r1")"        "deny"
+has "cgate: deny shell in app"    "$(cgate "sudo $hd upload a;id r1")"       "deny"
+# ci-gate's per-app pin is unchanged by sharing the allow-list
+has "gate: still pinned to app"   "$(gate web "sudo $hd activate shop r1")"  "deny"
+
 # --- C1 regression: health path is source'd as root, so it MUST reject any
 #     shell-active character (this was a root RCE via a scoped CI key's `add`) ---
 hp_ok() { [[ ${1:-} =~ ^/[A-Za-z0-9._/-]*$ ]]; }
