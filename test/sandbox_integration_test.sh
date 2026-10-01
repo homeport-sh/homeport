@@ -115,8 +115,17 @@ if [[ $after -gt $before ]]; then ok "memory bomb killed the sandbox, systemd re
 else fail "no restart after memory bomb ($before -> $after)"; systemctl show homeport-probe -p MemoryMax,MemorySwapMax,MemoryPeak; journalctl -u homeport-probe -n 15 --no-pager; fi
 eq "app is back after the restart"            "$(get /)" "ok"
 eq "the other tenant never noticed"           "$(curl -s --max-time 5 "http://$G2:$P2/")" "ok"
+# either outcome is containment: the limit stops the fork loop and the app
+# answers, or the bomb takes down ITS OWN sandbox (as in the spike) and
+# systemd brings it back — the neighbour must not notice either way
 started=$(get '/fork?n=2000')
-[[ $started =~ ^[0-9]+$ && $started -lt 600 ]] && ok "process limit holds (started $started of 2000)" || fail "fork limit: started [$started]"
+if [[ $started =~ ^[0-9]+$ ]]; then
+  [[ $started -lt 600 ]] && ok "process limit holds (started $started of 2000)" || fail "fork limit: started $started"
+else
+  for i in $(seq 1 60); do [[ $(get /) == ok ]] && break; sleep 1; done
+  eq "fork bomb took down only its own sandbox, which came back" "$(get /)" "ok"
+fi
+eq "the other tenant never noticed the fork bomb" "$(curl -s --max-time 5 "http://$G2:$P2/")" "ok"
 
 echo "--- stop and clean up"
 # probe-two never hit a limit (probe's Result stays oom-kill from the bomb)
