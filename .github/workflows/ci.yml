@@ -77,5 +77,8 @@ jobs:
           # a homeport box doesn't have; without this, sandbox egress can't leave
           sudo iptables -P FORWARD ACCEPT
 
+      - name: env values reach the app exactly (real systemd, runs as root)
+        run: sudo env "PATH=$PATH" REQUIRE_SYSTEMD=1 bash test/env_fidelity_test.sh
+
       - name: sandbox end to end (runs as root)
         run: sudo env "PATH=$PATH" REQUIRE_SANDBOX=1 bash test/sandbox_integration_test.sh

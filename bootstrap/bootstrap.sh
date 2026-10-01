@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.6.0
+HOMEPORTD_VERSION=0.6.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -2408,6 +2408,7 @@ activate_and_check() {
 # app at $HOST:$PORT; the pre-hook gets no PORT — nothing is listening yet).
 run_deploy_hook() {
   local app=$1 cmd=$2 with_port=${3:-} user="homeport-$app"
+  env_normalize "$app"   # bash must read the same values systemd does
   local dir="$HOMEPORT_ROOT/$app/current" envf="$HOMEPORT_ROOT/$app/shared/env"
   # the same env the service gets: app secrets from the env file (DATABASE_URL,
   # …) plus STATE_DIR so an embedded SQLite lives beside the running app's copy.
@@ -2546,6 +2547,8 @@ cmd_activate() {
   chown -R root:root "$dir"
   chmod 755 "$dir/bin"
 
+  # an env file from before canonical storage: fix it before the app (re)starts
+  env_normalize "$app"
   local prev=""
   [[ -L "$HOMEPORT_ROOT/$app/current" ]] && prev=$(readlink "$HOMEPORT_ROOT/$app/current")
 
@@ -2622,6 +2625,89 @@ cmd_rollback() {
   cmd_activate "$app" "$release"
 }
 
+# --- env file values -------------------------------------------------------------
+# The env file is read by systemd (EnvironmentFile=, for the app) and by bash
+# (deploy hooks source it). Stored raw, the two disagreed with each other and
+# with what was pushed: systemd drops an unquoted backslash; bash splits on
+# spaces and expands $(…). So values are decoded ONCE with .env rules and
+# stored canonically — KEY="…" escaping only \ " ` $ — which systemd's
+# double-quote parser and bash's double quotes both read back byte-for-byte.
+
+# env_decode_value <raw> — the value a raw .env value means. Unquoted:
+# literal (backslashes kept — the fix), surrounding whitespace trimmed as
+# systemd did. "…": systemd's rules (\" \\ \` \$ unescape, other \x kept).
+# '…': literal. Anything else (a quote mid-value, unterminated) is literal.
+env_decode_value() {
+  local v=$1 inner out="" i c n
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  if [[ ${#v} -ge 2 && ${v:0:1} == '"' && ${v: -1} == '"' ]]; then
+    inner=${v:1:${#v}-2}
+    for (( i = 0; i < ${#inner}; i++ )); do
+      c=${inner:i:1}
+      if [[ $c == '\' && $(( i + 1 )) -lt ${#inner} ]]; then
+        n=${inner:i+1:1}
+        case $n in
+          '"'|'\'|'`'|'$') out+=$n; i=$(( i + 1 )) ;;
+          *) out+='\' ;;
+        esac
+      elif [[ $c == '"' ]]; then
+        printf '%s' "$v"; return   # an unescaped quote inside: not one quoted value
+      else
+        out+=$c
+      fi
+    done
+    printf '%s' "$out"; return
+  fi
+  if [[ ${#v} -ge 2 && ${v:0:1} == "'" && ${v: -1} == "'" && ${v:1:${#v}-2} != *"'"* ]]; then
+    printf '%s' "${v:1:${#v}-2}"; return
+  fi
+  printf '%s' "$v"
+}
+
+# env_encode_value <value> — the canonical stored form, quotes included.
+env_encode_value() {
+  local v=$1
+  v=${v//\\/\\\\}; v=${v//\"/\\\"}; v=${v//\`/\\\`}; v=${v//\$/\\\$}
+  printf '"%s"' "$v"
+}
+
+# env_is_canonical <line> — KEY="…" with only \ " ` $ escaped
+env_is_canonical() {
+  [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*=\"([^\"\\\`\$]|\\[\\\"\`\$])*\"$ ]]
+}
+
+# env_render_file <file> [stdin-lines] — print the canonical file: every
+# KEY=value line decoded and re-encoded, last value per key wins, first-seen
+# order, comments and blanks dropped.
+env_render_file() {
+  local file=$1 line key
+  local -A vals=(); local -a order=()
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    key=${line%%=*}
+    [[ -n ${vals[$key]+x} ]] || order+=("$key")
+    vals[$key]=$(env_decode_value "${line#*=}")
+  done < "$file"
+  for key in "${order[@]}"; do printf '%s=%s\n' "$key" "$(env_encode_value "${vals[$key]}")"; done
+}
+
+# env_install <app> <rendered-file> — put a canonical file in place (root:app 640)
+env_install() {
+  install -o root -g "homeport-$1" -m 640 "$2" "$HOMEPORT_ROOT/$1/shared/env"
+}
+
+# env_normalize <app> — rewrite a legacy (raw) env file canonically. Values
+# keep what was pushed; only an unquoted backslash changes meaning (it now
+# survives). Cheap no-op when the file is already canonical.
+env_normalize() {
+  local app=$1 file="$HOMEPORT_ROOT/$1/shared/env" line tmp
+  [[ -s $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line ]] && continue
+    env_is_canonical "$line" || { tmp=$(mktemp); env_render_file "$file" > "$tmp"; env_install "$app" "$tmp"; rm -f "$tmp"; return 0; }
+  done < "$file"
+}
+
 cmd_env() { # merge KEY=value lines from stdin into the app's env file
   local app=${1:-}
   valid_app "$app"; load_app "$app"
@@ -2633,7 +2719,7 @@ cmd_env() { # merge KEY=value lines from stdin into the app's env file
       [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
       key=${line%%=*}
       [[ -n ${vars[$key]+x} ]] || order+=("$key")
-      vars[$key]=${line#*=}
+      vars[$key]=$(env_decode_value "${line#*=}")
     done < "$file"
   fi
   local added=0
@@ -2642,16 +2728,16 @@ cmd_env() { # merge KEY=value lines from stdin into the app's env file
     [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "invalid env line (expected KEY=value): '${line%%=*}'"
     key=${line%%=*}
     [[ -n ${vars[$key]+x} ]] || order+=("$key")
-    vars[$key]=${line#*=}
+    vars[$key]=$(env_decode_value "${line#*=}")
     added=$((added + 1))
   done
   (( added > 0 )) || die "no KEY=value lines on stdin"
   local tmp
   tmp=$(mktemp)
   for key in "${order[@]}"; do
-    printf '%s=%s\n' "$key" "${vars[$key]}" >> "$tmp"
+    printf '%s=%s\n' "$key" "$(env_encode_value "${vars[$key]}")" >> "$tmp"
   done
-  install -o root -g "homeport-$app" -m 640 "$tmp" "$file"
+  env_install "$app" "$tmp"
   rm -f "$tmp"
   echo "env updated: $added value(s) set, ${#order[@]} total"
   _env_restart "$app"
@@ -2680,7 +2766,7 @@ cmd_env_sync() { # DECLARATIVE: replace the env file entirely with stdin
     [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "invalid env line (expected KEY=value): '${line%%=*}'"
     key=${line%%=*}
     [[ -n ${newvars[$key]+x} ]] || order+=("$key")
-    newvars[$key]=${line#*=}
+    newvars[$key]=$(env_decode_value "${line#*=}")
   done
   # report keys being dropped (present before, absent now) — never silent
   local -a removed=(); local k
@@ -2691,8 +2777,8 @@ cmd_env_sync() { # DECLARATIVE: replace the env file entirely with stdin
     done < "$file"
   fi
   local tmp; tmp=$(mktemp)
-  for key in "${order[@]}"; do printf '%s=%s\n' "$key" "${newvars[$key]}" >> "$tmp"; done
-  install -o root -g "homeport-$app" -m 640 "$tmp" "$file"; rm -f "$tmp"
+  for key in "${order[@]}"; do printf '%s=%s\n' "$key" "$(env_encode_value "${newvars[$key]}")" >> "$tmp"; done
+  env_install "$app" "$tmp"; rm -f "$tmp"
   echo "env synced: ${#order[@]} value(s) (full replace)"
   (( ${#removed[@]} )) && echo "dropped: ${removed[*]}"
   _env_restart "$app"
@@ -2709,6 +2795,7 @@ cmd_env_rm() { # remove specific keys (given as args)
     [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid key: '$k'"
     drop[$k]=1
   done
+  env_normalize "$app"
   local tmp removed=0; tmp=$(mktemp)
   while IFS= read -r line; do
     if [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && [[ -n ${drop[${line%%=*}]+x} ]]; then
@@ -2717,7 +2804,7 @@ cmd_env_rm() { # remove specific keys (given as args)
       printf '%s\n' "$line" >> "$tmp"
     fi
   done < "$file"
-  install -o root -g "homeport-$app" -m 640 "$tmp" "$file"; rm -f "$tmp"
+  env_install "$app" "$tmp"; rm -f "$tmp"
   echo "removed $removed key(s)"
   (( removed > 0 )) && _env_restart "$app"
 }
@@ -2733,7 +2820,8 @@ cmd_env_list() { # keys only — values never leave the box
     while IFS= read -r line; do
       [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
       key=${line%%=*}
-      printf '%s{"key":"%s","chars":%d}' "$sep" "$key" $(( ${#line} - ${#key} - 1 ))
+      local _v; _v=$(env_decode_value "${line#*=}")
+      printf '%s{"key":"%s","chars":%d}' "$sep" "$key" "${#_v}"
       sep=","
     done < "$file"
     printf ']\n'
@@ -2743,7 +2831,8 @@ cmd_env_list() { # keys only — values never leave the box
   while IFS= read -r line; do
     [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
     key=${line%%=*}
-    printf '%s (%d chars)\n' "$key" $(( ${#line} - ${#key} - 1 ))
+    local _v; _v=$(env_decode_value "${line#*=}")
+    printf '%s (%d chars)\n' "$key" "${#_v}"
   done < "$file"
 }
 
