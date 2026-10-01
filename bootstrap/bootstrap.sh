@@ -589,7 +589,9 @@ tenant_slice_max_bytes() {
   (( reserve < 1073741824 )) && reserve=1073741824
   local max=$(( total - reserve ))
   (( max < total / 2 )) && max=$(( total / 2 ))
-  echo "$max"
+  # whole 4 KiB pages: the kernel stores memory.max rounded down to a page,
+  # so an unaligned value would differ from what is actually enforced
+  echo $(( max / 4096 * 4096 ))
 }
 
 tenant_slice_unit() { # <max bytes>

@@ -636,7 +636,9 @@ has "sandbox unit: runsc gets the stop"   "$sbu" "KillMode=mixed"
 # wake at once, together they can't starve the host's own services
 has "sandbox unit: in the tenant slice"   "$sbu" "Slice=homeport-tenants.slice"
 G=$((1024 * 1024 * 1024))
-eq "slice: 16 GiB host keeps 10% back"      "$(tenant_slice_max_bytes $((16 * 1024 * 1024)))" "$(( 16 * G - 16 * G / 10 ))"
+eq "slice: 16 GiB host keeps 10% back"      "$(tenant_slice_max_bytes $((16 * 1024 * 1024)))" "$(( (16 * G - 16 * G / 10) / 4096 * 4096 ))"
+odd=$(tenant_slice_max_bytes 15123457)       # a MemTotal that isn't a round number
+eq "slice: whole pages, as the kernel stores it" "$(( odd % 4096 ))" "0"
 eq "slice: 4 GiB host keeps 1 GiB back"     "$(tenant_slice_max_bytes $((4 * 1024 * 1024)))"  "$(( 3 * G ))"
 eq "slice: a tiny host still gives tenants half" "$(tenant_slice_max_bytes $((1024 * 1024)))" "$(( G / 2 ))"
 slu=$(tenant_slice_unit $(( 3 * G )))
