@@ -119,11 +119,13 @@ started=$(get '/fork?n=2000')
 [[ $started =~ ^[0-9]+$ && $started -lt 600 ]] && ok "process limit holds (started $started of 2000)" || fail "fork limit: started [$started]"
 
 echo "--- stop and clean up"
-t0=$(date +%s%N); systemctl stop homeport-probe; t1=$(date +%s%N)
+# probe-two never hit a limit (probe's Result stays oom-kill from the bomb)
+t0=$(date +%s%N); systemctl stop homeport-probe-two; t1=$(date +%s%N)
 ms=$(( (t1 - t0) / 1000000 ))
 [[ $ms -lt 8000 ]] && ok "stops promptly (${ms} ms)" || fail "stop took ${ms} ms"
-eq "a stop is clean, not failed" "$(systemctl show homeport-probe -p Result --value)" "success"
-[[ $(systemctl show homeport-probe -p Result --value) == success ]] || journalctl -u homeport-probe -n 15 --no-pager
+eq "a stop is clean, not failed" "$(systemctl show homeport-probe-two -p Result --value)" "success"
+[[ $(systemctl show homeport-probe-two -p Result --value) == success ]] || journalctl -u homeport-probe-two -n 15 --no-pager
+eq "stop leaves no sandbox network" "$(ip link show "hpv$P2" >/dev/null 2>&1 && echo present || echo gone)" "gone"
 "$HD" remove probe --yes >/dev/null
 eq "unit gone"       "$(systemctl list-units --all --no-legend 'homeport-probe.service' | wc -l | tr -d ' ')" "0"
 eq "netns gone"      "$(ip netns list | grep -c "^hp-$P\b" || true)" "0"
