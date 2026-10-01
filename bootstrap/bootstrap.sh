@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.5.0
+HOMEPORTD_VERSION=0.6.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -230,7 +230,7 @@ wait_healthy_port() { # <port> — polls http://127.0.0.1:<port>$HEALTH_PATH
   iters=$(( $(timeout_secs "${HEALTH_TIMEOUT:-30s}") * 2 ))
   (( iters < 1 )) && iters=1
   for (( i = 1; i <= iters; i++ )); do
-    if curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port$HEALTH_PATH" 2>/dev/null; then
+    if curl -fs -o /dev/null --max-time 2 "http://$(app_addr "$port"):$port$HEALTH_PATH" 2>/dev/null; then
       return 0
     fi
     sleep 0.5
@@ -272,6 +272,33 @@ compute_limits() {
 # emit_service_body <port-expr> — the shared [Service] block. Relies on
 # bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from cmd_add.
 emit_service_body() {
+  if sandbox_on; then
+    # The app runs inside gVisor; this unit runs homeportd as root to build
+    # the sandbox and exec runsc. Limits on the unit bound the whole sandbox.
+    cat <<EOF
+[Service]
+ExecStart=/usr/local/bin/homeportd sandbox-run $app $1
+ExecStop=/usr/local/bin/homeportd sandbox-stop $app $1
+ExecStopPost=/usr/local/bin/homeportd sandbox-clean $app $1
+EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env
+Environment=NODE_ENV=production
+Environment=PORT=$1
+Environment=NBC_RUNTIME_DIR=$HOMEPORT_ROOT/$app/shared/runtime
+Environment=STATE_DIR=$HOMEPORT_ROOT/$app/shared
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=20
+SuccessExitStatus=143 SIGTERM
+LimitNOFILE=65536
+TasksMax=512
+$limits
+EOF
+    # a memory limit means RAM+swap: on a host with swap, MemoryMax alone lets
+    # a tenant page past its limit instead of being stopped at it
+    [[ $limits == *MemoryMax=* ]] && echo "MemorySwapMax=0"
+    return 0
+  fi
   # optional launch args (from RUN, set by cmd_add): substitute $PORT/$HOST
   # with this unit's port-expr ($1) and the loopback host. After substitution
   # RUN contains no "$" (validated), so the unquoted heredoc won't re-expand.
@@ -341,6 +368,268 @@ EOF
   fi
 }
 
+# --- sandbox: gvisor ------------------------------------------------------------
+# `sandbox: gvisor` runs an app inside gVisor (runsc): its own kernel (the app
+# never makes a syscall to ours), its own network namespace, a read-only root,
+# and the app's uid. This is what makes a box safe to share between customers.
+# systemd still supervises it — restarts, cgroup limits, journald — through a
+# unit whose ExecStart is `homeportd sandbox-run`, which builds the sandbox and
+# execs runsc. Proven in design/shared-hosts-gvisor-spike.md (homeport-sh/cloud).
+SANDBOX_STATE=/run/homeport-sandbox      # per-instance bundles (rebuilt each start)
+SANDBOX_RUNSC_ROOT=/run/homeport-runsc   # runsc's own state
+SANDBOX_DNS="1.1.1.1 9.9.9.9"
+# read-only host paths a dynamically linked binary (glibc, Bun, Node) and TLS
+# clients need; mounted only when present on the host
+SANDBOX_RO_PATHS="/lib /lib64 /usr/lib /usr/lib64 /etc/ssl/certs /usr/share/ca-certificates /usr/share/zoneinfo"
+
+sandbox_on() { [[ ${SANDBOX:-} == gvisor ]]; }
+
+# validate_sandbox <sandbox> <release_b64> <post_release_b64>
+validate_sandbox() {
+  local sb=${1:-} rel=${2:-} post=${3:-}
+  [[ $rel == - ]] && rel=""; [[ $post == - ]] && post=""
+  case $sb in
+    ""|strict|relaxed) return 0 ;;
+    gvisor)
+      # hooks run natively as the app user — customer code outside the sandbox
+      [[ -z $rel && -z $post ]] || die "sandbox: gvisor apps can't have release/post_release hooks yet (they would run outside the sandbox)"
+      return 0 ;;
+  esac
+  die "sandbox must be 'strict' (default), 'relaxed', or 'gvisor'"
+}
+
+# sandbox_ip <port> <host|guest> — the instance's /30 inside 100.64.0.0/14,
+# keyed by the port it serves: unique on the box, valid for any port.
+sandbox_ip() {
+  local n=$(( $1 * 4 ))
+  local a=$(( 64 + (n >> 16) )) b=$(( (n >> 8) & 255 )) c=$(( n & 255 ))
+  if [[ ${2:-guest} == host ]]; then echo "100.$a.$b.$((c + 1))"; else echo "100.$a.$b.$((c + 2))"; fi
+}
+
+# sandbox_id <app> <port> — a runsc container id. runsc matches ids by PREFIX,
+# so ids end in "_" and app names can't contain one: no id is ever a prefix
+# of another.
+sandbox_id() { echo "hp_${1}_${2}_"; }
+
+# app_addr <port> — where the loaded app's instance on <port> is reached.
+app_addr() { if sandbox_on; then sandbox_ip "$1" guest; else echo 127.0.0.1; fi; }
+
+# sandbox_spec --uid --gid --cwd --bin --args --release --shared --netns
+#              --hostname --env-file — print the OCI config. --env-file holds
+# NUL-separated KEY=value pairs (the unit's environment, as systemd parsed it),
+# so values reach the app byte-for-byte, quotes and newlines included.
+sandbox_spec() {
+  local uid gid cwd bin args="" release shared netns host envf
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --uid) uid=$2 ;; --gid) gid=$2 ;; --cwd) cwd=$2 ;; --bin) bin=$2 ;;
+      --args) args=$2 ;; --release) release=$2 ;; --shared) shared=$2 ;;
+      --netns) netns=$2 ;; --hostname) host=$2 ;; --env-file) envf=$2 ;;
+      *) die "sandbox_spec: unknown flag $1" ;;
+    esac
+    shift 2
+  done
+  local ro="" p
+  for p in $SANDBOX_RO_PATHS; do [[ -e $p ]] && ro+="$p "; done
+  # run args were validated to a quote-free charset: whitespace split is exact
+  local -a argv=("$bin"); local a argj
+  for a in $args; do argv+=("$a"); done
+  # argv as JSON from NUL-separated input: jq would parse a positional
+  # "--port" as one of its own options.
+  argj=$(printf '%s\0' "${argv[@]}" | jq -Rs 'split("\u0000")[:-1]')
+  jq -n \
+    --argjson argv "$argj" \
+    --argjson uid "$uid" --argjson gid "$gid" --arg cwd "$cwd" \
+    --arg release "$release" --arg shared "$shared" --arg netns "$netns" --arg host "$host" \
+    --arg ro "$ro" \
+    --rawfile envraw "$envf" \
+    '{
+      ociVersion: "1.0.2",
+      process: {
+        terminal: false,
+        user: {uid: $uid, gid: $gid},
+        args: $argv,
+        env: (
+          ($envraw | split("\u0000") | map(select(length > 0))
+            | map(select(test("^(INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|NOTIFY_SOCKET|MAINPID|MANAGERPID|LISTEN_[A-Z]+|WATCHDOG_[A-Z]+|PATH|HOST|HOSTNAME|HOME|LOGNAME|USER|SHELL|LANG|TERM)=") | not)))
+          + ["PATH=/usr/local/bin:/usr/bin:/bin", "HOST=0.0.0.0", "HOSTNAME=0.0.0.0"]
+        ),
+        cwd: $cwd,
+        noNewPrivileges: true,
+        capabilities: {bounding: [], effective: [], inheritable: [], permitted: [], ambient: []},
+        rlimits: [{type: "RLIMIT_NOFILE", hard: 65536, soft: 65536}]
+      },
+      root: {path: "rootfs", readonly: true},
+      hostname: $host,
+      mounts: (
+        [ {destination: "/proc", type: "proc", source: "proc"},
+          {destination: "/tmp", type: "tmpfs", source: "tmpfs", options: ["nosuid", "nodev", "size=64m"]},
+          {destination: $cwd, type: "bind", source: $release, options: ["rbind", "ro"]},
+          {destination: $shared, type: "bind", source: $shared, options: ["rbind", "rw"]} ]
+        + ($ro | split(" ") | map(select(length > 0)) | map({destination: ., type: "bind", source: ., options: ["rbind", "ro"]}))
+      ),
+      linux: {
+        namespaces: [{type: "pid"}, {type: "ipc"}, {type: "uts"}, {type: "mount"}, {type: "network", path: $netns}]
+      }
+    }'
+}
+
+# sandbox_firewall_rules — the host firewall for every sandbox, as one nft
+# script (applied atomically). Sandboxes reach the internet and nothing of
+# ours: not the host, not each other, not the cloud metadata service, not a
+# private network (the CA, the database). Order matters in forward: the
+# denies come before the accept.
+sandbox_firewall_rules() {
+  cat <<'NFT'
+table inet homeport_sandbox
+delete table inet homeport_sandbox
+table inet homeport_sandbox {
+	chain input {
+		type filter hook input priority -10; policy accept;
+		iifname "hpv*" ct state established,related accept
+		iifname "hpv*" drop
+	}
+	chain forward {
+		type filter hook forward priority -10; policy accept;
+		iifname "hpv*" oifname "hpv*" drop
+		iifname "hpv*" ip daddr { 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 0.0.0.0/8, 224.0.0.0/4, 240.0.0.0/4 } drop
+		iifname "hpv*" accept
+		oifname "hpv*" ct state established,related accept
+		oifname "hpv*" drop
+	}
+}
+table ip homeport_sandbox_nat
+delete table ip homeport_sandbox_nat
+table ip homeport_sandbox_nat {
+	chain postrouting {
+		type nat hook postrouting priority 100; policy accept;
+		ip saddr 100.64.0.0/14 oifname != "hpv*" masquerade
+	}
+}
+NFT
+}
+
+# ensure_sandbox_firewall — idempotent; run on every sandbox start (the nft
+# tables don't survive a reboot; the units that need them recreate them).
+ensure_sandbox_firewall() {
+  sysctl -qw net.ipv4.ip_forward=1
+  echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/98-homeport-sandbox.conf
+  # ufw drops forwarded traffic by default, which would also drop sandbox
+  # egress; homeport_sandbox's forward chain is the forward policy instead.
+  if [[ -f /etc/default/ufw ]] && ! grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw; then
+    sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+    ufw reload >/dev/null 2>&1 || true
+  fi
+  sandbox_firewall_rules | nft -f - || die "sandbox: could not apply the sandbox firewall"
+}
+
+sandbox_net_up() { # <port>
+  local port=$1 ns="hp-$1" vh="hpv$1" vs="hps$1"
+  local host guest; host=$(sandbox_ip "$port" host); guest=$(sandbox_ip "$port" guest)
+  ip netns add "$ns"
+  ip link add "$vh" type veth peer name "$vs" netns "$ns"
+  ip addr add "$host/30" dev "$vh"; ip link set "$vh" up
+  ip -n "$ns" addr add "$guest/30" dev "$vs"; ip -n "$ns" link set "$vs" up
+  ip -n "$ns" link set lo up
+  # gVisor snapshots routes when the sandbox starts: add before runsc runs
+  ip -n "$ns" route add default via "$host"
+}
+
+sandbox_net_down() { # <port>
+  ip link del "hpv$1" 2>/dev/null || true
+  ip netns del "hp-$1" 2>/dev/null || true
+}
+
+sandbox_check_tools() {
+  local t
+  for t in runsc jq nft ip; do
+    command -v "$t" >/dev/null || die "sandbox: '$t' is not installed — run: homeport server sandbox install"
+  done
+}
+
+# cmd_sandbox_run <app> <port> — ExecStart of a gvisor app's unit (as root).
+cmd_sandbox_run() {
+  local app=${1:-} port=${2:-}
+  valid_app "$app"; [[ $port =~ ^[0-9]{2,5}$ ]] || die "sandbox-run: invalid port '$port'"
+  load_app "$app"
+  sandbox_on || die "sandbox-run: app '$app' is not sandbox: gvisor"
+  sandbox_check_tools
+  local id b user="homeport-$app" release uid gid
+  id=$(sandbox_id "$app" "$port"); b="$SANDBOX_STATE/$id"
+  # a crash can leave the last run behind
+  cmd_sandbox_clean "$app" "$port" >/dev/null 2>&1 || true
+  ensure_sandbox_firewall
+  release=$(readlink -f "$HOMEPORT_ROOT/$app/current") || die "sandbox-run: '$app' has no current release"
+  [[ -x $release/bin ]] || die "sandbox-run: no binary at $release/bin"
+  uid=$(id -u "$user") gid=$(id -g "$user")
+  install -d -m 700 "$b" "$SANDBOX_RUNSC_ROOT"
+  install -d -m 755 "$b/rootfs" "$b/rootfs/etc" "$b/rootfs/tmp" "$b/rootfs/proc"
+  # minimal /etc: who the app is, how it resolves names
+  printf 'root:x:0:0:root:/:/usr/sbin/nologin\n%s:x:%s:%s::%s:/usr/sbin/nologin\n' "$user" "$uid" "$gid" "$HOMEPORT_ROOT/$app" > "$b/rootfs/etc/passwd"
+  printf 'root:x:0:\n%s:x:%s:\n' "$user" "$gid" > "$b/rootfs/etc/group"
+  printf '127.0.0.1 localhost %s\n' "$app" > "$b/rootfs/etc/hosts"
+  local d; : > "$b/rootfs/etc/resolv.conf"
+  for d in $SANDBOX_DNS; do echo "nameserver $d" >> "$b/rootfs/etc/resolv.conf"; done
+  echo 'hosts: files dns' > "$b/rootfs/etc/nsswitch.conf"
+  # the app's environment exactly as systemd parsed it for this unit
+  env -0 > "$b/env"; chmod 600 "$b/env"
+  local args=""
+  if [[ -n ${RUN_B64:-} && $RUN_B64 != - ]]; then
+    args=$(printf %s "$RUN_B64" | base64 -d)
+    args=${args//\$\{PORT\}/$port}; args=${args//\$PORT/$port}
+    args=${args//\$\{HOST\}/0.0.0.0}; args=${args//\$HOST/0.0.0.0}
+  fi
+  sandbox_spec --uid "$uid" --gid "$gid" --cwd "$HOMEPORT_ROOT/$app/current" --bin "$HOMEPORT_ROOT/$app/current/bin" \
+    --args "$args" --release "$release" --shared "$HOMEPORT_ROOT/$app/shared" \
+    --netns "/var/run/netns/hp-$port" --hostname "$app" --env-file "$b/env" > "$b/config.json"
+  rm -f "$b/env"; chmod 600 "$b/config.json"   # holds the app's secrets
+  sandbox_net_up "$port"
+  # --ignore-cgroups: the sandbox stays in this unit's cgroup, so systemd's
+  # MemoryMax/CPUQuota/TasksMax bound the WHOLE sandbox (sentry included).
+  exec runsc --root="$SANDBOX_RUNSC_ROOT" --ignore-cgroups --network=sandbox \
+    run --bundle "$b" "$id"
+}
+
+# cmd_sandbox_stop <app> <port> — ExecStop: ask the app to exit cleanly.
+cmd_sandbox_stop() {
+  local app=${1:-} port=${2:-} id i
+  valid_app "$app"; [[ $port =~ ^[0-9]{2,5}$ ]] || die "sandbox-stop: invalid port"
+  id=$(sandbox_id "$app" "$port")
+  runsc --root="$SANDBOX_RUNSC_ROOT" kill "$id" TERM 2>/dev/null || return 0
+  for i in $(seq 1 40); do
+    runsc --root="$SANDBOX_RUNSC_ROOT" state "$id" 2>/dev/null | grep -q '"status": "running"' || return 0
+    sleep 0.25
+  done
+}
+
+# cmd_sandbox_clean <app> <port> — ExecStopPost: leave nothing behind.
+cmd_sandbox_clean() {
+  local app=${1:-} port=${2:-} id
+  valid_app "$app"; [[ $port =~ ^[0-9]{2,5}$ ]] || die "sandbox-clean: invalid port"
+  id=$(sandbox_id "$app" "$port")
+  if command -v runsc >/dev/null; then
+    runsc --root="$SANDBOX_RUNSC_ROOT" kill "$id" KILL 2>/dev/null || true
+    runsc --root="$SANDBOX_RUNSC_ROOT" delete -force "$id" 2>/dev/null || true
+  fi
+  sandbox_net_down "$port"
+  rm -rf "${SANDBOX_STATE:?}/${id:?}"
+}
+
+# cmd_sandbox_install — gVisor from its signed apt repository, plus the tools
+# sandbox-run needs.
+cmd_sandbox_install() {
+  command -v apt-get >/dev/null || die "sandbox install supports Ubuntu/Debian only"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq ca-certificates curl gnupg jq nftables iproute2 >/dev/null
+  curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+    > /etc/apt/sources.list.d/gvisor.list
+  apt-get update -qq
+  apt-get install -y -qq runsc >/dev/null
+  echo "sandbox: $(runsc --version | head -1) installed"
+}
+
 _teardown_idle_units() { # remove socket/proxy when an app leaves idle mode
   local app=$1
   [[ -f "/etc/systemd/system/homeport-$app-proxy.socket" ]] || return 0
@@ -366,9 +655,9 @@ app_upstreams() {
   local port=$1 mode=$2 count=${3:-1} upstreams="" rbase i
   if [[ $mode == template ]]; then
     rbase=$(replica_base "$port")
-    for (( i = 1; i <= count; i++ )); do upstreams+=" 127.0.0.1:$((rbase + i))"; done
+    for (( i = 1; i <= count; i++ )); do upstreams+=" $(app_addr $((rbase + i))):$((rbase + i))"; done
   else
-    upstreams=" 127.0.0.1:$port"
+    upstreams=" $(app_addr "$port"):$port"
   fi
   echo "$upstreams"
 }
@@ -1574,7 +1863,8 @@ cmd_add() {
   [[ $strategy == - ]] && strategy=""
   [[ $health_timeout == - ]] && health_timeout=""
   [[ -z $health_timeout || $health_timeout =~ ^[0-9]+[smh]$ ]] || die "health timeout must be a number with s/m/h suffix (e.g. 30s, 2m)"
-  [[ -z $sandbox || $sandbox == strict || $sandbox == relaxed ]] || die "sandbox must be 'strict' (default) or 'relaxed'"
+  validate_sandbox "$sandbox" "$release_b64" "$post_release_b64"
+  [[ $sandbox != gvisor ]] || sandbox_check_tools
   [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""
@@ -1759,7 +2049,7 @@ EOF
     for (( i = 1; i <= replicas; i++ )); do
       p=$((rbase + i))
       systemctl enable "homeport-$app@$p" >/dev/null 2>&1 || true
-      caddy_upstreams+=" 127.0.0.1:$p"
+      caddy_upstreams+=" $(app_addr "$p"):$p"
     done
     # scale-down: retire instances beyond the new count
     for (( i = replicas + 1; i <= old_replicas; i++ )); do
@@ -1845,7 +2135,7 @@ Requires=homeport-$app.service
 After=homeport-$app.service
 
 [Service]
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=$idle_timeout 127.0.0.1:$internal_port
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=$idle_timeout $(app_addr "$internal_port"):$internal_port
 NoNewPrivileges=true
 EOF
       systemctl daemon-reload
@@ -2715,6 +3005,8 @@ cmd_remove() {
         "/etc/systemd/system/homeport-$app-proxy.service" \
         "$CADDY_DIR/$app.caddy"
   systemctl daemon-reload
+  # a unit that ended failed stays listed (and keeps its state) until reset
+  systemctl reset-failed "homeport-$app.service" "homeport-$app@*.service" "homeport-$app-green.service" 2>/dev/null || true
   systemctl reload caddy 2>/dev/null || true
   # the BYO cert dir holds a private key — it must not outlive the app
   rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}" "${TLS_CERT_DIR:?}/${app:?}"
@@ -2761,6 +3053,8 @@ homeportd — root-side homeport helper (run via sudo)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
   global-ech-rotate                  rotate ECH keys & re-publish (fixes late-added records)
   global-list                        show the managed global options
+  sandbox-install                    install gVisor (runsc) for apps with sandbox: gvisor
+  sandbox-run|stop|clean <app> <port> (used by the app's systemd unit)
   origin-auth-set [--keep-previous]  require X-Origin-Auth (secret on stdin) on every public site
   origin-auth-retire                 end a rotation: drop the previous value
   origin-auth-clear                  stop requiring it
@@ -2811,6 +3105,10 @@ main() {
     global-ech)     cmd_global_ech "$@" ;;
     global-ech-rotate) cmd_global_ech_rotate "$@" ;;
     global-list)    cmd_global_list "$@" ;;
+    sandbox-run)   cmd_sandbox_run "$@" ;;
+    sandbox-stop)  cmd_sandbox_stop "$@" ;;
+    sandbox-clean) cmd_sandbox_clean "$@" ;;
+    sandbox-install) cmd_sandbox_install "$@" ;;
     origin-auth-set)    cmd_origin_auth_set "$@" ;;
     origin-auth-clear)  cmd_origin_auth_clear "$@" ;;
     origin-auth-retire) cmd_origin_auth_retire "$@" ;;

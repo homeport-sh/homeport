@@ -287,8 +287,11 @@ func parseConfig(data []byte) (*config, error) {
 		return nil, fmt.Errorf("%s: release must be a single line (chain steps with && )", configFile)
 	case strings.ContainsAny(cfg.PostRelease, "\n\r"):
 		return nil, fmt.Errorf("%s: post_release must be a single line (chain steps with && )", configFile)
-	case cfg.Sandbox != "" && cfg.Sandbox != "strict" && cfg.Sandbox != "relaxed":
-		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default) or 'relaxed' (for binaries that run their own sandbox, e.g. a browser), got %q", configFile, cfg.Sandbox)
+	case cfg.Sandbox != "" && cfg.Sandbox != "strict" && cfg.Sandbox != "relaxed" && cfg.Sandbox != "gvisor":
+		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default), 'relaxed' (for binaries that run their own sandbox, e.g. a browser), or 'gvisor' (its own kernel and network — for a box shared between customers), got %q", configFile, cfg.Sandbox)
+	case cfg.Sandbox == "gvisor" && (cfg.Release != "" || cfg.PostRelease != ""):
+		// hooks run natively as the app user, i.e. outside the sandbox
+		return nil, fmt.Errorf("%s: sandbox: gvisor apps can't have release/post_release hooks yet — they would run outside the sandbox", configFile)
 	case cfg.Strategy != "" && cfg.Strategy != "blue-green" && cfg.Strategy != "recreate":
 		return nil, fmt.Errorf("%s: strategy must be 'blue-green' (default, zero-downtime) or 'recreate' (restart in place — for singleton apps that can't run two instances), got %q", configFile, cfg.Strategy)
 	case cfg.TLS != "" && cfg.TLS != "auto" && cfg.TLS != "manual" && !dnsProviderRe.MatchString(cfg.TLS):

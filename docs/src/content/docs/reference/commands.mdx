@@ -44,6 +44,7 @@ Values are sent over ssh stdin, never argv, and live only on the server.
 | `homeport server dns <provider>` | global DNS module for DNS-01 certs + ECH publication |
 | `homeport server ech <public-name>` | Encrypted Client Hello (needs `server dns`) |
 | `homeport server origin-auth [set [--keep-previous]\|retire\|off]` | require an `X-Origin-Auth` secret (from a Cloudflare Transform Rule) on every public site; `--keep-previous` + `retire` rotate with no dropped requests; bare = on/off |
+| `homeport server sandbox install` | install gVisor (`runsc`) so apps can use `sandbox: gvisor` |
 
 ## Certificates & lifecycle
 

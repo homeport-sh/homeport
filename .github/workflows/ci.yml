@@ -52,3 +52,30 @@ jobs:
       # As root so the "another local user is refused" case runs too.
       - name: admin API off TCP, against real caddy
         run: sudo REQUIRE_CADDY=1 bash test/caddy_admin_test.sh
+
+  # sandbox: gvisor, end to end on a real kernel: deploys a probe app through
+  # homeportd and attacks the sandbox from inside. Its own job — it installs
+  # homeportd and writes under /opt and /etc on the runner.
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: install gVisor + tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq nftables iproute2 curl gnupg
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq runsc
+          runsc --version | head -1
+          # the runner's Docker sets the iptables FORWARD policy to DROP, which
+          # a homeport box doesn't have; without this, sandbox egress can't leave
+          sudo iptables -P FORWARD ACCEPT
+
+      - name: sandbox end to end (runs as root)
+        run: sudo env "PATH=$PATH" REQUIRE_SANDBOX=1 bash test/sandbox_integration_test.sh

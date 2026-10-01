@@ -28,7 +28,7 @@ import (
 // `plugins` swaps Caddy for an official caddyserver.com build with the named
 // plugin modules baked in (nothing compiles on the box).
 func cmdServer(args []string) error {
-	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals | origin-auth [set|retire|off]> [deploy@host]"
+	const use = "usage: homeport server <update | cloudflare [--lock] | plugins [add|rm …] | firewall [allow <file|cloudflare>|clear] | dns | ech | globals | origin-auth [set|retire|off] | sandbox install> [deploy@host]"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", use)
 	}
@@ -60,6 +60,8 @@ func cmdServer(args []string) error {
 		return cmdServerCloudflare(args[1:])
 	case "origin-auth":
 		return cmdServerOriginAuth(args[1:])
+	case "sandbox":
+		return cmdServerSandbox(args[1:])
 	default:
 		return fmt.Errorf("%s", use)
 	}
@@ -281,6 +283,24 @@ func cmdServerCloudflare(args []string) error {
 	}
 	fmt.Fprintln(os.Stderr, "  • optional privacy:  homeport server ech <public-name>")
 	return nil
+}
+
+// cmdServerSandbox prepares a box for apps with `sandbox: gvisor`:
+//
+//	homeport server sandbox install     gVisor (runsc) from its signed apt repo
+func cmdServerSandbox(args []string) error {
+	host := []string{}
+	if n := len(args); n > 0 && strings.Contains(args[n-1], "@") {
+		host, args = args[n-1:], args[:n-1]
+	}
+	if len(args) != 1 || args[0] != "install" {
+		return fmt.Errorf("usage: homeport server sandbox install [deploy@host]")
+	}
+	target, err := serverTarget(host)
+	if err != nil {
+		return err
+	}
+	return sshRun(target, "sudo /usr/local/bin/homeportd sandbox-install")
 }
 
 // originSecretRe mirrors homeportd's valid_origin_secret: the value is written

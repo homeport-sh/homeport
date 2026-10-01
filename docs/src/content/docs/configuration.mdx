@@ -31,7 +31,7 @@ referenced-but-unset variable is a hard error).
 | `idle` | `false` | scale-to-zero (socket-activated); with `idle_timeout` † (`5m`) |
 | `replicas` | `1` | fixed instance count (1–20), load-balanced + rolling |
 | `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
-| `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers) |
+| `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers); `gvisor` to run the app inside gVisor, with its own kernel and network, for a box shared between people who don't trust each other (needs `homeport server sandbox install`; no `release`/`post_release` hooks yet) |
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
 | `tls` | `auto` | `manual` (cert via `homeport tls set`) or `dns:<provider>` (DNS-01 via a caddy-dns plugin) |
 | `dns_token_env` † | `HOMEPORT_DNS_<PROVIDER>` | env var holding the DNS token for `tls: dns:*`; `none` for SDK-env providers |

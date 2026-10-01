@@ -423,6 +423,109 @@ origin_auth_snippet "$A" "$B" > "$ORIGIN_AUTH_FRAG"
 has "oa: status flags a rotation in progress" "$(cmd_origin_auth_status)" "rotation in progress"
 rm -f "$ORIGIN_AUTH_FRAG"
 
+# --- sandbox: gvisor (multi-tenant runner) --------------------------------
+# Each instance (keyed by the port it serves) gets its own /30 in 100.64/14:
+# host side .1, sandbox .2. Unique per port, valid up to port 65535.
+declare -A sb_seen=(); sb_bad=0
+for p in $(seq 8100 8160) $(seq 9100 9110) $(seq 10001 10040) 65535; do
+  g=$(sandbox_ip "$p" guest); h=$(sandbox_ip "$p" host)
+  [[ $g =~ ^100\.(6[4-7])\.([0-9]+)\.([0-9]+)$ && ${BASH_REMATCH[2]} -le 255 && ${BASH_REMATCH[3]} -le 254 ]] || { echo "bad guest ip for $p: $g"; sb_bad=1; }
+  [[ ${h%.*} == "${g%.*}" && $(( ${g##*.} - ${h##*.} )) == 1 ]] || { echo "host/guest not a pair for $p: $h $g"; sb_bad=1; }
+  [[ -z ${sb_seen[$g]:-} ]] || { echo "guest ip reused: $g ($p, ${sb_seen[$g]})"; sb_bad=1; }
+  sb_seen[$g]=$p
+done
+eq "sandbox: one valid, unique /30 per port" "$sb_bad" "0"
+# runsc matches container IDs by PREFIX (the spike sent an exec to the wrong
+# tenant): no id may ever be a prefix of another.
+sb_ids=(); for a in a ab a-b web web-api; do for p in 8100 81000 9100 10001; do sb_ids+=("$(sandbox_id "$a" "$p")"); done; done
+sb_pre=0
+for x in "${sb_ids[@]}"; do for y in "${sb_ids[@]}"; do [[ $x != "$y" && $y == "$x"* ]] && { echo "prefix: $x < $y"; sb_pre=1; }; done; done
+eq "sandbox: no container id is a prefix of another" "$sb_pre" "0"
+eq "sandbox: native apps stay on loopback" "$(SANDBOX= app_addr 8100)" "127.0.0.1"
+eq "sandbox: gvisor apps are reached at their sandbox" "$(SANDBOX=gvisor app_addr 8100)" "$(sandbox_ip 8100 guest)"
+eq "sandbox: caddy upstream (plain)" "$(SANDBOX=gvisor app_upstreams 8100 plain 1)" " $(sandbox_ip 8100 guest):8100"
+eq "sandbox: caddy upstreams (replicas)" "$(SANDBOX=gvisor app_upstreams 8100 template 2 | wc -w | tr -d ' ')" "2"
+has "sandbox: replica upstreams are sandboxes" "$(SANDBOX=gvisor app_upstreams 8100 template 2)" "$(sandbox_ip "$(( $(replica_base 8100) + 2 ))" guest):$(( $(replica_base 8100) + 2 ))"
+
+# the unit: systemd supervises (restart, cgroup limits); homeportd builds the
+# sandbox and execs runsc — as root, because runsc needs it to set up the
+# sandbox, which is what then holds the app's code.
+sbu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits=$'MemoryMax=256M\nCPUQuota=50%' emit_service_body 8100)
+has "sandbox unit: starts the sandbox"    "$sbu" "ExecStart=/usr/local/bin/homeportd sandbox-run web 8100"
+has "sandbox unit: graceful stop"         "$sbu" "ExecStop=/usr/local/bin/homeportd sandbox-stop web 8100"
+has "sandbox unit: always cleans up"      "$sbu" "ExecStopPost=/usr/local/bin/homeportd sandbox-clean web 8100"
+has "sandbox unit: app env from the file" "$sbu" "EnvironmentFile=-/opt/homeport/web/shared/env"
+has "sandbox unit: memory limit"          "$sbu" "MemoryMax=256M"
+has "sandbox unit: cpu limit"             "$sbu" "CPUQuota=50%"
+has "sandbox unit: pids limit"            "$sbu" "TasksMax="
+has "sandbox unit: restarts on failure"   "$sbu" "Restart=on-failure"
+has "sandbox unit: runsc gets the stop"   "$sbu" "KillMode=mixed"
+# swap would absorb a memory bomb: a memory limit means RAM+swap (CI runner
+# with swap: a 600M allocation under MemoryMax=256M simply survived)
+has "sandbox unit: swap can't dodge the memory limit" "$sbu" "MemorySwapMax=0"
+# the app exits 143 on SIGTERM; a clean stop must not leave a failed unit
+has "sandbox unit: SIGTERM exit is a clean stop" "$sbu" "SuccessExitStatus=143 SIGTERM"
+eq  "sandbox unit: no swap cap without a memory limit" \
+    "$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits= emit_service_body 8100 | grep -c MemorySwapMax)" "0"
+eq  "sandbox unit: no native exec of the binary" "$(grep -c '^ExecStart=/opt/homeport' <<<"$sbu")" "0"
+eq  "sandbox unit: no User= (runsc drops privileges itself)" "$(grep -c '^User=' <<<"$sbu")" "0"
+has "sandbox unit: replicas keep %i" "$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits= emit_service_body '%i')" "sandbox-run web %i"
+nsu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX= limits= emit_service_body 8100)
+has "native unit unchanged" "$nsu" "ExecStart=/opt/homeport/web/current/bin"
+
+# hooks run natively as the app user — customer code outside the sandbox — so
+# a gvisor app may not have them (until hooks run sandboxed too)
+sbv() { (validate_sandbox "$@") >/dev/null 2>&1 && echo ok || echo deny; }
+eq "sandbox: gvisor accepted"             "$(sbv gvisor "" "")" "ok"
+eq "sandbox: strict/relaxed/unset accepted" "$(sbv strict "" ""; sbv relaxed "" ""; sbv "" "" "")" $'ok\nok\nok'
+eq "sandbox: unknown value refused"       "$(sbv docker "" "")" "deny"
+eq "sandbox: gvisor + release hook refused"      "$(sbv gvisor "bWlncmF0ZQ==" "")" "deny"
+eq "sandbox: gvisor + post_release hook refused" "$(sbv gvisor "" "bWlncmF0ZQ==")" "deny"
+eq "sandbox: strict + hooks still fine"   "$(sbv strict "bWlncmF0ZQ==" "bWlncmF0ZQ==")" "ok"
+
+# the OCI spec: everything the sandbox is allowed, in one reviewed place
+if command -v jq >/dev/null; then
+  sbenv=$(mktemp)
+  printf 'SECRET=a "quoted" \\ value\nwith a newline\0PORT=8100\0INVOCATION_ID=abc\0JOURNAL_STREAM=8:9\0PATH=/sbin\0' > "$sbenv"
+  spec=$(sandbox_spec --uid 997 --gid 996 --cwd /opt/homeport/web/current --bin /opt/homeport/web/current/bin \
+         --args "serve --port 8100" --release /opt/homeport/web/releases/r1 --shared /opt/homeport/web/shared \
+         --netns /var/run/netns/hp-8100 --hostname web --env-file "$sbenv")
+  rm -f "$sbenv"
+  j() { jq -r "$1" <<<"$spec"; }
+  eq "spec: read-only root"            "$(j .root.readonly)" "true"
+  eq "spec: runs as the app's uid"     "$(j .process.user.uid)" "997"
+  eq "spec: never as root"             "$(j '.process.user.uid != 0')" "true"
+  eq "spec: no new privileges"         "$(j .process.noNewPrivileges)" "true"
+  eq "spec: no capabilities"           "$(j '[.process.capabilities // {} | .[] | length] | add // 0')" "0"
+  eq "spec: argv"                      "$(j '.process.args | join(" ")')" "/opt/homeport/web/current/bin serve --port 8100"
+  eq "spec: same cwd as native"        "$(j .process.cwd)" "/opt/homeport/web/current"
+  eq "spec: secret survives exactly"   "$(j '.process.env[] | select(startswith("SECRET="))')" $'SECRET=a "quoted" \\ value\nwith a newline'
+  eq "spec: listens inside its netns"  "$(j '.process.env[] | select(startswith("HOST="))')" "HOST=0.0.0.0"
+  eq "spec: systemd internals dropped" "$(j '[.process.env[] | select(test("^(INVOCATION_ID|JOURNAL_STREAM)="))] | length')" "0"
+  eq "spec: sane PATH"                 "$(j '.process.env[] | select(startswith("PATH="))')" "PATH=/usr/local/bin:/usr/bin:/bin"
+  eq "spec: release mounted read-only at current/" "$(j '.mounts[] | select(.destination=="/opt/homeport/web/current") | [.source, (.options|index("ro")!=null)] | join(" ")')" "/opt/homeport/web/releases/r1 true"
+  eq "spec: shared dir writable"       "$(j '.mounts[] | select(.destination=="/opt/homeport/web/shared") | (.options|index("rw")!=null)')" "true"
+  eq "spec: private /tmp"              "$(j '.mounts[] | select(.destination=="/tmp") | .type')" "tmpfs"
+  eq "spec: every host bind is read-only except shared" "$(j '[.mounts[] | select(.type=="bind" and .destination!="/opt/homeport/web/shared") | select(.options|index("ro")==null)] | length')" "0"
+  eq "spec: its own network namespace" "$(j '.linux.namespaces[] | select(.type=="network") | .path')" "/var/run/netns/hp-8100"
+  eq "spec: own pid/ipc/uts/mount"     "$(j '[.linux.namespaces[].type] | sort | join(",")')" "ipc,mount,network,pid,uts"
+else
+  echo "skip: jq not installed (spec tests)"
+fi
+
+# the host firewall for sandboxes: reach the internet, nothing of ours
+fw=$(sandbox_firewall_rules)
+has "fw: sandboxes can't reach host services" "$fw" 'iifname "hpv*" drop'
+has "fw: …but replies to the host get back"   "$fw" 'iifname "hpv*" ct state established,related accept'
+for d in 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 127.0.0.0/8; do
+  has "fw: no egress to $d" "$fw" "$d"
+done
+has "fw: no sandbox-to-sandbox"   "$fw" 'iifname "hpv*" oifname "hpv*" drop'
+has "fw: nothing unsolicited in"  "$fw" 'oifname "hpv*" drop'
+has "fw: egress is NATed"         "$fw" 'masquerade'
+eq  "fw: deny rules come before the egress accept" \
+    "$(awk '/169.254.0.0\/16/{d=NR} /iifname "hpv\*" accept/{a=NR} END{print (d && a && d<a) ? "yes" : "no"}' <<<"$fw")" "yes"
+
 # --- C1 regression: health path is source'd as root, so it MUST reject any
 #     shell-active character (this was a root RCE via a scoped CI key's `add`) ---
 hp_ok() { [[ ${1:-} =~ ^/[A-Za-z0-9._/-]*$ ]]; }

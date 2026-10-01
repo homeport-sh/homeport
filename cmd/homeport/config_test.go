@@ -63,6 +63,9 @@ func TestParseConfigRejects(t *testing.T) {
 		{"run extra var", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port $PORT --db $DBHOST\n", "only reference"},
 		{"multiline release", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrelease: \"a\\nb\"\n", "single line"},
 		{"bad sandbox", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: loose\n", "sandbox"},
+		// hooks run natively as the app user, i.e. outside the sandbox
+		{"gvisor with release hook", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nrelease: ./bin migrate\n", "gvisor"},
+		{"gvisor with post_release hook", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\npost_release: ./bin warm\n", "gvisor"},
 		{"bad strategy", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nstrategy: canary\n", "strategy"},
 		{"bad tls", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ntls: self-signed\n", "tls must be"},
 		{"bad dns provider", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ntls: 'dns:Cloud_Flare!'\n", "tls must be"},
@@ -119,6 +122,8 @@ func TestParseConfigAccepts(t *testing.T) {
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port $PORT --host $HOST\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port ${PORT} --host ${HOST}\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: relaxed\nstrategy: recreate\n",
+		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nreplicas: 2\n",
+		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nidle: true\n",
 		"app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nhealth:\n  timeout: 90s\n",
 		"app: worker\nserver: 1.2.3.4\ninternal: true\n",                                // bare host normalizes, internal ok
 		"app: docs\nserver: deploy@1.2.3.4\ndomain: docs.example.com\nstatic: ./dist\n", // static site
