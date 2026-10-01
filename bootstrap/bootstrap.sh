@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.7.0
+HOMEPORTD_VERSION=0.7.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -2703,6 +2703,22 @@ ci_gate_decision() { gate_decision "$1" "$2"; }
 # holds other customers' apps.
 cert_gate_decision() {
   [[ ${1:-} =~ ^[a-z][a-z0-9-]{0,19}$ ]] || { echo "deny this certificate is not scoped to an app"; return; }
+  # The control plane retires an app (its owner deleted it) by removing it
+  # from the host: allowed for the certificate's OWN app, in exactly the
+  # confirmed form. Not in gate_decision, which CI keys share — a CI key
+  # never removes anything.
+  local -a a; read -ra a <<<"${2:-}"
+  local off=-1
+  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
+  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then off=1; fi
+  if (( off >= 0 )) && [[ ${a[off]:-} == remove ]]; then
+    if [[ ${a[off+1]:-} == "$1" && ${a[off+2]:-} == --yes && ${#a[@]} -eq $(( off + 3 )) ]]; then
+      echo "allow $off"
+    else
+      echo "deny may only remove '$1', as: remove $1 --yes"
+    fi
+    return
+  fi
   gate_decision "$1" "${2:-}"
 }
 
