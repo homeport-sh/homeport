@@ -43,18 +43,19 @@ CGO_ENABLED=1 go build -o /tmp/probe ./test/sandbox/probe || { echo "probe build
 file /tmp/probe | grep -q 'dynamically linked' && ok "probe is dynamically linked" || fail "probe should be dynamic"
 
 SECRET=$'tricky "value" with \\ backslash'
-deploy_probe() { # <app> <memory>
-  local app=$1 mem=$2
+deploy_probe() { # <app> <memory> [egress]
+  local app=$1 mem=$2 egress=${3:--}
   # add <app> <domain> <health> <memory> <cpu> <idle> <idle_timeout> <replicas>
   #     <autoscale> <run> <release> <post_release> <path> <sandbox>
-  "$HD" add "$app" - / "$mem" 100% - - 1 - - - - - gvisor >/dev/null || return 1
+  #     <strategy> … <aliases> (15–23, unset) <egress>
+  "$HD" add "$app" - / "$mem" 100% - - 1 - - - - - gvisor - - - - - - - - - "$egress" >/dev/null || return 1
   printf 'SECRET=%s\n' "$SECRET" | "$HD" env "$app" >/dev/null || return 1
   "$HD" upload "$app" r1 < /tmp/probe >/dev/null || return 1
   "$HD" activate "$app" r1
 }
 
 cleanup() {
-  for a in probe probe-two; do "$HD" remove "$a" --yes >/dev/null 2>&1 || true; done
+  for a in probe probe-two probe-web; do "$HD" remove "$a" --yes >/dev/null 2>&1 || true; done
   [[ -n ${listener_pid:-} ]] && kill "$listener_pid" 2>/dev/null
 }
 trap cleanup EXIT
@@ -131,6 +132,20 @@ last=$(jq -r .seq <<<"$recs" | sort -n | tail -1)
 "$HD" meter-gate "sudo /usr/local/bin/homeportd meter-ack $last" >/dev/null
 eq "confirmed records are gone" "$("$HD" meter-read 0 | wc -l | tr -d ' ')" "0"
 systemctl start homeport-meter.timer
+
+echo "--- outbound policy"
+eq "full: any port out (github.com:22)"   "$(get '/dial?addr=github.com:22')" "connected"
+eq "full: still no mail (smtp:587)"       "$(get '/dial?addr=smtp.gmail.com:587')" "blocked"
+deploy_probe probe-web 256M web >/dev/null && ok "deploy a web-only tenant (the free tier)" || fail "deploy probe-web"
+PW=$(sed -n 's/^PORT=//p' "$HOMEPORT_ETC/probe-web/config"); GW=$(sandbox_ip "$PW" guest)
+getw() { curl -s --max-time 10 "http://$GW:$PW$1"; }
+eq "web-only: its link says so"           "$(ip link show "hpvw$PW" >/dev/null 2>&1 && echo hpvw || echo other)" "hpvw"
+eq "web-only: HTTPS out works"            "$(getw '/dial?addr=1.1.1.1:443')" "connected"
+eq "web-only: DNS works"                  "$(getw '/resolve?name=example.com')" "resolved"
+eq "web-only: other ports blocked (:22)"  "$(getw '/dial?addr=github.com:22')" "blocked"
+eq "web-only: no mail (smtp:587)"         "$(getw '/dial?addr=smtp.gmail.com:587')" "blocked"
+"$HD" remove probe-web --yes >/dev/null
+eq "web-only link removed with the app"   "$(ip link show "hpvw$PW" >/dev/null 2>&1 && echo present || echo gone)" "gone"
 
 echo "--- limits"
 before=$(systemctl show homeport-probe -p NRestarts --value)

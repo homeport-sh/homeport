@@ -620,6 +620,17 @@ else
   echo "skip: jq not installed (spec tests)"
 fi
 
+# outbound policy: the policy is in the link's NAME, so re-applying the
+# firewall can never lose a sandbox's policy (no per-sandbox state)
+eq "egress: full sandboxes use hpv<port>"     "$(sandbox_veth 8100 full)" "hpv8100"
+eq "egress: unset means full"                 "$(sandbox_veth 8100 '')"   "hpv8100"
+eq "egress: web-only sandboxes use hpvw<port>" "$(sandbox_veth 8100 web)"  "hpvw8100"
+eq "egress: names fit IFNAMSIZ at port 65535" "$(( $(sandbox_veth 65535 web | wc -c) - 1 <= 15 ))" "1"
+ev() { (validate_egress "$@") >/dev/null 2>&1 && echo ok || echo deny; }
+eq "egress: web/full/unset with gvisor"  "$(ev gvisor web; ev gvisor full; ev gvisor '')" $'ok\nok\nok'
+eq "egress: unknown policy refused"      "$(ev gvisor open)" "deny"
+eq "egress: only for sandboxed apps"     "$(ev strict web)" "deny"
+
 # the host firewall for sandboxes: reach the internet, nothing of ours
 fw=$(sandbox_firewall_rules)
 has "fw: sandboxes can't reach host services" "$fw" 'iifname "hpv*" drop'
@@ -630,6 +641,14 @@ done
 has "fw: no sandbox-to-sandbox"   "$fw" 'iifname "hpv*" oifname "hpv*" drop'
 has "fw: nothing unsolicited in"  "$fw" 'oifname "hpv*" drop'
 has "fw: egress is NATed"         "$fw" 'masquerade'
+# mail is blocked for every sandbox (blacklisted IPs hurt every tenant on a host)
+has "fw: no outbound mail, any tier" "$fw" 'iifname "hpv*" tcp dport { 25, 465, 587 } drop'
+# web-only (the free tier): web, DNS and database ports — nothing else
+has "fw: web-only tcp ports"   "$fw" 'iifname "hpvw*" tcp dport != { 53, 80, 443, 3306, 5432, 6379, 27017 } drop'
+has "fw: web-only udp is DNS"  "$fw" 'iifname "hpvw*" udp dport != 53 drop'
+has "fw: web-only nothing else" "$fw" 'iifname "hpvw*" meta l4proto != { tcp, udp } drop'
+eq  "fw: policy drops come before the egress accept" \
+    "$(awk '/dport .*25, 465, 587/{m=NR} /l4proto != /{w=NR} /iifname "hpv\*" accept/{a=NR} END{print (m && w && a && m<a && w<a) ? "yes" : "no"}' <<<"$fw")" "yes"
 eq  "fw: deny rules come before the egress accept" \
     "$(awk '/169.254.0.0\/16/{d=NR} /iifname "hpv\*" accept/{a=NR} END{print (d && a && d<a) ? "yes" : "no"}' <<<"$fw")" "yes"
 
