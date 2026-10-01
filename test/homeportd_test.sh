@@ -530,6 +530,71 @@ has "meter-gate: deny other binaries" "$(mg "cat /var/lib/homeport/meter/spool")
 # and a deploy certificate can't read other tenants' usage
 has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
 
+# --- pause / resume (abuse response; reversible, nothing deleted) ---------------
+# systemctl is stubbed: we check what pause/resume ask systemd to do per mode.
+( fails=0
+  pr_etc=$(mktemp -d); HOMEPORT_ETC=$pr_etc
+  sc_log=$(mktemp); systemctl() { echo "$*" >> "$sc_log"; }
+  mkapp() { mkdir -p "$pr_etc/$1"; printf '%s\n' "$2" > "$pr_etc/$1/config"; }
+  ran() { cat "$sc_log"; : > "$sc_log"; }
+
+  mkapp web $'PORT=8100\nREPLICAS=1'
+  cmd_pause web >/dev/null
+  out=$(ran)
+  has "pause: stops and disables the app"      "$out" "disable --now homeport-web"
+  eq  "pause: recorded in the config"          "$(grep -c '^PAUSED=1$' "$pr_etc/web/config")" "1"
+  ( cmd_pause web ) >/dev/null 2>&1 && ok_p=ok || ok_p=deny
+  eq  "pause: a second pause is harmless"      "$ok_p" "ok"
+  ( cmd_add web - / >/dev/null 2>&1 ) && a=allowed || a=refused
+  eq  "pause: add is refused (a deploy must not un-pause it)" "$a" "refused"
+  ( cmd_activate web r1 >/dev/null 2>&1 ) && a=allowed || a=refused
+  eq  "pause: activate is refused"             "$a" "refused"
+  ( cmd_rollback web >/dev/null 2>&1 ) && a=allowed || a=refused
+  eq  "pause: rollback is refused"             "$a" "refused"
+  ran >/dev/null
+  cmd_resume web >/dev/null
+  has "resume: enables and starts it again"    "$(ran)" "enable --now homeport-web"
+  eq  "resume: no longer paused"               "$(grep -c '^PAUSED=' "$pr_etc/web/config")" "0"
+
+  # scale-to-zero: the socket must go too, or the next request wakes it
+  mkapp idl $'PORT=8101\nREPLICAS=1\nIDLE=true'
+  cmd_pause idl >/dev/null
+  out=$(ran)
+  has "pause idle: socket disabled (traffic can't wake it)" "$out" "disable --now homeport-idl-proxy.socket"
+  has "pause idle: proxy stopped"              "$out" "stop homeport-idl-proxy.service"
+  has "pause idle: app stopped"                "$out" "disable --now homeport-idl"
+  cmd_resume idl >/dev/null
+  out=$(ran)
+  has "resume idle: socket back"               "$out" "enable --now homeport-idl-proxy.socket"
+  eq  "resume idle: the app itself waits for traffic" "$(grep -c 'enable --now homeport-idl$' <<<"$out")" "0"
+
+  # replicas: every instance, and the autoscaler stops scaling it back up
+  mkapp rep $'PORT=8102\nREPLICAS=2\nAUTOSCALE_MAX=3'
+  touch "$pr_etc/rep.timer-marker"
+  cmd_pause rep >/dev/null
+  out=$(ran)
+  rb=$(replica_base 8102)
+  for i in 1 2 3; do has "pause replicas: instance $i" "$out" "disable --now homeport-rep@$((rb+i))"; done
+  has "pause replicas: autoscaler off"         "$out" "disable --now homeport-rep-autoscale.timer"
+  cmd_resume rep >/dev/null
+  out=$(ran)
+  for i in 1 2; do has "resume replicas: instance $i" "$out" "enable --now homeport-rep@$((rb+i))"; done
+  eq  "resume replicas: only the current count" "$(grep -c "homeport-rep@$((rb+3))" <<<"$out")" "0"
+  has "resume replicas: autoscaler on"         "$out" "enable --now homeport-rep-autoscale.timer"
+
+  mkapp st $'PORT=0\nSTATIC=1'
+  ( cmd_pause st >/dev/null 2>&1 ) && a=allowed || a=refused
+  eq  "pause: a static site has nothing to pause" "$a" "refused"
+  rm -rf "$pr_etc" "$sc_log"
+  exit "$fails" ) || fails=$((fails + $?))
+# only the control plane's certificate pauses and resumes — its own app only
+has "cgate: pause its own app"      "$(cgate "sudo $hd pause web")"   "allow"
+has "cgate: resume its own app"     "$(cgate "sudo $hd resume web")"  "allow"
+has "cgate: deny pausing another"   "$(cgate "sudo $hd pause shop")"  "deny"
+has "cgate: deny pause extra args"  "$(cgate "sudo $hd pause web x")" "deny"
+has "ci-gate: never pauses"         "$(gate web "sudo $hd pause web")"  "deny"
+has "ci-gate: never resumes"        "$(gate web "sudo $hd resume web")" "deny"
+
 # --- sandbox: gvisor (multi-tenant runner) --------------------------------
 # Each instance (keyed by the port it serves) gets its own /30 in 100.64/14:
 # host side .1, sandbox .2. Unique per port, valid up to port 65535.

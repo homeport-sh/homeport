@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.1
+HOMEPORTD_VERSION=0.9.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -902,6 +902,71 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now homeport-meter.timer >/dev/null 2>&1 || true
+}
+
+# --- pause / resume --------------------------------------------------------------
+# The abuse response: stop an app and stop it waking, without deleting
+# anything — files, env, releases and its Caddy route stay, and resume
+# brings it back exactly as it was. While paused it accrues no usage, and
+# add / activate / rollback refuse, so a deploy can't quietly un-pause it.
+# The control plane drives this through the app's own cert-gate.
+
+app_paused() { [[ ${PAUSED:-} == 1 ]]; }
+
+die_if_paused() { # <app> — for verbs that would start or reconfigure it
+  if grep -qs '^PAUSED=1$' "$HOMEPORT_ETC/$1/config"; then
+    die "app '$1' is paused — resume it first"
+  fi
+}
+
+cmd_pause() {
+  local app=${1:-} unit port
+  # this app's mode only: nothing left over from another app's config
+  local IDLE="" REPLICAS="" AUTOSCALE_MAX="" STATIC="" PAUSED="" PORT=""
+  valid_app "$app"
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app'"
+  load_app "$app"
+  [[ ${STATIC:-} == 1 ]] && die "'$app' is a static site — it has no process to pause"
+  # recorded first: from here on nothing may start it again
+  _set_config "$app" PAUSED 1
+  if [[ -n ${AUTOSCALE_MAX:-} ]]; then
+    systemctl disable --now "homeport-$app-autoscale.timer" 2>/dev/null || true
+  fi
+  if [[ -n ${IDLE:-} ]]; then
+    systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
+    systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
+  fi
+  while read -r unit port; do
+    [[ -n $unit ]] && { systemctl disable --now "$unit" 2>/dev/null || true; }
+  done < <(meter_instances "$app")
+  echo "paused '$app' — stopped, and nothing will wake it until it's resumed"
+}
+
+cmd_resume() {
+  local app=${1:-} cfg rest i rbase
+  local IDLE="" REPLICAS="" AUTOSCALE_MAX="" STATIC="" PAUSED="" PORT=""
+  valid_app "$app"
+  cfg="$HOMEPORT_ETC/$app/config"
+  [[ -f $cfg ]] || die "unknown app '$app'"
+  load_app "$app"
+  app_paused || { echo "'$app' is not paused"; return 0; }
+  rest=$(grep -v '^PAUSED=' "$cfg" || true)
+  printf '%s\n' "$rest" > "$cfg"
+  if [[ -n ${IDLE:-} ]]; then
+    # scale-to-zero: the socket is back; the app waits for its next request
+    systemctl enable --now "homeport-$app-proxy.socket" >/dev/null 2>&1 || true
+  elif is_template; then
+    rbase=$(replica_base "$PORT")
+    for (( i = 1; i <= ${REPLICAS:-1}; i++ )); do
+      systemctl enable --now "homeport-$app@$((rbase + i))" >/dev/null 2>&1 || true
+    done
+    if [[ -n ${AUTOSCALE_MAX:-} ]]; then
+      systemctl enable --now "homeport-$app-autoscale.timer" >/dev/null 2>&1 || true
+    fi
+  else
+    systemctl enable --now "homeport-$app" >/dev/null 2>&1 || true
+  fi
+  echo "resumed '$app'"
 }
 
 _teardown_idle_units() { # remove socket/proxy when an app leaves idle mode
@@ -2118,6 +2183,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 cmd_add() {
   local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-} redirect_from=${22:-} aliases=${23:-} egress=${24:-}
   valid_app "$app"
+  die_if_paused "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
   [[ $path == - ]] && path=""
@@ -2777,7 +2843,7 @@ cert_gate_decision() {
   # The control plane retires an app (its owner deleted it) by removing it
   # from the host: allowed for the certificate's OWN app, in exactly the
   # confirmed form. Not in gate_decision, which CI keys share — a CI key
-  # never removes anything.
+  # never removes, pauses or resumes anything.
   local -a a; read -ra a <<<"${2:-}"
   local off=-1
   if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
@@ -2787,6 +2853,15 @@ cert_gate_decision() {
       echo "allow $off"
     else
       echo "deny may only remove '$1', as: remove $1 --yes"
+    fi
+    return
+  fi
+  # …and pauses or resumes it (the abuse response), again its own app only
+  if (( off >= 0 )) && [[ ${a[off]:-} == pause || ${a[off]:-} == resume ]]; then
+    if [[ ${a[off+1]:-} == "$1" && ${#a[@]} -eq $(( off + 2 )) ]]; then
+      echo "allow $off"
+    else
+      echo "deny may only ${a[off]} '$1'"
     fi
     return
   fi
@@ -2844,6 +2919,7 @@ cmd_activate_static() {
 cmd_activate() {
   local app=${1:-} release=${2:-}
   valid_app "$app"; valid_release "$release"
+  die_if_paused "$app"
   load_app "$app"
   [[ ${STATIC:-} == 1 ]] && { cmd_activate_static "$app" "$release"; return; }
   local dir="$HOMEPORT_ROOT/$app/releases/$release"
@@ -2910,7 +2986,7 @@ cmd_activate() {
 
 cmd_rollback() {
   local app=${1:-} release=${2:-}
-  valid_app "$app"; load_app "$app"
+  valid_app "$app"; die_if_paused "$app"; load_app "$app"
   if [[ -z $release ]]; then
     local current r
     current=$(readlink "$HOMEPORT_ROOT/$app/current" 2>/dev/null || true)
@@ -3224,6 +3300,7 @@ cmd_status() {
   current=$(readlink "$HOMEPORT_ROOT/$app/current" 2>/dev/null || echo "(none)")
   state=$(app_state "$app")
   echo "app:      $app"
+  app_paused && echo "PAUSED:   stopped and not waking — resume to bring it back"
   if [[ -n ${DOMAIN:-} ]]; then
     echo "domain:   https://$DOMAIN${PATH_PREFIX:-}  (127.0.0.1:$PORT)"
   else
@@ -3446,6 +3523,8 @@ homeportd — root-side homeport helper (run via sudo)
   global-ech <public-name|->         Encrypted Client Hello (caddy >= 2.10, needs global-dns)
   global-ech-rotate                  rotate ECH keys & re-publish (fixes late-added records)
   global-list                        show the managed global options
+  pause <app>                        stop an app and keep it from waking (nothing deleted)
+  resume <app>                       bring a paused app back as it was
   sandbox-install                    install gVisor (runsc) for apps with sandbox: gvisor
   sandbox-run|stop|clean <app> <port> (used by the app's systemd unit)
   meter-tick                         record a minute of usage (run by homeport-meter.timer)
@@ -3505,6 +3584,8 @@ main() {
     sandbox-stop)  cmd_sandbox_stop "$@" ;;
     sandbox-clean) cmd_sandbox_clean "$@" ;;
     sandbox-install) cmd_sandbox_install "$@" ;;
+    pause)       cmd_pause "$@" ;;
+    resume)      cmd_resume "$@" ;;
     meter-tick)  cmd_meter_tick "$@" ;;
     meter-read)  cmd_meter_read "$@" ;;
     meter-ack)   cmd_meter_ack "$@" ;;
