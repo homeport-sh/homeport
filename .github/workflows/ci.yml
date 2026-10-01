@@ -32,6 +32,9 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S error bootstrap/bootstrap.sh
 
+      - name: lint — no `local` reads a name it declares on the same line
+        run: python3 test/lint_local_selfref.py bootstrap/bootstrap.sh
+
       - name: homeportd unit tests (bash 5 — runs the full suite incl. gateway)
         run: bash test/homeportd_test.sh
 
@@ -76,6 +79,9 @@ jobs:
           # the runner's Docker sets the iptables FORWARD policy to DROP, which
           # a homeport box doesn't have; without this, sandbox egress can't leave
           sudo iptables -P FORWARD ACCEPT
+
+      - name: env values reach the app exactly (real systemd, runs as root)
+        run: sudo env "PATH=$PATH" REQUIRE_SYSTEMD=1 bash test/env_fidelity_test.sh
 
       - name: sandbox end to end (runs as root)
         run: sudo env "PATH=$PATH" REQUIRE_SANDBOX=1 bash test/sandbox_integration_test.sh

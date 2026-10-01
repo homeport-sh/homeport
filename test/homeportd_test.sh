@@ -423,6 +423,42 @@ origin_auth_snippet "$A" "$B" > "$ORIGIN_AUTH_FRAG"
 has "oa: status flags a rotation in progress" "$(cmd_origin_auth_status)" "rotation in progress"
 rm -f "$ORIGIN_AUTH_FRAG"
 
+# --- env values: what you push is what the app gets ----------------------------
+# The env file is read by systemd (the app) AND bash (deploy hooks); stored raw,
+# systemd dropped unquoted backslashes and bash split on spaces. Values are now
+# decoded once (.env rules) and stored canonically: KEY="…" escaping \ " ` $,
+# which both read back exactly.
+dv() { env_decode_value "$1"; }
+eq "env: unquoted backslash is literal (the bug)"  "$(dv 'a\b')" 'a\b'
+eq "env: windows path"                             "$(dv 'C:\path\to\x')" 'C:\path\to\x'
+eq "env: double quotes stripped"                   "$(dv '"a b"')" 'a b'
+eq "env: escaped quote inside double quotes"       "$(dv '"say \"hi\""')" 'say "hi"'
+eq "env: \\n stays two characters (as systemd)"     "$(dv '"a\nb"')" 'a\nb'
+eq "env: single quotes are literal"                "$(dv "'x\\y'")" 'x\y'
+eq "env: surrounding whitespace trimmed (as systemd)" "$(dv '  spaced  ')" 'spaced'
+eq "env: quote mid-value is literal"               "$(dv 'tricky "value" with \ backslash')" 'tricky "value" with \ backslash'
+eq "env: unterminated quote is literal"            "$(dv '"unterminated')" '"unterminated'
+eq "env: no expansion"                             "$(dv '$(id) `id` $HOME')" '$(id) `id` $HOME'
+env_bad=0
+for v in 'a\b' '\' '\\' '"' "'" 'it'"'"'s' 'p@ss w0rd!' '$HOME' '`id`' '$(touch /tmp/pwned)' 'C:\path\to' 'héllo wörld' 'a"b\c$d`e' ' lead' 'trail '; do
+  enc=$(env_encode_value "$v")
+  # canonical lines decode back exactly…
+  [[ $(env_decode_value "$enc") == "$v" ]] || { echo "decode(encode(${v})) = [$(env_decode_value "$enc")]"; env_bad=1; }
+  # …and bash (deploy hooks) reads them back exactly, executing nothing
+  got=$(f=$(mktemp); printf 'K=%s\n' "$enc" > "$f"; ( set -a; . "$f"; printf '%s' "$K" ); rm -f "$f")
+  [[ $got == "$v" ]] || { echo "bash read [$got] want [$v]"; env_bad=1; }
+  env_is_canonical "K=$enc" || { echo "not canonical: K=$enc"; env_bad=1; }
+done
+eq "env: encode → decode and encode → bash are exact" "$env_bad" "0"
+[[ ! -e /tmp/pwned ]] && ok_line=ok || ok_line=EXECUTED; eq "env: a value never executes" "$ok_line" "ok"
+eq "env: raw legacy line is not canonical"  "$(env_is_canonical 'K=a\b' && echo yes || echo no)" "no"
+# normalising a legacy file keeps every value's intent, in order, idempotently
+lf=$(mktemp); printf '%s\n' 'A=a\b' 'B="quoted v"' "C='lit\\x'" '# comment' 'D= spaced ' 'A=second' > "$lf"
+eq "env: render a legacy file canonically" "$(env_render_file "$lf")" $'A="second"\nB="quoted v"\nC="lit\\\\x"\nD="spaced"'
+printf '%s\n' "$(env_render_file "$lf")" > "$lf.2"
+eq "env: rendering is idempotent" "$(env_render_file "$lf.2")" "$(cat "$lf.2")"
+rm -f "$lf" "$lf.2"
+
 # --- sandbox: gvisor (multi-tenant runner) --------------------------------
 # Each instance (keyed by the port it serves) gets its own /30 in 100.64/14:
 # host side .1, sandbox .2. Unique per port, valid up to port 65535.
