@@ -155,6 +155,24 @@ eq "web-only: no mail (smtp:587)"         "$(getw '/dial?addr=smtp.gmail.com:587
 "$HD" remove probe-web --yes >/dev/null
 eq "web-only link removed with the app"   "$(ip link show "hpvw$PW" >/dev/null 2>&1 && echo present || echo gone)" "gone"
 
+echo "--- pause / resume (through the app's own certificate)"
+"$HD" cert-gate probe-two "sudo /usr/local/bin/homeportd pause probe" >/dev/null 2>&1 \
+  && fail "probe-two's certificate paused probe" || ok "a certificate can't pause another app"
+"$HD" cert-gate probe "sudo /usr/local/bin/homeportd pause probe" >/dev/null && ok "paused" || fail "pause failed"
+eq "paused: the unit is stopped"     "$(systemctl is-active homeport-probe 2>/dev/null)" "inactive"
+eq "paused: and won't start on boot" "$(systemctl is-enabled homeport-probe 2>/dev/null)" "disabled"
+eq "paused: it doesn't answer"       "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$G:$P/" || true)" "000"
+"$HD" activate probe r1 >/dev/null 2>&1 && fail "activate un-paused it" || ok "paused: activate is refused"
+eq "paused: still not running"       "$(systemctl is-active homeport-probe 2>/dev/null)" "inactive"
+systemctl stop homeport-meter.timer; "$HD" meter-ack 999999999 >/dev/null
+"$HD" meter-tick; sleep 2; "$HD" meter-tick
+eq "paused: accrues no usage"        "$("$HD" meter-read 0 | jq -c --arg a probe 'select(.app == $a and .awake_ms > 0)' | wc -l | tr -d ' ')" "0"
+systemctl start homeport-meter.timer
+"$HD" cert-gate probe "sudo /usr/local/bin/homeportd resume probe" >/dev/null && ok "resumed" || fail "resume failed"
+for i in $(seq 1 100); do [[ $(get /) == ok ]] && break; sleep 0.1; done
+eq "resumed: it answers again"       "$(get /)" "ok"
+eq "resumed: enabled again"          "$(systemctl is-enabled homeport-probe 2>/dev/null)" "enabled"
+
 echo "--- limits"
 before=$(systemctl show homeport-probe -p NRestarts --value)
 get '/alloc?mb=600' >/dev/null    # over the 256M MemoryMax
