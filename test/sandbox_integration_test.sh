@@ -161,7 +161,11 @@ ms=$(( (t1 - t0) / 1000000 ))
 eq "a stop is clean, not failed" "$(systemctl show homeport-probe-two -p Result --value)" "success"
 [[ $(systemctl show homeport-probe-two -p Result --value) == success ]] || journalctl -u homeport-probe-two -n 15 --no-pager
 eq "stop leaves no sandbox network" "$(ip link show "hpv$P2" >/dev/null 2>&1 && echo present || echo gone)" "gone"
-"$HD" remove probe --yes >/dev/null
+# the way the control plane retires an app: through its app-scoped certificate
+"$HD" cert-gate probe-two "sudo /usr/local/bin/homeportd remove probe --yes" >/dev/null 2>&1 \
+  && fail "probe-two's certificate removed probe" || ok "a certificate can't remove another app"
+"$HD" cert-gate probe "sudo /usr/local/bin/homeportd remove probe --yes" >/dev/null \
+  && ok "the app's own certificate removes it" || fail "cert-gate remove of its own app failed"
 eq "unit gone"       "$(systemctl list-units --all --no-legend 'homeport-probe.service' | wc -l | tr -d ' ')" "0"
 eq "netns gone"      "$(ip netns list | grep -c "^hp-$P\b" || true)" "0"
 eq "veth gone"       "$(ip link show "hpv$P" >/dev/null 2>&1 && echo present || echo gone)" "gone"

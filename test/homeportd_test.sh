@@ -291,6 +291,14 @@ has "cgate: upload its own app"   "$(cgate "sudo $hd upload web r1")"        "al
 has "cgate: deny another app"     "$(cgate "sudo $hd activate shop r1")"     "deny"
 has "cgate: deny another app (add)" "$(cgate "sudo $hd add shop - / 256M 50% true - 1 - - - - - gvisor")" "deny"
 has "cgate: register its own app" "$(cgate "sudo $hd add web - / 256M 50% true - 1 - - - - - gvisor")" "allow"
+# the control plane retires an app (the customer deleted it) by removing it
+# from its host — its own app only, and only in the confirmed form
+has "cgate: remove its own app"            "$(cgate "sudo $hd remove web --yes")"   "allow"
+has "cgate: deny removing another app"     "$(cgate "sudo $hd remove shop --yes")"  "deny"
+has "cgate: deny remove without --yes"     "$(cgate "sudo $hd remove web")"         "deny"
+has "cgate: deny remove with extra args"   "$(cgate "sudo $hd remove web --yes x")" "deny"
+# a CI key never removes, even its own app (same gate code, different door)
+has "ci-gate: still denies remove"         "$(gate web "sudo $hd remove web --yes")" "deny"
 # the box-wide form (no app) and a wildcard scope are refused outright
 has "cgate: deny an unscoped certificate" "$(cert_gate_decision "" "sudo $hd upload web r1")" "deny"
 has "cgate: deny a wildcard scope"        "$(cert_gate_decision "*" "sudo $hd upload web r1")" "deny"
@@ -299,7 +307,6 @@ has "cgate: version"              "$(cgate "sudo $hd version")"              "al
 has "cgate: no-sudo form"         "$(cgate "$hd status web")"                "allow"
 eq  "cgate: sudo offset"          "$(cgate "sudo $hd upload web r1")"        "allow 2"
 eq  "cgate: no-sudo offset"       "$(cgate "$hd activate web r1")"           "allow 1"
-has "cgate: deny remove"          "$(cgate "sudo $hd remove web --yes")"     "deny"
 has "cgate: deny self-update"     "$(cgate "sudo $hd self-update")"          "deny"
 has "cgate: deny key-add"         "$(cgate "sudo $hd key-add")"              "deny"
 has "cgate: deny key-rm"          "$(cgate "sudo $hd key-rm x")"             "deny"
