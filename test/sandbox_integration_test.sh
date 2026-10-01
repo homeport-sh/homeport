@@ -69,7 +69,10 @@ eq "app answers at its sandbox address" "$(get /)" "ok"
 eq "nothing answers on host loopback for it" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$P/" || true)" "000"
 
 echo "--- what the app sees"
-eq "secret reaches the app byte-for-byte" "$(get '/env?k=SECRET')" "$SECRET"
+# parity, not a literal: the env file is systemd's format (it consumes an
+# unquoted backslash), and a sandboxed app must see exactly what a native one would
+native=$(systemd-run --quiet --pipe --wait -p EnvironmentFile="$HOMEPORT_ROOT/probe/shared/env" /usr/bin/printenv SECRET)
+eq "secret reaches the app exactly as a native unit gets it" "$(get '/env?k=SECRET')" "$native"
 eq "listens on its own interface"         "$(get '/env?k=HOST')" "0.0.0.0"
 eq "PORT"                                  "$(get '/env?k=PORT')" "$P"
 eq "STATE_DIR"                             "$(get '/env?k=STATE_DIR')" "$HOMEPORT_ROOT/probe/shared"
@@ -108,13 +111,19 @@ before=$(systemctl show homeport-probe -p NRestarts --value)
 get '/alloc?mb=600' >/dev/null    # over the 256M MemoryMax
 for i in $(seq 1 60); do [[ $(get /) == ok ]] && [[ $(systemctl show homeport-probe -p NRestarts --value) -gt $before ]] && break; sleep 1; done
 after=$(systemctl show homeport-probe -p NRestarts --value)
-[[ $after -gt $before ]] && ok "memory bomb killed the sandbox, systemd restarted it ($before -> $after)" || fail "no restart after memory bomb ($before -> $after)"
+if [[ $after -gt $before ]]; then ok "memory bomb killed the sandbox, systemd restarted it ($before -> $after)"
+else fail "no restart after memory bomb ($before -> $after)"; systemctl show homeport-probe -p MemoryMax,MemorySwapMax,MemoryPeak; journalctl -u homeport-probe -n 15 --no-pager; fi
 eq "app is back after the restart"            "$(get /)" "ok"
 eq "the other tenant never noticed"           "$(curl -s --max-time 5 "http://$G2:$P2/")" "ok"
 started=$(get '/fork?n=2000')
 [[ $started =~ ^[0-9]+$ && $started -lt 600 ]] && ok "process limit holds (started $started of 2000)" || fail "fork limit: started [$started]"
 
-echo "--- clean up"
+echo "--- stop and clean up"
+t0=$(date +%s%N); systemctl stop homeport-probe; t1=$(date +%s%N)
+ms=$(( (t1 - t0) / 1000000 ))
+[[ $ms -lt 8000 ]] && ok "stops promptly (${ms} ms)" || fail "stop took ${ms} ms"
+eq "a stop is clean, not failed" "$(systemctl show homeport-probe -p Result --value)" "success"
+[[ $(systemctl show homeport-probe -p Result --value) == success ]] || journalctl -u homeport-probe -n 15 --no-pager
 "$HD" remove probe --yes >/dev/null
 eq "unit gone"       "$(systemctl list-units --all --no-legend 'homeport-probe.service' | wc -l | tr -d ' ')" "0"
 eq "netns gone"      "$(ip netns list | grep -c "^hp-$P\b" || true)" "0"

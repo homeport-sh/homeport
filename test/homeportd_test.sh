@@ -460,6 +460,13 @@ has "sandbox unit: cpu limit"             "$sbu" "CPUQuota=50%"
 has "sandbox unit: pids limit"            "$sbu" "TasksMax="
 has "sandbox unit: restarts on failure"   "$sbu" "Restart=on-failure"
 has "sandbox unit: runsc gets the stop"   "$sbu" "KillMode=mixed"
+# swap would absorb a memory bomb: a memory limit means RAM+swap (CI runner
+# with swap: a 600M allocation under MemoryMax=256M simply survived)
+has "sandbox unit: swap can't dodge the memory limit" "$sbu" "MemorySwapMax=0"
+# the app exits 143 on SIGTERM; a clean stop must not leave a failed unit
+has "sandbox unit: SIGTERM exit is a clean stop" "$sbu" "SuccessExitStatus=143 SIGTERM"
+eq  "sandbox unit: no swap cap without a memory limit" \
+    "$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits= emit_service_body 8100 | grep -c MemorySwapMax)" "0"
 eq  "sandbox unit: no native exec of the binary" "$(grep -c '^ExecStart=/opt/homeport' <<<"$sbu")" "0"
 eq  "sandbox unit: no User= (runsc drops privileges itself)" "$(grep -c '^User=' <<<"$sbu")" "0"
 has "sandbox unit: replicas keep %i" "$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits= emit_service_body '%i')" "sandbox-run web %i"

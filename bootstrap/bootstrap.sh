@@ -289,11 +289,15 @@ Restart=on-failure
 RestartSec=2
 KillMode=mixed
 TimeoutStopSec=20
+SuccessExitStatus=143 SIGTERM
 LimitNOFILE=65536
 TasksMax=512
 $limits
 EOF
-    return
+    # a memory limit means RAM+swap: on a host with swap, MemoryMax alone lets
+    # a tenant page past its limit instead of being stopped at it
+    [[ $limits == *MemoryMax=* ]] && echo "MemorySwapMax=0"
+    return 0
   fi
   # optional launch args (from RUN, set by cmd_add): substitute $PORT/$HOST
   # with this unit's port-expr ($1) and the loopback host. After substitution
@@ -3001,6 +3005,8 @@ cmd_remove() {
         "/etc/systemd/system/homeport-$app-proxy.service" \
         "$CADDY_DIR/$app.caddy"
   systemctl daemon-reload
+  # a unit that ended failed stays listed (and keeps its state) until reset
+  systemctl reset-failed "homeport-$app.service" "homeport-$app@*.service" "homeport-$app-green.service" 2>/dev/null || true
   systemctl reload caddy 2>/dev/null || true
   # the BYO cert dir holds a private key — it must not outlive the app
   rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}" "${TLS_CERT_DIR:?}/${app:?}"
