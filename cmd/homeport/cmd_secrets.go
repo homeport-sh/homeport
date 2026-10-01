@@ -6,6 +6,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/homeport-sh/homeport/envfile"
 )
 
 // end-anchored + no CR/LF in the value: a newline would smuggle extra
@@ -64,7 +66,7 @@ func cmdSecrets(args []string) error {
 			return fmt.Errorf("usage: homeport secrets rm KEY [KEY ...]")
 		}
 		for _, k := range keys {
-			if !keyRe.MatchString(k) {
+			if !envfile.ValidName(k) {
 				return fmt.Errorf("invalid key %q", k)
 			}
 		}
@@ -81,8 +83,6 @@ func cmdSecrets(args []string) error {
 		return fmt.Errorf("%s", secretsUsage)
 	}
 }
-
-var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // readEnvArg resolves the env source for push/sync: "-" (or piped stdin) reads
 // stdin; a path reads that file; otherwise it auto-detects .env.production/.env.
