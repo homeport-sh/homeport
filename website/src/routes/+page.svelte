@@ -518,7 +518,7 @@
 			<a href="https://www.npmjs.com/package/next-bun-compile" target="_blank" rel="noopener noreferrer" class="hover:text-foam">
 				next-bun-compile
 			</a>
-			<span class="text-mist">MIT</span>
+			<span class="text-mist">FSL-1.1-MIT</span>
 		</div>
 	</div>
 	<div class="mx-auto max-w-[1200px] px-5 pb-8">
