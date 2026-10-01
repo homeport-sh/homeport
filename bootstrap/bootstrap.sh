@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.7.1
+HOMEPORTD_VERSION=0.8.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -398,6 +398,23 @@ validate_sandbox() {
   die "sandbox must be 'strict' (default), 'relaxed', or 'gvisor'"
 }
 
+# validate_egress <sandbox> <egress> — a sandbox's outbound policy:
+#   full (default)  anything but mail and our own networks
+#   web             web, DNS and database ports only (the free tier)
+validate_egress() {
+  local sb=${1:-} eg=${2:-}
+  [[ $eg == - ]] && eg=""
+  [[ -z $eg ]] && return 0
+  [[ $sb == gvisor ]] || die "egress is a sandbox: gvisor setting"
+  [[ $eg == web || $eg == full ]] || die "egress must be 'full' (default) or 'web'"
+}
+
+# sandbox_veth <port> <egress> — the host side of an instance's link. The
+# policy is in the NAME: the firewall matches hpvw* for web-only, hpv* for
+# every sandbox. No per-sandbox firewall state, so re-applying the rules on
+# any start can never lose another sandbox's policy.
+sandbox_veth() { if [[ ${2:-} == web ]]; then echo "hpvw$1"; else echo "hpv$1"; fi; }
+
 # sandbox_ip <port> <host|guest> — the instance's /30 inside 100.64.0.0/14,
 # keyed by the port it serves: unique on the box, valid for any port.
 sandbox_ip() {
@@ -477,8 +494,10 @@ sandbox_spec() {
 # sandbox_firewall_rules — the host firewall for every sandbox, as one nft
 # script (applied atomically). Sandboxes reach the internet and nothing of
 # ours: not the host, not each other, not the cloud metadata service, not a
-# private network (the CA, the database). Order matters in forward: the
-# denies come before the accept.
+# private network (the CA, the database), no mail server (a blacklisted IP
+# hurts every tenant on the host). A web-only sandbox (hpvw*, the free tier)
+# reaches web, DNS and database ports and nothing else. Order matters in
+# forward: the denies come before the accept.
 sandbox_firewall_rules() {
   cat <<'NFT'
 table inet homeport_sandbox
@@ -493,6 +512,10 @@ table inet homeport_sandbox {
 		type filter hook forward priority -10; policy accept;
 		iifname "hpv*" oifname "hpv*" drop
 		iifname "hpv*" ip daddr { 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 0.0.0.0/8, 224.0.0.0/4, 240.0.0.0/4 } drop
+		iifname "hpv*" tcp dport { 25, 465, 587 } drop
+		iifname "hpvw*" tcp dport != { 53, 80, 443, 3306, 5432, 6379, 27017 } drop
+		iifname "hpvw*" udp dport != 53 drop
+		iifname "hpvw*" meta l4proto != { tcp, udp } drop
 		iifname "hpv*" accept
 		oifname "hpv*" ct state established,related accept
 		oifname "hpv*" drop
@@ -523,8 +546,9 @@ ensure_sandbox_firewall() {
   sandbox_firewall_rules | nft -f - || die "sandbox: could not apply the sandbox firewall"
 }
 
-sandbox_net_up() { # <port>
-  local port=$1 ns="hp-$1" vh="hpv$1" vs="hps$1"
+sandbox_net_up() { # <port> [egress]
+  local port=$1 ns="hp-$1" vs="hps$1"
+  local vh; vh=$(sandbox_veth "$port" "${2:-}")
   local host guest; host=$(sandbox_ip "$port" host); guest=$(sandbox_ip "$port" guest)
   ip netns add "$ns"
   ip link add "$vh" type veth peer name "$vs" netns "$ns"
@@ -537,6 +561,7 @@ sandbox_net_up() { # <port>
 
 sandbox_net_down() { # <port>
   ip link del "hpv$1" 2>/dev/null || true
+  ip link del "hpvw$1" 2>/dev/null || true
   ip netns del "hp-$1" 2>/dev/null || true
 }
 
@@ -583,7 +608,7 @@ cmd_sandbox_run() {
     --args "$args" --release "$release" --shared "$HOMEPORT_ROOT/$app/shared" \
     --netns "/var/run/netns/hp-$port" --hostname "$app" --env-file "$b/env" > "$b/config.json"
   rm -f "$b/env"; chmod 600 "$b/config.json"   # holds the app's secrets
-  sandbox_net_up "$port"
+  sandbox_net_up "$port" "${EGRESS:-}"
   # --ignore-cgroups: the sandbox stays in this unit's cgroup, so systemd's
   # MemoryMax/CPUQuota/TasksMax bound the WHOLE sandbox (sentry included).
   exec runsc --root="$SANDBOX_RUNSC_ROOT" --ignore-cgroups --network=sandbox \
@@ -768,6 +793,7 @@ cmd_meter_tick() {
       next+="$unit.cpu $cpu_ns"$'\n'"$unit.inv ${inv:--}"$'\n'
       # egress: what the sandbox sent out of its own link (gvisor apps only)
       local nic="/sys/class/net/hpv$port" rx=0 idx=-
+      [[ -e $nic ]] || nic="/sys/class/net/hpvw$port"
       if [[ -r $nic/statistics/rx_bytes ]]; then rx=$(cat "$nic/statistics/rx_bytes"); idx=$(cat "$nic/ifindex"); fi
       local pr=${prev[$unit.rx]:-} px=${prev[$unit.idx]:-}
       [[ -z $last_us ]] && pr=""
@@ -2048,7 +2074,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-} redirect_from=${22:-} aliases=${23:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-} redirect_from=${22:-} aliases=${23:-} egress=${24:-}
   valid_app "$app"
   # "-" means unset (positional placeholder from the CLI)
   [[ $domain == - ]] && domain=""
@@ -2070,6 +2096,8 @@ cmd_add() {
   [[ $health_timeout == - ]] && health_timeout=""
   [[ -z $health_timeout || $health_timeout =~ ^[0-9]+[smh]$ ]] || die "health timeout must be a number with s/m/h suffix (e.g. 30s, 2m)"
   validate_sandbox "$sandbox" "$release_b64" "$post_release_b64"
+  validate_egress "$sandbox" "$egress"
+  [[ $egress == - ]] && egress=""
   [[ $sandbox != gvisor ]] || { sandbox_check_tools; ensure_meter_timer; }
   [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
   [[ $memory == - ]] && memory=""
@@ -2173,7 +2201,7 @@ cmd_add() {
   # load_app (above) may have sourced the OLD config over freshly-parsed values
   # (SANDBOX, and the AUTOSCALE_* when switching an app INTO autoscale) — restore
   # the values for THIS add so they get written and take effect.
-  local SANDBOX=$sandbox STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env REDIRECT_FROM=$redirect_from ALIASES=$aliases
+  local SANDBOX=$sandbox EGRESS=$egress STRATEGY=$strategy HEADERS_B64=$headers_b64 TLS_MODE=$tls_mode TLS_DNS_ENV=$tls_dns_env REDIRECT_FROM=$redirect_from ALIASES=$aliases
   AUTOSCALE_MIN=$as_min AUTOSCALE_MAX=$as_max AUTOSCALE_TARGET=$as_target
   # idle (scale-to-zero) apps bind a private port; systemd holds the public
   # port and starts the app on first connection. +1000 keeps the two ranges
@@ -2201,6 +2229,7 @@ RELEASE_B64=$release_b64
 POST_RELEASE_B64=$post_release_b64
 PATH_PREFIX=$path
 SANDBOX=$sandbox
+EGRESS=$egress
 STRATEGY=$strategy
 HEALTH_TIMEOUT=$health_timeout
 HEADERS_B64=$headers_b64
