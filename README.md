@@ -83,6 +83,19 @@ A web dashboard is intentionally **not** on the near-term roadmap: for a single
 box the CLI plus `homeport mcp` (agent-driven ops) cover it. A dashboard returns
 only as a future multi-server cloud control plane.
 
+## License
+
+homeport is [Fair Source](https://fair.io): the
+[Functional Source License, MIT future license](LICENSE.md) (FSL-1.1-MIT).
+
+- **Use it freely:** self-host it, deploy your own or your company's apps,
+  modify it, and use it for education, research, or client work.
+- **The one thing you can't do** is offer it as a competing commercial
+  service: selling homeport hosting to others.
+- **Every release becomes plain MIT two years after it's published.**
+
+Releases up to v0.4.1 were published under MIT and stay MIT.
+
 ## Support
 
 If homeport saves you time, you can [buy me a coffee](https://buymeacoffee.com/ramonmalcolm) ☕
