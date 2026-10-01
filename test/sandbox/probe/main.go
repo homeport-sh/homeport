@@ -66,6 +66,13 @@ func main() {
 		}
 		fmt.Fprint(w, "resolved")
 	})
+	http.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) { // egress, for metering
+		kb, _ := strconv.Atoi(r.URL.Query().Get("kb"))
+		chunk := make([]byte, 1024)
+		for i := 0; i < kb; i++ {
+			_, _ = w.Write(chunk)
+		}
+	})
 	http.HandleFunc("/alloc", func(w http.ResponseWriter, r *http.Request) {
 		mb, _ := strconv.Atoi(r.URL.Query().Get("mb"))
 		hog := make([][]byte, 0, mb)

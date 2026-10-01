@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.6.2
+HOMEPORTD_VERSION=0.7.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -627,7 +627,213 @@ cmd_sandbox_install() {
     > /etc/apt/sources.list.d/gvisor.list
   apt-get update -qq
   apt-get install -y -qq runsc >/dev/null
-  echo "sandbox: $(runsc --version | head -1) installed"
+  ensure_meter_timer
+  echo "sandbox: $(runsc --version | head -1) installed (usage metering on)"
+}
+
+# --- usage metering --------------------------------------------------------------
+# Every 60s `meter-tick` (a systemd timer) records, per app: time awake, its
+# size, CPU used and bytes sent, into a numbered local spool. The control plane
+# pulls it with `meter-read`, and only once it has stored the records does it
+# `meter-ack`, which deletes them. A retry re-sends the same sequence numbers,
+# so nothing is lost while the control plane is down and nothing is billed
+# twice. Records carry DELTAS since the previous tick: counters reset when an
+# app restarts, and that must not look like a spike or go negative.
+METER_DIR=/var/lib/homeport/meter
+METER_READ_MAX=5000
+
+# meter_awake_us <last> <now> <state> <active-enter> <inactive-enter> — µs the
+# unit was awake in (last, now], from systemd's monotonic timestamps.
+meter_awake_us() {
+  local last=$1 now=$2 state=$3 ae=${4:-0} ie=${5:-0} start awake=0
+  case $state in
+    active|activating|reloading|deactivating|refreshing)
+      start=$(( ae > last ? ae : last )); awake=$(( now - start )) ;;
+    *)
+      if (( ie > last && ae > 0 && ae < ie )); then
+        start=$(( ae > last ? ae : last )); awake=$(( ie - start ))
+      fi ;;
+  esac
+  (( awake < 0 )) && awake=0
+  (( awake > now - last )) && awake=$(( now - last ))
+  echo "$awake"
+}
+
+# meter_delta <prev> <cur> <same|new> — growth of a counter since the last tick.
+# A new identity (restart, recreated link) or a counter that went backwards
+# starts over at cur; no previous reading sets a baseline and bills nothing.
+meter_delta() {
+  local prev=$1 cur=${2:-0} ident=$3
+  [[ -z $prev ]] && { echo 0; return; }
+  if [[ $ident != same ]] || (( cur < prev )); then echo "$cur"; else echo $(( cur - prev )); fi
+}
+
+# meter_instances <app> — "<unit> <port>" per instance of the LOADED app.
+meter_instances() {
+  local app=$1 n i p rbase
+  if [[ ${REPLICAS:-1} -gt 1 || -n ${AUTOSCALE_MAX:-} ]]; then
+    n=${REPLICAS:-1}; [[ -n ${AUTOSCALE_MAX:-} && $AUTOSCALE_MAX -gt $n ]] && n=$AUTOSCALE_MAX
+    rbase=$(replica_base "$PORT")
+    for (( i = 1; i <= n; i++ )); do p=$((rbase + i)); echo "homeport-$app@$p $p"; done
+  else
+    p=$PORT; [[ -n ${IDLE:-} ]] && p=$((PORT + 1000))
+    echo "homeport-$app $p"
+  fi
+}
+
+meter_mb() { # <512M|1G|…> → MB (0 when unset)
+  local m=${1:-}
+  case $m in
+    *G) echo $(( ${m%G} * 1024 )) ;;
+    *M) echo "${m%M}" ;;
+    *K) echo $(( ${m%K} / 1024 )) ;;
+    *) echo 0 ;;
+  esac
+}
+
+# meter_record <seq> <start> <end> <app> <memory_mb> <awake_ms> <cpu_ms> <egress_bytes>
+# (every field is a number or a validated app name: no escaping needed)
+meter_record() {
+  printf '{"seq":%s,"start":%d,"end":%d,"app":"%s","memory_mb":%d,"awake_ms":%d,"mb_ms":%d,"cpu_ms":%d,"egress_bytes":%d}' \
+    "$1" "$2" "$3" "$4" "$5" "$6" $(( $5 * $6 )) "$7" "$8"
+}
+
+_meter_lock() { # hold METER_DIR/lock for the rest of the calling (sub)shell
+  mkdir -p "$METER_DIR"
+  command -v flock >/dev/null || return 0
+  exec 9>"$METER_DIR/lock"; flock 9
+}
+
+# meter_append <record with __SEQ__> — number it and add it to the spool
+meter_append() {
+  local seq
+  seq=$(( $(cat "$METER_DIR/seq" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "${1/__SEQ__/$seq}" >> "$METER_DIR/spool"
+  echo "$seq" > "$METER_DIR/seq.tmp" && mv "$METER_DIR/seq.tmp" "$METER_DIR/seq"
+}
+
+meter_read() { # <after-seq> — spooled records with seq > after, oldest first
+  [[ -f $METER_DIR/spool ]] || return 0
+  awk -v after="$1" -v max="$METER_READ_MAX" '
+    match($0, /"seq":[0-9]+/) { s = substr($0, RSTART + 6, RLENGTH - 6) + 0
+      if (s > after && n < max) { print; n++ } }' "$METER_DIR/spool"
+}
+
+meter_ack() { # <seq> — drop records up to seq (the control plane has them)
+  [[ -f $METER_DIR/spool ]] || return 0
+  awk -v ack="$1" 'match($0, /"seq":[0-9]+/) { if (substr($0, RSTART + 6, RLENGTH - 6) + 0 > ack) print }' \
+    "$METER_DIR/spool" > "$METER_DIR/spool.tmp" && mv "$METER_DIR/spool.tmp" "$METER_DIR/spool"
+}
+
+# cmd_meter_tick — one minute of usage for every app on the box.
+cmd_meter_tick() {
+  _meter_lock
+  local now_us now_unix last_us="" last_unix="" line
+  now_us=$(awk '{ printf "%d", $1 * 1000000 }' /proc/uptime)
+  now_unix=$(date +%s)
+  local -A prev=()
+  if [[ -f $METER_DIR/state ]]; then
+    read -r last_us last_unix < "$METER_DIR/state"
+    while read -r key val; do [[ -n $key ]] && prev[$key]=$val; done < <(tail -n +2 "$METER_DIR/state")
+  fi
+  # after a reboot the monotonic clock restarts: start over from a baseline
+  [[ -n $last_us && $last_us -gt $now_us ]] && last_us=""
+  local next="$now_us $now_unix"$'\n'
+  local cfg app inst unit port
+  for cfg in "$HOMEPORT_ETC"/*/config; do
+    [[ -f $cfg ]] || continue
+    app=$(basename "$(dirname "$cfg")")
+    local mem awake=0 cpu=0 egress=0 insts
+    insts=$( load_app "$app"; [[ ${STATIC:-} == 1 ]] && exit 0; meter_instances "$app" )
+    mem=$( load_app "$app"; meter_mb "${MEMORY:-}" )
+    while read -r unit port; do
+      [[ -n $unit ]] || continue
+      local st="" ae=0 ie=0 cpu_ns=0 inv="" k v
+      while IFS='=' read -r k v; do
+        case $k in
+          ActiveState) st=$v ;;
+          ActiveEnterTimestampMonotonic) ae=${v:-0} ;;
+          InactiveEnterTimestampMonotonic) ie=${v:-0} ;;
+          CPUUsageNSec) [[ $v =~ ^[0-9]+$ ]] && cpu_ns=$v ;;
+          InvocationID) inv=$v ;;
+        esac
+      done < <(systemctl show "$unit" -p ActiveState,ActiveEnterTimestampMonotonic,InactiveEnterTimestampMonotonic,CPUUsageNSec,InvocationID 2>/dev/null)
+      if [[ -n $last_us ]]; then
+        awake=$(( awake + $(meter_awake_us "$last_us" "$now_us" "$st" "$ae" "$ie") ))
+      fi
+      # CPU: the cgroup counter for this invocation of the unit
+      local pc=${prev[$unit.cpu]:-} pi=${prev[$unit.inv]:-}
+      [[ -z $last_us ]] && pc=""
+      cpu=$(( cpu + $(meter_delta "$pc" "$cpu_ns" "$([[ $inv == "$pi" ]] && echo same || echo new)") ))
+      next+="$unit.cpu $cpu_ns"$'\n'"$unit.inv ${inv:--}"$'\n'
+      # egress: what the sandbox sent out of its own link (gvisor apps only)
+      local nic="/sys/class/net/hpv$port" rx=0 idx=-
+      if [[ -r $nic/statistics/rx_bytes ]]; then rx=$(cat "$nic/statistics/rx_bytes"); idx=$(cat "$nic/ifindex"); fi
+      local pr=${prev[$unit.rx]:-} px=${prev[$unit.idx]:-}
+      [[ -z $last_us ]] && pr=""
+      [[ $idx == - ]] && pr=""
+      egress=$(( egress + $(meter_delta "$pr" "$rx" "$([[ $idx == "$px" ]] && echo same || echo new)") ))
+      next+="$unit.rx $rx"$'\n'"$unit.idx $idx"$'\n'
+    done <<<"$insts"
+    if [[ -n $last_us ]] && (( awake > 0 || cpu > 0 || egress > 0 )); then
+      meter_append "$(meter_record __SEQ__ "$last_unix" "$now_unix" "$app" "$mem" $(( awake / 1000 )) $(( cpu / 1000000 )) "$egress")"
+    fi
+  done
+  printf '%s' "$next" > "$METER_DIR/state.tmp" && mv "$METER_DIR/state.tmp" "$METER_DIR/state"
+}
+
+cmd_meter_read() { [[ ${1:-0} =~ ^[0-9]{1,18}$ ]] || die "meter-read: invalid sequence"; meter_read "${1:-0}"; }
+cmd_meter_ack()  { [[ ${1:-} =~ ^[0-9]{1,18}$ ]] || die "meter-ack: invalid sequence"; _meter_lock; meter_ack "$1"; echo "acked $1"; }
+
+# meter_gate_decision <orig> — the control plane's meter certificate: read and
+# confirm usage, nothing else (not even status — it sees no app).
+meter_gate_decision() {
+  local orig=${1:-}
+  [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
+  local -a a; read -ra a <<<"$orig"
+  local off
+  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
+  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then off=1
+  else echo "deny may only run homeportd"; return; fi
+  case ${a[off]:-} in
+    meter-read|meter-ack) [[ ${a[off+1]:-} =~ ^[0-9]{1,18}$ && -z ${a[off+2]:-} ]] || { echo "deny invalid sequence"; return; } ;;
+    *) echo "deny verb '${a[off]:-(none)}' is not permitted"; return ;;
+  esac
+  echo "allow $off"
+}
+
+cmd_meter_gate() {
+  local orig=${1:-} d
+  d=$(meter_gate_decision "$orig")
+  if [[ $d == allow\ * ]]; then
+    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
+    exec /usr/local/bin/homeportd "${a[@]:off}"
+  fi
+  die "this certificate may only read usage — ${d#deny }"
+}
+
+# ensure_meter_timer — the 60s tick, installed with the sandbox runtime
+ensure_meter_timer() {
+  [[ -f /etc/systemd/system/homeport-meter.timer ]] && return 0
+  cat > /etc/systemd/system/homeport-meter.service <<'EOF'
+[Unit]
+Description=homeport usage meter tick
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/homeportd meter-tick
+EOF
+  cat > /etc/systemd/system/homeport-meter.timer <<'EOF'
+[Unit]
+Description=homeport usage meter (every minute)
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=1s
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now homeport-meter.timer >/dev/null 2>&1 || true
 }
 
 _teardown_idle_units() { # remove socket/proxy when an app leaves idle mode
@@ -1864,7 +2070,7 @@ cmd_add() {
   [[ $health_timeout == - ]] && health_timeout=""
   [[ -z $health_timeout || $health_timeout =~ ^[0-9]+[smh]$ ]] || die "health timeout must be a number with s/m/h suffix (e.g. 30s, 2m)"
   validate_sandbox "$sandbox" "$release_b64" "$post_release_b64"
-  [[ $sandbox != gvisor ]] || sandbox_check_tools
+  [[ $sandbox != gvisor ]] || { sandbox_check_tools; ensure_meter_timer; }
   [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""
@@ -3155,6 +3361,9 @@ homeportd — root-side homeport helper (run via sudo)
   global-list                        show the managed global options
   sandbox-install                    install gVisor (runsc) for apps with sandbox: gvisor
   sandbox-run|stop|clean <app> <port> (used by the app's systemd unit)
+  meter-tick                         record a minute of usage (run by homeport-meter.timer)
+  meter-read <after-seq>             spooled usage records (control plane, via meter-gate)
+  meter-ack <seq>                    drop records the control plane has stored
   origin-auth-set [--keep-previous]  require X-Origin-Auth (secret on stdin) on every public site
   origin-auth-retire                 end a rotation: drop the previous value
   origin-auth-clear                  stop requiring it
@@ -3209,6 +3418,10 @@ main() {
     sandbox-stop)  cmd_sandbox_stop "$@" ;;
     sandbox-clean) cmd_sandbox_clean "$@" ;;
     sandbox-install) cmd_sandbox_install "$@" ;;
+    meter-tick)  cmd_meter_tick "$@" ;;
+    meter-read)  cmd_meter_read "$@" ;;
+    meter-ack)   cmd_meter_ack "$@" ;;
+    meter-gate)  cmd_meter_gate "$@" ;;
     origin-auth-set)    cmd_origin_auth_set "$@" ;;
     origin-auth-clear)  cmd_origin_auth_clear "$@" ;;
     origin-auth-retire) cmd_origin_auth_retire "$@" ;;
