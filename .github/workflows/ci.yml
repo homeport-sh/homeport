@@ -32,6 +32,9 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S error bootstrap/bootstrap.sh
 
+      - name: lint — no `local` reads a name it declares on the same line
+        run: python3 test/lint_local_selfref.py bootstrap/bootstrap.sh
+
       - name: homeportd unit tests (bash 5 — runs the full suite incl. gateway)
         run: bash test/homeportd_test.sh
 

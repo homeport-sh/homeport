@@ -2407,7 +2407,9 @@ activate_and_check() {
 # non-empty with_port to also export PORT (the post-hook can reach the now-live
 # app at $HOST:$PORT; the pre-hook gets no PORT — nothing is listening yet).
 run_deploy_hook() {
-  local app=$1 cmd=$2 with_port=${3:-} user="homeport-$app"
+  # two lines: in one `local`, "homeport-$app" would expand before app is set
+  local app=$1 cmd=$2 with_port=${3:-}
+  local user="homeport-$app"
   env_normalize "$app"   # bash must read the same values systemd does
   local dir="$HOMEPORT_ROOT/$app/current" envf="$HOMEPORT_ROOT/$app/shared/env"
   # the same env the service gets: app secrets from the env file (DATABASE_URL,
