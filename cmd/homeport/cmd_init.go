@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/homeport-sh/homeport/cidr"
 )
 
 // projectInfo is what init auto-detects so homeport.yaml starts out correct
@@ -271,7 +273,7 @@ func domainBehindCloudflare(domain string) bool {
 	if err != nil || len(ips) == 0 {
 		return false
 	}
-	data, err := fetchCloudflareCIDRs()
+	data, err := cidr.FetchCloudflare()
 	if err != nil {
 		return false
 	}
