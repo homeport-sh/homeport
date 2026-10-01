@@ -567,6 +567,17 @@ has "sandbox unit: cpu limit"             "$sbu" "CPUQuota=50%"
 has "sandbox unit: pids limit"            "$sbu" "TasksMax="
 has "sandbox unit: restarts on failure"   "$sbu" "Restart=on-failure"
 has "sandbox unit: runsc gets the stop"   "$sbu" "KillMode=mixed"
+# every tenant runs in one slice capped below the host's RAM: however many
+# wake at once, together they can't starve the host's own services
+has "sandbox unit: in the tenant slice"   "$sbu" "Slice=homeport-tenants.slice"
+G=$((1024 * 1024 * 1024))
+eq "slice: 16 GiB host keeps 10% back"      "$(tenant_slice_max_bytes $((16 * 1024 * 1024)))" "$(( 16 * G - 16 * G / 10 ))"
+eq "slice: 4 GiB host keeps 1 GiB back"     "$(tenant_slice_max_bytes $((4 * 1024 * 1024)))"  "$(( 3 * G ))"
+eq "slice: a tiny host still gives tenants half" "$(tenant_slice_max_bytes $((1024 * 1024)))" "$(( G / 2 ))"
+slu=$(tenant_slice_unit $(( 3 * G )))
+has "slice unit: hard cap"                "$slu" "MemoryMax=$(( 3 * G ))"
+has "slice unit: reclaim before the cap"  "$slu" "MemoryHigh=$(( 3 * G / 10 * 9 ))"
+has "slice unit: no swap"                 "$slu" "MemorySwapMax=0"
 # swap would absorb a memory bomb: a memory limit means RAM+swap (CI runner
 # with swap: a 600M allocation under MemoryMax=256M simply survived)
 has "sandbox unit: swap can't dodge the memory limit" "$sbu" "MemorySwapMax=0"
@@ -579,6 +590,7 @@ eq  "sandbox unit: no User= (runsc drops privileges itself)" "$(grep -c '^User='
 has "sandbox unit: replicas keep %i" "$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits= emit_service_body '%i')" "sandbox-run web %i"
 nsu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX= limits= emit_service_body 8100)
 has "native unit unchanged" "$nsu" "ExecStart=/opt/homeport/web/current/bin"
+eq  "native unit: not in the tenant slice" "$(grep -c 'Slice=' <<<"$nsu")" "0"
 
 # hooks run natively as the app user — customer code outside the sandbox — so
 # a gvisor app may not have them (until hooks run sandboxed too)

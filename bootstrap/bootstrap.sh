@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.8.0
+HOMEPORTD_VERSION=0.8.1
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -277,6 +277,7 @@ emit_service_body() {
     # the sandbox and exec runsc. Limits on the unit bound the whole sandbox.
     cat <<EOF
 [Service]
+Slice=homeport-tenants.slice
 ExecStart=/usr/local/bin/homeportd sandbox-run $app $1
 ExecStop=/usr/local/bin/homeportd sandbox-stop $app $1
 ExecStopPost=/usr/local/bin/homeportd sandbox-clean $app $1
@@ -572,6 +573,46 @@ sandbox_check_tools() {
   done
 }
 
+# --- the tenant slice ----------------------------------------------------------
+# Every sandbox runs in homeport-tenants.slice, capped below the host's RAM.
+# Each app has its own limit, but apps that can sleep are packed on the
+# expectation that most are asleep; if many wake at once, the slice is what
+# keeps them — together — from starving the host's own services (Caddy, sshd,
+# homeportd). At the cap the kernel reclaims, then OOM-kills inside the slice;
+# systemd restarts that app. The host itself never runs out.
+
+# tenant_slice_max_bytes <MemTotal kB> — the host's RAM less a reserve of 10%
+# (at least 1 GiB), but never less than half.
+tenant_slice_max_bytes() {
+  local total=$(( $1 * 1024 )) reserve
+  reserve=$(( total / 10 ))
+  (( reserve < 1073741824 )) && reserve=1073741824
+  local max=$(( total - reserve ))
+  (( max < total / 2 )) && max=$(( total / 2 ))
+  echo "$max"
+}
+
+tenant_slice_unit() { # <max bytes>
+  cat <<EOF
+[Unit]
+Description=homeport tenant sandboxes
+
+[Slice]
+MemoryMax=$1
+MemoryHigh=$(( $1 / 10 * 9 ))
+MemorySwapMax=0
+EOF
+}
+
+# ensure_tenant_slice — (re)write the slice for this host's RAM; idempotent.
+ensure_tenant_slice() {
+  local f=/etc/systemd/system/homeport-tenants.slice want
+  want=$(tenant_slice_unit "$(tenant_slice_max_bytes "$(awk '/^MemTotal:/{print $2}' /proc/meminfo)")")
+  [[ -f $f && $(cat "$f") == "$want" ]] && return 0
+  printf '%s\n' "$want" > "$f"
+  systemctl daemon-reload
+}
+
 # cmd_sandbox_run <app> <port> — ExecStart of a gvisor app's unit (as root).
 cmd_sandbox_run() {
   local app=${1:-} port=${2:-}
@@ -653,6 +694,7 @@ cmd_sandbox_install() {
   apt-get update -qq
   apt-get install -y -qq runsc >/dev/null
   ensure_meter_timer
+  ensure_tenant_slice
   echo "sandbox: $(runsc --version | head -1) installed (usage metering on)"
 }
 
@@ -2098,7 +2140,7 @@ cmd_add() {
   validate_sandbox "$sandbox" "$release_b64" "$post_release_b64"
   validate_egress "$sandbox" "$egress"
   [[ $egress == - ]] && egress=""
-  [[ $sandbox != gvisor ]] || { sandbox_check_tools; ensure_meter_timer; }
+  [[ $sandbox != gvisor ]] || { sandbox_check_tools; ensure_meter_timer; ensure_tenant_slice; }
   [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
   [[ $memory == - ]] && memory=""
   [[ $cpu == - ]] && cpu=""

@@ -69,6 +69,14 @@ get() { curl -s --max-time 10 "http://$G:$P$1"; }
 eq "app answers at its sandbox address" "$(get /)" "ok"
 eq "nothing answers on host loopback for it" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$P/" || true)" "000"
 
+echo "--- the tenant slice"
+eq "the sandbox runs in the tenant slice" "$(systemctl show homeport-probe -p Slice --value)" "homeport-tenants.slice"
+total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+slice_max=$(systemctl show homeport-tenants.slice -p MemoryMax --value)
+eq "the slice is capped below the host's RAM" "$slice_max" "$(tenant_slice_max_bytes "$total_kb")"
+[[ $slice_max =~ ^[0-9]+$ && $slice_max -lt $(( total_kb * 1024 )) ]] && ok "…leaving room for the host ($(( (total_kb * 1024 - slice_max) / 1048576 )) MiB)" || fail "slice MemoryMax [$slice_max] vs host $(( total_kb * 1024 ))"
+eq "the cap is live in the kernel" "$(cat /sys/fs/cgroup/homeport.slice/homeport-tenants.slice/memory.max 2>/dev/null || cat /sys/fs/cgroup/homeport-tenants.slice/memory.max 2>/dev/null)" "$slice_max"
+
 echo "--- what the app sees"
 # parity, not a literal: the env file is systemd's format (it consumes an
 # unquoted backslash), and a sandboxed app must see exactly what a native one would
