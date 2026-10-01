@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.6.1
+HOMEPORTD_VERSION=0.6.2
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -2491,8 +2491,14 @@ gate_decision() {
 # ci_gate_decision <app> <orig> — a scoped CI key: one app.
 ci_gate_decision() { gate_decision "$1" "$2"; }
 
-# cert_gate_decision <orig> — a hosted deploy certificate: any app on the box.
-cert_gate_decision() { gate_decision "*" "$1"; }
+# cert_gate_decision <app> <orig> — a hosted deploy certificate: ONE app. The
+# CA builds the scope into the certificate's forced command, so it can't be
+# widened by the client. There is no box-wide form: on a shared host the box
+# holds other customers' apps.
+cert_gate_decision() {
+  [[ ${1:-} =~ ^[a-z][a-z0-9-]{0,19}$ ]] || { echo "deny this certificate is not scoped to an app"; return; }
+  gate_decision "$1" "${2:-}"
+}
 
 cmd_ci_gate() {
   local app=${1:-}
@@ -2508,15 +2514,18 @@ cmd_ci_gate() {
   die "this key is scoped to '$app' — ${d#deny }"
 }
 
-# cmd_cert_gate — the SSH forced command for a hosted deploy certificate, set
-# by the homeport CA's template: `sudo /usr/local/bin/homeportd cert-gate
-# "$SSH_ORIGINAL_COMMAND"`. sshd runs it instead of whatever the client asked
-# for; the request arrives as arg 1 because sudo's env_reset drops the env var.
-# The certificate's principal already confined it to this box, so the gate is
-# box-scoped: any app here, never remove/self-update/key-add or a shell.
+# cmd_cert_gate <app> <request> — the SSH forced command for a hosted deploy
+# certificate, set by the homeport CA's template: `sudo
+# /usr/local/bin/homeportd cert-gate <app> "$SSH_ORIGINAL_COMMAND"`. sshd runs
+# it instead of whatever the client asked for; the request arrives as an
+# argument because sudo's env_reset drops the env var. The principal confines
+# the certificate to this box, the app to one app on it: never another app,
+# never remove/self-update/key-add or a shell.
 cmd_cert_gate() {
-  local orig=${1:-${SSH_ORIGINAL_COMMAND:-}} d
-  d=$(cert_gate_decision "$orig")
+  local app=${1:-} d
+  local orig=${2:-}
+  [[ $# -ge 2 ]] || die "this certificate is not scoped to an app — refused"
+  d=$(cert_gate_decision "$app" "$orig")
   if [[ $d == allow\ * ]]; then
     local off=${d#allow }; local -a a; read -ra a <<<"$orig"
     exec /usr/local/bin/homeportd "${a[@]:off}"

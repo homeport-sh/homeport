@@ -284,9 +284,17 @@ eq  "gate: no-sudo offset" "$(gate web "$hd upload web r1")"      "allow 1"
 # --- cert_gate_decision: the box-scoped policy for hosted deploy certificates ---
 # A certificate is scoped to a box — one user's box, every app on it — so the
 # gate drops ci-gate's per-app pin and nothing else. Same verbs, same denials.
-cgate() { cert_gate_decision "$1"; }
-has "cgate: upload any app"       "$(cgate "sudo $hd upload web r1")"        "allow"
-has "cgate: activate another app" "$(cgate "sudo $hd activate shop r1")"     "allow"
+# A deploy certificate is scoped to ONE app (cert-gate <app>): on a shared host
+# the box holds other customers' apps. These run as a certificate for "web".
+cgate() { cert_gate_decision web "$1"; }
+has "cgate: upload its own app"   "$(cgate "sudo $hd upload web r1")"        "allow"
+has "cgate: deny another app"     "$(cgate "sudo $hd activate shop r1")"     "deny"
+has "cgate: deny another app (add)" "$(cgate "sudo $hd add shop - / 256M 50% true - 1 - - - - - gvisor")" "deny"
+has "cgate: register its own app" "$(cgate "sudo $hd add web - / 256M 50% true - 1 - - - - - gvisor")" "allow"
+# the box-wide form (no app) and a wildcard scope are refused outright
+has "cgate: deny an unscoped certificate" "$(cert_gate_decision "" "sudo $hd upload web r1")" "deny"
+has "cgate: deny a wildcard scope"        "$(cert_gate_decision "*" "sudo $hd upload web r1")" "deny"
+has "cgate: deny an invalid scope"        "$(cert_gate_decision "../x" "sudo $hd upload ../x r1")" "deny"
 has "cgate: version"              "$(cgate "sudo $hd version")"              "allow"
 has "cgate: no-sudo form"         "$(cgate "$hd status web")"                "allow"
 eq  "cgate: sudo offset"          "$(cgate "sudo $hd upload web r1")"        "allow 2"
