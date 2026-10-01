@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.9.0
+HOMEPORTD_VERSION=0.10.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -861,10 +861,8 @@ meter_gate_decision() {
   local orig=${1:-}
   [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
   local -a a; read -ra a <<<"$orig"
-  local off
-  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
-  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then off=1
-  else echo "deny may only run homeportd"; return; fi
+  local off; off=$(gate_offset "$orig")
+  [[ -n $off ]] || { echo "deny may only run homeportd"; return; }
   case ${a[off]:-} in
     meter-read|meter-ack) [[ ${a[off+1]:-} =~ ^[0-9]{1,18}$ && -z ${a[off+2]:-} ]] || { echo "deny invalid sequence"; return; } ;;
     *) echo "deny verb '${a[off]:-(none)}' is not permitted"; return ;;
@@ -875,11 +873,74 @@ meter_gate_decision() {
 cmd_meter_gate() {
   local orig=${1:-} d
   d=$(meter_gate_decision "$orig")
-  if [[ $d == allow\ * ]]; then
-    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
-    exec /usr/local/bin/homeportd "${a[@]:off}"
+  gate_run "$d" "$orig" "this certificate may only read usage"
+}
+
+# host_gate_decision <orig> — the control plane's host certificate: renew
+# this host's own certificate (host-cert-install, the certificate on stdin)
+# and nothing else.
+host_gate_decision() {
+  local orig=${1:-}
+  [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
+  local -a a; read -ra a <<<"$orig"
+  local off; off=$(gate_offset "$orig")
+  [[ -n $off ]] || { echo "deny may only run homeportd"; return; }
+  [[ ${a[off]:-} == host-cert-install && ${#a[@]} -eq $(( off + 1 )) ]] ||
+    { echo "deny verb '${a[off]:-(none)}' is not permitted"; return; }
+  echo "allow $off"
+}
+
+cmd_host_gate() {
+  local orig=${1:-} d
+  d=$(host_gate_decision "$orig")
+  gate_run "$d" "$orig" "this certificate may only renew the host certificate"
+}
+
+# host_cert_check <cert file> <host public key> — is this a certificate we
+# would serve? A host certificate (not a user one), for exactly this host's
+# key, naming the host (a cert with no principals is valid for ANY host), and
+# expiring, not yet expired. Who signed it is the control plane's concern: a
+# wrong CA only locks the control plane out, which it would notice.
+host_cert_check() {
+  local cert=$1 pub=$2 info want got until now
+  [[ $(wc -l < "$cert") -le 1 ]] && grep -q '^ssh-ed25519-cert-v01@openssh.com ' "$cert" ||
+    { echo "not an ed25519 certificate" >&2; return 1; }
+  info=$(TZ=UTC ssh-keygen -L -f "$cert" 2>/dev/null) || { echo "unreadable certificate" >&2; return 1; }
+  grep -q 'Type: ssh-ed25519-cert-v01@openssh.com host certificate' <<<"$info" ||
+    { echo "not a host certificate" >&2; return 1; }
+  want=$(ssh-keygen -lf "$pub" | awk '{print $2}')
+  got=$(awk '/Public key:/ {print $4}' <<<"$info")
+  [[ -n $want && $got == "$want" ]] || { echo "certificate is for another key" >&2; return 1; }
+  awk '/Principals:/ {getline; print}' <<<"$info" | grep -q '(none)' &&
+    { echo "certificate names no host" >&2; return 1; }
+  until=$(awk '/Valid:/ {print $5}' <<<"$info")
+  [[ $until =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}$ ]] || { echo "certificate never expires" >&2; return 1; }
+  now=$(TZ=UTC date +%Y-%m-%dT%H:%M:%S)
+  [[ $until > $now ]] || { echo "certificate expired $until" >&2; return 1; }
+}
+
+# cmd_host_cert_install — replace this host's certificate with the one on
+# stdin, after host_cert_check. sshd is checked before the reload and the old
+# certificate restored if it would not start: a bad certificate must never
+# take SSH down.
+SSH_HOST_KEY=/etc/ssh/ssh_host_ed25519_key
+
+cmd_host_cert_install() {
+  local pub=$SSH_HOST_KEY.pub dest=$SSH_HOST_KEY-cert.pub tmp
+  [[ -s $pub ]] || die "no ed25519 host key"
+  tmp=$(mktemp "${SSH_HOST_KEY%/*}/.homeport-cert.XXXXXX")
+  head -c 8192 > "$tmp"
+  host_cert_check "$tmp" "$pub" || { rm -f "$tmp"; die "certificate refused"; }
+  chmod 644 "$tmp"
+  [[ -f $dest ]] && cp -p "$dest" "$dest.prev"
+  mv -f "$tmp" "$dest"
+  if ! sshd -t; then
+    if [[ -f $dest.prev ]]; then mv -f "$dest.prev" "$dest"; else rm -f "$dest"; fi
+    die "sshd rejected the new certificate; the old one is back"
   fi
-  die "this certificate may only read usage — ${d#deny }"
+  rm -f "$dest.prev"
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd
+  log "host certificate renewed"
 }
 
 # ensure_meter_timer — the 60s tick, installed with the sandbox runtime
@@ -2797,6 +2858,26 @@ cmd_upload() { # <app> <release> — receive the binary on stdin into a release 
 # THIS app — never remove/self-update/key-add, another app, or an interactive
 # shell. Runs as root (via sudo in the authorized_keys line); homeportd
 # re-validates every argument, so re-exec'ing the client's tokens is safe.
+# gate_offset <orig> — where the homeportd verb starts in a client's request:
+# 2 for "sudo /usr/local/bin/homeportd <verb> …", 1 without sudo, nothing if
+# the request isn't homeportd at all. Every gate parses requests this way.
+gate_offset() {
+  local -a a; read -ra a <<<"${1:-}"
+  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then echo 2
+  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then echo 1; fi
+}
+
+# gate_run <decision> <orig> <what the credential may do> — every gate's last
+# step: run the request on "allow <off>", refuse on "deny <reason>".
+gate_run() {
+  local d=$1 orig=$2
+  if [[ $d == allow\ * ]]; then
+    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
+    exec /usr/local/bin/homeportd "${a[@]:off}"
+  fi
+  die "$3 — ${d#deny }"
+}
+
 # gate_decision <scope> <orig> — the policy shared by every forced command that
 # re-executes a client's request: a scoped CI key (ci-gate) and a hosted deploy
 # certificate (cert-gate). Pure: echoes "allow <off>" (argv index where the
@@ -2815,10 +2896,8 @@ gate_decision() {
   local scope=$1 orig=$2
   [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
   local -a a; read -ra a <<<"$orig"
-  local off
-  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
-  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then off=1
-  else echo "deny may only run homeportd (got '${a[0]:-}')"; return; fi
+  local off; off=$(gate_offset "$orig")
+  [[ -n $off ]] || { echo "deny may only run homeportd (got '${a[0]:-}')"; return; }
   local verb=${a[off]:-} arg1=${a[off+1]:-}
   case $verb in
     upload|upload-static|add|activate|rollback|env|env-sync|env-rm|env-list|status|logs)
@@ -2847,9 +2926,9 @@ cert_gate_decision() {
   # confirmed form. Not in gate_decision, which CI keys share — a CI key
   # never removes, pauses or resumes anything.
   local -a a; read -ra a <<<"${2:-}"
-  local off=-1
-  if [[ ${a[0]:-} == sudo && ${a[1]:-} == /usr/local/bin/homeportd ]]; then off=2
-  elif [[ ${a[0]:-} == /usr/local/bin/homeportd ]]; then off=1; fi
+  local off
+  off=$(gate_offset "${2:-}")
+  off=${off:--1}
   if (( off >= 0 )) && [[ ${a[off]:-} == remove ]]; then
     if [[ ${a[off+1]:-} == "$1" && ${a[off+2]:-} == --yes && ${#a[@]} -eq $(( off + 3 )) ]]; then
       echo "allow $off"
@@ -2877,11 +2956,7 @@ cmd_ci_gate() {
   # "$SSH_ORIGINAL_COMMAND" through, because sudo's env_reset drops the env var.
   local orig=${2:-${SSH_ORIGINAL_COMMAND:-}} d
   d=$(ci_gate_decision "$app" "$orig")
-  if [[ $d == allow\ * ]]; then
-    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
-    exec /usr/local/bin/homeportd "${a[@]:off}"
-  fi
-  die "this key is scoped to '$app' — ${d#deny }"
+  gate_run "$d" "$orig" "this key is scoped to '$app'"
 }
 
 # cmd_cert_gate <app> <request> — the SSH forced command for a hosted deploy
@@ -2896,11 +2971,7 @@ cmd_cert_gate() {
   local orig=${2:-}
   [[ $# -ge 2 ]] || die "this certificate is not scoped to an app — refused"
   d=$(cert_gate_decision "$app" "$orig")
-  if [[ $d == allow\ * ]]; then
-    local off=${d#allow }; local -a a; read -ra a <<<"$orig"
-    exec /usr/local/bin/homeportd "${a[@]:off}"
-  fi
-  die "this certificate may not do that — ${d#deny }"
+  gate_run "$d" "$orig" "this certificate may not do that"
 }
 
 # cmd_activate_static <app> <release> — promote a static release: an atomic
@@ -3532,6 +3603,7 @@ homeportd — root-side homeport helper (run via sudo)
   meter-tick                         record a minute of usage (run by homeport-meter.timer)
   meter-read <after-seq>             spooled usage records (control plane, via meter-gate)
   meter-ack <seq>                    drop records the control plane has stored
+  host-cert-install                  replace this host's certificate (stdin; control plane, via host-gate)
   origin-auth-set [--keep-previous]  require X-Origin-Auth (secret on stdin) on every public site
   origin-auth-retire                 end a rotation: drop the previous value
   origin-auth-clear                  stop requiring it
@@ -3592,6 +3664,8 @@ main() {
     meter-read)  cmd_meter_read "$@" ;;
     meter-ack)   cmd_meter_ack "$@" ;;
     meter-gate)  cmd_meter_gate "$@" ;;
+    host-gate)   cmd_host_gate "$@" ;;
+    host-cert-install) cmd_host_cert_install "$@" ;;
     origin-auth-set)    cmd_origin_auth_set "$@" ;;
     origin-auth-clear)  cmd_origin_auth_clear "$@" ;;
     origin-auth-retire) cmd_origin_auth_retire "$@" ;;

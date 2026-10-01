@@ -527,6 +527,72 @@ has "meter-gate: deny status"       "$(mg "sudo $hd status web")"      "deny"
 has "meter-gate: deny bad seq"      "$(mg "sudo $hd meter-read 1;id")" "deny"
 has "meter-gate: deny a shell"      "$(mg "")"                         "deny"
 has "meter-gate: deny other binaries" "$(mg "cat /var/lib/homeport/meter/spool")" "deny"
+
+# host-gate: the control plane's host-certificate renewal — install a new
+# host certificate, nothing else
+hg() { host_gate_decision "$1"; }
+has "host-gate: install"            "$(hg "sudo $hd host-cert-install")"       "allow"
+has "host-gate: no arguments"       "$(hg "sudo $hd host-cert-install x")"     "deny"
+has "host-gate: deny a deploy"      "$(hg "sudo $hd upload web r1")"           "deny"
+has "host-gate: deny meter"         "$(hg "sudo $hd meter-read 0")"            "deny"
+has "host-gate: deny a shell"       "$(hg "")"                                 "deny"
+has "host-gate: deny other binaries" "$(hg "tee /etc/ssh/ssh_host_ed25519_key-cert.pub")" "deny"
+# the shared prefix parse every gate uses
+has "gate_offset: via sudo"         "[$(gate_offset "sudo $hd version")]"      "[2]"
+has "gate_offset: direct"           "[$(gate_offset "$hd version")]"           "[1]"
+has "gate_offset: anything else"    "[$(gate_offset "bash -c id")]"            "[]"
+
+# host_cert_check: a host certificate for THIS host's key, naming it, expiring
+hc=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N '' -f "$hc/ca" -C ca
+ssh-keygen -q -t ed25519 -N '' -f "$hc/host" -C host
+ssh-keygen -q -t ed25519 -N '' -f "$hc/other" -C other
+sign() { # sign <out> <key> <extra ssh-keygen args...>
+  local out=$1 key=$2; shift 2
+  cp "$key.pub" "$hc/tosign.pub"
+  ssh-keygen -q -s "$hc/ca" -I host/0b910ee5 "$@" "$hc/tosign.pub" 2>/dev/null
+  mv "$hc/tosign-cert.pub" "$out"
+}
+sign "$hc/good"    "$hc/host"  -h -n 203.0.113.9 -V -1m:+30d
+sign "$hc/user"    "$hc/host"     -n 203.0.113.9 -V -1m:+30d
+sign "$hc/theirs"  "$hc/other" -h -n 203.0.113.9 -V -1m:+30d
+sign "$hc/expired" "$hc/host"  -h -n 203.0.113.9 -V 20200101:20200102
+sign "$hc/anyhost" "$hc/host"  -h               -V -1m:+30d
+sign "$hc/forever" "$hc/host"  -h -n 203.0.113.9
+echo "not a certificate" > "$hc/garbage"
+hcc() { host_cert_check "$hc/$1" "$hc/host.pub" >/dev/null 2>&1; echo "[rc=$?]"; }
+has "host cert: a good one"            "$(hcc good)"    "[rc=0]"
+has "host cert: refuse a user cert"    "$(hcc user)"    "[rc=1]"
+has "host cert: refuse another key"    "$(hcc theirs)"  "[rc=1]"
+has "host cert: refuse expired"        "$(hcc expired)" "[rc=1]"
+has "host cert: refuse any-host"       "$(hcc anyhost)" "[rc=1]"
+has "host cert: refuse never-expiring" "$(hcc forever)" "[rc=1]"
+has "host cert: refuse garbage"        "$(hcc garbage)" "[rc=1]"
+
+# cmd_host_cert_install: installs a good certificate; refuses a bad one and
+# keeps the old; puts the old back if sshd won't take the new
+(
+  SSH_HOST_KEY=$hc/host
+  log() { :; }; die() { echo "DIE $*"; exit 1; }
+  sshd_ok=1; sshd() { (( sshd_ok )); }
+  reloads=0; systemctl() { echo "reload" >> "$hc/reloads"; }
+  echo "old-cert" > "$hc/host-cert.pub"
+  out=$(cmd_host_cert_install < "$hc/good" 2>&1)
+  has "install: good cert installed" "$(cat "$hc/host-cert.pub")" "$(cat "$hc/good")"
+  has "install: sshd reloaded"       "$(cat "$hc/reloads" 2>/dev/null)" "reload"
+  cp "$hc/good" "$hc/host-cert.pub"; : > "$hc/reloads"
+  out=$(cmd_host_cert_install < "$hc/theirs" 2>&1)
+  has "install: bad cert refused"    "$out" "DIE certificate refused"
+  has "install: bad cert, old kept"  "$(cat "$hc/host-cert.pub")" "$(cat "$hc/good")"
+  sshd_ok=0
+  sign "$hc/good2" "$hc/host" -h -n 203.0.113.9 -V -1m:+20d
+  out=$(cmd_host_cert_install < "$hc/good2" 2>&1)
+  has "install: sshd says no"        "$out" "DIE sshd rejected"
+  has "install: sshd says no, old back" "$(cat "$hc/host-cert.pub")" "$(cat "$hc/good")"
+  has "install: no reload on failure" "[$(cat "$hc/reloads")]" "[]"
+  has "install: no temp files left"  "[$(ls -A "$hc" | grep -c '^\.homeport-cert')]" "[0]"
+)
+rm -rf "$hc"
 # and a deploy certificate can't read other tenants' usage
 has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
 
