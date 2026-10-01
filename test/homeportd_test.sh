@@ -467,6 +467,62 @@ printf '%s\n' "$(env_render_file "$lf")" > "$lf.2"
 eq "env: rendering is idempotent" "$(env_render_file "$lf.2")" "$(cat "$lf.2")"
 rm -f "$lf" "$lf.2"
 
+# --- usage metering ------------------------------------------------------------
+# Awake time in (last, now], from systemd's own timestamps (µs, monotonic):
+# meter_awake_us <last> <now> <state> <active-enter> <inactive-enter>
+aw() { meter_awake_us "$@"; }
+eq "meter: awake the whole minute"        "$(aw 1000 61000 active   500 0)"     "60000"
+eq "meter: woke mid-minute"               "$(aw 1000 61000 active   31000 500)" "30000"
+eq "meter: slept mid-minute"              "$(aw 1000 61000 inactive 500 21000)" "20000"
+eq "meter: woke and slept within it"      "$(aw 1000 61000 inactive 11000 41000)" "30000"
+eq "meter: asleep the whole minute"       "$(aw 1000 61000 inactive 200 500)"  "0"
+eq "meter: never started"                 "$(aw 1000 61000 inactive 0 0)"      "0"
+eq "meter: failed counts like asleep"     "$(aw 1000 61000 failed 200 500)"    "0"
+eq "meter: stopping still counts as awake" "$(aw 1000 61000 deactivating 500 0)" "60000"
+# counters: growth is the delta; a restart (new identity) or a counter that went
+# backwards starts over; the first sight of an instance only sets a baseline —
+# metering never bills usage from before it was watching
+dl() { meter_delta "$@"; }
+eq "meter: counter growth"                "$(dl 100 250 same)"  "150"
+eq "meter: restart → new counter"         "$(dl 100 40 new)"    "40"
+eq "meter: counter went backwards"        "$(dl 100 40 same)"   "40"
+eq "meter: first sight sets a baseline"   "$(dl '' 9000 new)"   "0"
+# which units/ports an app's instances are
+eq "meter: plain app"   "$(PORT=8100 REPLICAS=1 IDLE= AUTOSCALE_MAX= meter_instances web)" "homeport-web 8100"
+eq "meter: idle app serves on its internal port" "$(PORT=8100 REPLICAS=1 IDLE=true AUTOSCALE_MAX= meter_instances web)" "homeport-web 9100"
+rb=$(replica_base 8100)
+eq "meter: replicas" "$(PORT=8100 REPLICAS=2 IDLE= AUTOSCALE_MAX= meter_instances web)" "homeport-web@$((rb+1)) $((rb+1))"$'\n'"homeport-web@$((rb+2)) $((rb+2))"
+eq "meter: autoscale watches every slot up to max" "$(PORT=8100 REPLICAS=1 IDLE= AUTOSCALE_MAX=4 meter_instances web | wc -l | tr -d ' ')" "4"
+eq "meter: size 512M" "$(meter_mb 512M)" "512"
+eq "meter: size 1G"   "$(meter_mb 1G)" "1024"
+eq "meter: no size"   "$(meter_mb '')" "0"
+rec=$(meter_record 7 100 160 web 256 60000 120 4096)
+eq "meter: record" "$rec" '{"seq":7,"start":100,"end":160,"app":"web","memory_mb":256,"awake_ms":60000,"mb_ms":15360000,"cpu_ms":120,"egress_bytes":4096}'
+command -v jq >/dev/null && eq "meter: record is JSON" "$(jq -r .mb_ms <<<"$rec")" "15360000"
+# the spool: numbered records, read after a sequence number, deleted only once
+# the control plane confirms it stored them; numbering never repeats
+( METER_DIR=$(mktemp -d)
+  for i in 1 2 3 4 5; do meter_append "$(meter_record __SEQ__ $i $((i+60)) web 256 1000 0 0)"; done
+  eq "meter: read after 2" "$(meter_read 2 | jq -r .seq | paste -sd, -)" "3,4,5"
+  meter_ack 4
+  eq "meter: ack drops what was stored" "$(meter_read 0 | jq -r .seq | paste -sd, -)" "5"
+  meter_append "$(meter_record __SEQ__ 9 69 web 256 1000 0 0)"
+  eq "meter: numbering survives an ack" "$(meter_read 0 | jq -r .seq | paste -sd, -)" "5,6"
+  eq "meter: reading never deletes" "$(meter_read 0 | wc -l | tr -d ' ')" "2"
+  rm -rf "$METER_DIR"
+  exit "$fails" ) || fails=$((fails + $?))
+# the control plane's meter certificate may read and confirm usage — nothing else
+mg() { meter_gate_decision "$1"; }
+has "meter-gate: read"              "$(mg "sudo $hd meter-read 12")"   "allow"
+has "meter-gate: ack"               "$(mg "sudo $hd meter-ack 12")"    "allow"
+has "meter-gate: deny a deploy"     "$(mg "sudo $hd upload web r1")"   "deny"
+has "meter-gate: deny status"       "$(mg "sudo $hd status web")"      "deny"
+has "meter-gate: deny bad seq"      "$(mg "sudo $hd meter-read 1;id")" "deny"
+has "meter-gate: deny a shell"      "$(mg "")"                         "deny"
+has "meter-gate: deny other binaries" "$(mg "cat /var/lib/homeport/meter/spool")" "deny"
+# and a deploy certificate can't read other tenants' usage
+has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
+
 # --- sandbox: gvisor (multi-tenant runner) --------------------------------
 # Each instance (keyed by the port it serves) gets its own /30 in 100.64/14:
 # host side .1, sandbox .2. Unique per port, valid up to port 65535.

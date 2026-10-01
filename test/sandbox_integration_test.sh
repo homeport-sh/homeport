@@ -106,6 +106,32 @@ P2=$(sed -n 's/^PORT=//p' "$HOMEPORT_ETC/probe-two/config"); G2=$(sandbox_ip "$P
 eq "tenant can't reach another tenant"        "$(get "/dial?addr=$G2:$P2")" "blocked"
 eq "…and the host still can"                  "$(curl -s --max-time 5 "http://$G2:$P2/")" "ok"
 
+echo "--- usage metering"
+eq "meter timer installed with the sandbox" "$(systemctl is-enabled homeport-meter.timer 2>/dev/null)" "enabled"
+systemctl stop homeport-meter.timer   # the test ticks by hand; the timer would race it
+"$HD" meter-ack 999999999 >/dev/null  # start from an empty spool
+"$HD" meter-tick                      # baseline
+t0=$(date +%s)
+curl -s -o /dev/null --max-time 20 "http://$G:$P/blob?kb=2048"   # 2 MiB out of the sandbox
+sleep 3
+"$HD" meter-tick
+el_ms=$(( ($(date +%s) - t0 + 1) * 1000 ))
+recs=$("$HD" meter-read 0)
+rec=$(jq -c --arg a probe 'select(.app == $a)' <<<"$recs" | tail -1)
+[[ -n $rec ]] && ok "a usage record for the probe app" || fail "no usage record (spool: $recs)"
+awake=$(jq -r .awake_ms <<<"$rec"); egress=$(jq -r .egress_bytes <<<"$rec")
+[[ $awake -ge 2000 && $awake -le $(( el_ms + 2000 )) ]] && ok "awake time measured (${awake} ms of ~${el_ms} ms)" || fail "awake_ms $awake (elapsed ~${el_ms} ms)"
+[[ $egress -ge $(( 2048 * 1024 )) && $egress -lt $(( 4 * 1024 * 1024 )) ]] && ok "bytes sent measured ($egress for a 2 MiB response)" || fail "egress_bytes $egress"
+eq "billed size × time" "$(jq -r '.mb_ms == .memory_mb * .awake_ms and .memory_mb == 256' <<<"$rec")" "true"
+eq "records are numbered" "$(jq -r .seq <<<"$recs" | sort -n | uniq -d | wc -l | tr -d ' ')" "0"
+# the control plane's certificate: read and confirm, nothing else
+eq "meter-gate serves reads" "$("$HD" meter-gate "sudo /usr/local/bin/homeportd meter-read 0" | wc -l | tr -d ' ')" "$(wc -l <<<"$recs" | tr -d ' ')"
+"$HD" meter-gate "sudo /usr/local/bin/homeportd status probe" >/dev/null 2>&1 && fail "meter-gate ran status" || ok "meter-gate refuses anything but read/confirm"
+last=$(jq -r .seq <<<"$recs" | sort -n | tail -1)
+"$HD" meter-gate "sudo /usr/local/bin/homeportd meter-ack $last" >/dev/null
+eq "confirmed records are gone" "$("$HD" meter-read 0 | wc -l | tr -d ' ')" "0"
+systemctl start homeport-meter.timer
+
 echo "--- limits"
 before=$(systemctl show homeport-probe -p NRestarts --value)
 get '/alloc?mb=600' >/dev/null    # over the 256M MemoryMax
