@@ -74,7 +74,7 @@ GDNS_PROVIDER="" GECH="" GTRUSTED="127.0.0.1/32 $HOSTIP/32" GASK="http://127.0.0
 # which names get one, not ACME
 sed -i 's#^{$#{\n\tlocal_certs#' "$CADDY_GLOBALS_FRAG"
 # the app: says who the visitor was
-printf 'http://:%s {\n\trespond "app sees {header.X-Forwarded-For} via {header.X-Forwarded-Proto} auth[{header.X-Origin-Auth}]"\n}\n' "$APP_PORT" > "$CADDY_DIR/zz-app.caddy"
+printf 'http://:%s {\n\theader +Set-Cookie "toss=1; Path=/; Domain=.homeport.test; Secure"\n\theader +Set-Cookie "own=1; Path=/; Domain=shop.homeport.test"\n\theader +Set-Cookie "plain=1; Path=/"\n\trespond "app sees {header.X-Forwarded-For} via {header.X-Forwarded-Proto} auth[{header.X-Origin-Auth}]"\n}\n' "$APP_PORT" > "$CADDY_DIR/zz-app.caddy"
 printf 'import %s/*.caddy\n' "$CADDY_DIR" > "$CADDYFILE"
 
 caddy validate --config "$CADDYFILE" --adapter caddyfile >"$work/validate.log" 2>&1 \
@@ -104,6 +104,13 @@ got=$(edge shop.example)
   || fail "customer domain: got [$got]"
 eq "a name the control plane doesn't know gets no certificate" \
   "$(edge other.example -o /dev/null -w '%{http_code}' || true)" "000"
+# an app can't set a cookie for the whole apps' domain - every other app
+# would receive it: the edge makes it the app's own
+jar=$(edge shop.homeport.test -H 'X-Origin-Auth: s3cret' -D - -o /dev/null | tr -d '\r' | grep -i '^set-cookie:')
+[[ $jar == *"toss=1; Path=/; Secure"* && ${jar,,} != *"domain=.homeport.test"* ]] \
+  && ok "a cookie for the whole apps' domain arrives host-only" || fail "domain-wide cookie: $jar"
+[[ $jar == *"own=1; Path=/; Domain=shop.homeport.test"* && $jar == *"plain=1; Path=/"* ]] \
+  && ok "…its own name's and host-only cookies untouched" || fail "other cookies: $jar"
 eq "an unknown name stops at the edge" \
   "$(edge nope.homeport.test -H 'X-Origin-Auth: s3cret' -w ' %{http_code}')" "No app here 404"
 eq "not through our Cloudflare zone: refused" \
