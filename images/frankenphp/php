@@ -1,0 +1,23 @@
+#!/bin/bash
+# php: the base FrankenPHP's php-cli - the same version and extensions an app
+# gets. php-cli takes no ini flags, and composer passes some ("@php" scripts
+# run as php -d key=value … artisan): each -d becomes a line of an ini file
+# PHP reads from PHP_INI_SCAN_DIR, and the rest is passed through.
+set -euo pipefail
+ini=() args=()
+while (( $# )); do
+  case $1 in
+    -d) ini+=("${2:?php: -d needs key=value}"); shift 2 ;;
+    -d*) ini+=("${1#-d}"); shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+if (( ${#ini[@]} )); then
+  dir=$(mktemp -d)
+  trap 'rm -rf "$dir"' EXIT
+  printf '%s\n' "${ini[@]}" > "$dir/zz-flags.ini"
+  export PHP_INI_SCAN_DIR="${PHP_INI_SCAN_DIR:+$PHP_INI_SCAN_DIR:}$dir"
+  /opt/homeport/frankenphp php-cli ${args[@]+"${args[@]}"}
+  exit
+fi
+exec /opt/homeport/frankenphp php-cli ${args[@]+"${args[@]}"}

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/homeport/frankenphp php-cli /opt/homeport/composer.phar "$@"

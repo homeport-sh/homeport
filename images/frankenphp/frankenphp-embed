@@ -1,0 +1,37 @@
+#!/bin/bash
+# frankenphp-embed <app dir> <output> — embed a PHP app into a static
+# FrankenPHP: the app as app.tar (what static-php-cli's --with-frankenphp-app
+# does), then the link static-php-cli runs, against the PHP this image built.
+# HOMEPORT_FRANKENPHP_PGO=0 links without the profile (faster to build).
+#
+# The link builds in a copy of FrankenPHP's Go source of its own (a few MB;
+# the libraries under dist/ stay shared, read-only): app.tar has to sit in
+# that source, and the image's own stays untouched by any build.
+set -euo pipefail
+app=$(cd "${1:?usage: frankenphp-embed <app dir> <output>}" && pwd)
+out=${2:?usage: frankenphp-embed <app dir> <output>}
+[[ $out == /* ]] || out=$PWD/$out
+S=/go/src/app/dist/static-php-cli
+H=/opt/homeport
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+src=$work/frankenphp
+mkdir "$src" "$work/out"
+tar -C /go/src/app --exclude=./dist --exclude=./.git -cf - . | tar -C "$src" -xf -
+ln -s /go/src/app/dist "$src/dist"
+tar -cf "$src/app.tar" --exclude=./.git --exclude=./node_modules --exclude=./tests -C "$app" .
+md5sum "$src/app.tar" | cut -d' ' -f1 > "$src/app.checksum"
+export PATH=$S/pkgroot/x86_64-linux/go-xcaddy/bin:$S/pkgroot/x86_64-linux/bin:$S/buildroot/bin:$PATH
+export GOROOT=$S/pkgroot/x86_64-linux/go-xcaddy
+dyn=""
+[[ -f $S/buildroot/lib/libphp.a.dynsym ]] && dyn="-Wl,--dynamic-list=$S/buildroot/lib/libphp.a.dynsym"
+export CGO_ENABLED=1
+export CGO_CFLAGS="$(cat $H/cflags) -fPIE -fstack-protector-strong -O2 -w -s -DFRANKENPHP_VERSION=$FRANKENPHP_VERSION"
+export CGO_LDFLAGS="-static-pie $(cat $H/libs)"
+export LD_LIBRARY_PATH=$S/buildroot/lib
+export XCADDY_GO_BUILD_FLAGS="-buildmode=pie -ldflags \"-linkmode=external -extldflags '-static-pie -Wl,-z,stack-size=0x80000 $dyn' -X 'github.com/caddyserver/caddy/v2/modules/caddyhttp.ServerHeader=FrankenPHP Caddy' -X 'github.com/caddyserver/caddy/v2.CustomBinaryName=frankenphp' -X 'github.com/caddyserver/caddy/v2.CustomVersion=FrankenPHP v$FRANKENPHP_VERSION PHP $PHP_VERSION Caddy'\" -tags=static_build,nobadger,nomysql,nopgx,deprecated_topic,deprecated_claim"
+cmd=$(sed "s#/go/src/app#$src#g" $H/xcaddy.cmd)
+[[ ${HOMEPORT_FRANKENPHP_PGO:-1} == 0 ]] && cmd=$(sed -E 's/ --pgo [^ ]+//' <<<"$cmd")
+cd "$work/out"
+eval "$cmd" >&2
+mv frankenphp "$out"
