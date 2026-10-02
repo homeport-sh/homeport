@@ -5,7 +5,10 @@
 #
 # Pinned by digest: FrankenPHP's own static builder at the version we ship.
 ARG BUILDER=dunglas/frankenphp:static-builder-musl-1.12.7@sha256:808eff18dcadb3839dc4316d8d9f55a1d2097add70d46451740886b961164965
-FROM ${BUILDER}
+# the builder's own Alpine release (the workflow reads it): the final stage's
+# C toolchain must match the one that compiled the libraries
+ARG ALPINE=3.22
+FROM ${BUILDER} AS build
 
 ARG FRANKENPHP_VERSION=1.12.7
 ARG PHP_VERSION=8.5.11
@@ -25,9 +28,25 @@ WORKDIR /go/src/app
 COPY build-base.sh /opt/homeport/build-base.sh
 RUN sh /opt/homeport/build-base.sh
 
+# --- what a build pulls: no builder image underneath (it ships a full build
+# of its own, 2.6 GB compressed), just Alpine with the C toolchain the link
+# uses, and what the base build made
+FROM alpine:${ALPINE}
+ARG FRANKENPHP_VERSION=1.12.7
+ARG PHP_VERSION=8.5.11
+ARG PHP_EXTENSIONS
+ARG COMPOSER_VERSION=2.10.3
+ARG COMPOSER_SHA256=7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
+RUN apk add --no-cache bash coreutils tar gcc g++ musl-dev linux-headers binutils git ca-certificates curl unzip
+COPY --from=build /go/src/app /go/src/app
+COPY --from=build /opt/go /opt/go
+COPY --from=build /opt/homeport /opt/homeport
+ENV GOCACHE=/opt/go/cache GOMODCACHE=/opt/go/mod \
+    FRANKENPHP_VERSION=${FRANKENPHP_VERSION} PHP_VERSION=${PHP_VERSION}
+
 ADD --checksum=sha256:${COMPOSER_SHA256} https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar /opt/homeport/composer.phar
 COPY php composer frankenphp-embed /opt/homeport/bin/
 RUN chmod 755 /opt/homeport/bin/* && chmod 644 /opt/homeport/composer.phar \
- && php -r 'echo PHP_VERSION, " ", count(get_loaded_extensions()), " extensions\n";' \
- && composer --version
+ && /opt/homeport/bin/php -r 'echo PHP_VERSION, " ", count(get_loaded_extensions()), " extensions\n";' \
+ && /opt/homeport/bin/composer --version
 ENV PATH=/opt/homeport/bin:${PATH}

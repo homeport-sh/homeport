@@ -28,7 +28,10 @@ jobs:
       - name: build the base (PHP compiled once)
         run: |
           start=$(date +%s)
-          docker buildx build --load -t "$IMAGE:$TAG" \
+          builder=$(sed -n 's/^ARG BUILDER=//p' images/frankenphp/Dockerfile)
+          alpine=$(docker run --rm --entrypoint cat "$builder" /etc/alpine-release | cut -d. -f1,2)
+          echo "the builder is Alpine $alpine"
+          docker buildx build --load -t "$IMAGE:$TAG" --build-arg ALPINE="$alpine" \
             --cache-from type=gha,scope=frankenphp --cache-to type=gha,scope=frankenphp,mode=max \
             images/frankenphp
           echo "BASE: $(( $(date +%s) - start ))s, image $(docker image inspect "$IMAGE:$TAG" -f '{{.Size}}' | numfmt --to=iec)"
@@ -37,7 +40,7 @@ jobs:
       - name: a Laravel app's build against it
         run: |
           set -euo pipefail
-          composer create-project laravel/laravel demo --prefer-dist --no-interaction --no-install --quiet
+          composer create-project laravel/laravel demo --prefer-dist --no-interaction --no-install --no-scripts --quiet
           printf "\nRoute::get('/hello', fn () => 'embedded');\n" >> demo/routes/web.php
           mkdir -p out && sudo chown 1000:1000 out demo -R
           build() { # <label> <pgo 0|1>
