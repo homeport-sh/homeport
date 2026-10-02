@@ -4547,19 +4547,25 @@ main() {
   command -v apt-get >/dev/null || die "this script supports Ubuntu/Debian only"
 
   export DEBIAN_FRONTEND=noninteractive
+  # a fresh cloud box runs its own package updates at first boot and holds
+  # apt's lock for minutes: wait for it (every apt-get after this, homeportd's
+  # too), rather than fail half-way
+  echo 'DPkg::Lock::Timeout "600";' > /etc/apt/apt.conf.d/80homeport-lock-timeout
   log "Installing base packages"
   apt-get update -qq
   apt-get install -y -qq ufw fail2ban unattended-upgrades curl ca-certificates gnupg >/dev/null
 
   setup_deploy_user
   setup_firewall
-  setup_ssh_hardening
   setup_fail2ban
   setup_auto_upgrades
   setup_sysctl
   setup_caddy
   install_homeportd
   setup_dirs_and_sudo
+  # root login goes last: until homeportd is in, root is the only way back
+  # into a box whose setup failed part-way
+  setup_ssh_hardening
   # homeportd's first run moves Caddy's admin API off TCP loopback (and writes
   # the origin-auth snippet) — do it now rather than on the first deploy.
   /usr/local/bin/homeportd version >/dev/null
