@@ -578,6 +578,14 @@ has "build-gate: deny other binaries" "$(bg "bash -c id")"                     "
     job "$bad"
     has "job: refuse $bad" "[$( (build_job_check "$bj") >/dev/null 2>&1; echo $?)]" "[1]"
   done
+  # where the run plan goes: optional (an older control plane sends none)
+  job '.plan = "https://nyc3.digitaloceanspaces.com/artifacts/a/plan?X-Amz-Signature=ghi"'
+  has "job: a plan link" "$(build_job_check "$bj" && echo "$BJ_PLAN")" "https://nyc3.digitaloceanspaces.com/artifacts/a/plan"
+  job .; eq "job: no plan link is fine" "$(build_job_check "$bj" && echo "[$BJ_PLAN]")" "[]"
+  for bad in '.plan = "http://x/plan"' '.plan = "https://x/ y"' '.plan = 5'; do
+    job "$bad"
+    has "job: refuse $bad" "[$( (build_job_check "$bj") >/dev/null 2>&1; echo $?)]" "[1]"
+  done
   printf 'not json' > "$bj"
   has "job: refuse garbage" "[$( (build_job_check "$bj") >/dev/null 2>&1; echo $?)]" "[1]"
   rm -f "$bj"
@@ -922,6 +930,13 @@ fi
 eq "host_alias_owner finds alias" "$(host_alias_owner www.homeport.sh newapp)" "website"
 rm -rf "$HOMEPORT_ETC"
 
+# run_plan: how the app runs, from build-plan's output, for the control plane
+if command -v jq >/dev/null; then
+  rp=$(run_plan '{"toolchain":"go","image":"golang:1","command":"go build","artifact":"server","run":"serve","release":"migrate","processes":[{"name":"worker","run":"work"}]}')
+  eq "run_plan: only how it runs" "$rp" '{"run":"serve","release":"migrate","processes":[{"name":"worker","run":"work"}]}'
+  eq "run_plan: nothing to run"   "$(run_plan '{"toolchain":"go","image":"golang:1","command":"go build","artifact":"server"}')" '{"run":"","release":"","processes":[]}'
+fi
+
 # --- processes: a worker or scheduler beside the web process ---
 # each is args to ./bin with its own limits ("-" = the app's), in a port slot
 # of its own: a range past every app's replica block, 8 slots an app
@@ -958,6 +973,14 @@ unset RUN_B64 RELEASE_B64 PROCESSES_B64
 
 eq "meter_record: web only, mb_ms = size × time" "$(meter_record 1 0 60 web 256 1000 5 0 | grep -o '"mb_ms":[0-9]*')" '"mb_ms":256000'
 eq "meter_record: processes billed at their own size" "$(meter_record 1 0 60 web 256 2000 5 0 384000 | grep -o '"mb_ms":[0-9]*')" '"mb_ms":384000'
+
+# add runs under set -e: an app without processes must get through these
+(
+  systemctl() { :; }
+  PORT=8100 PROCESSES_B64=""
+  out=$(set -e; write_process_units web 256M 50% ""; stop_processes web; echo SURVIVED)
+  eq "no processes: add survives set -e" "$out" "SURVIVED"
+)
 
 # a process unit: the app's body, its own ExecStart and limits
 psu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits=$'MemoryMax=128M' emit_service_body 30001 scheduler)

@@ -336,6 +336,7 @@ write_process_units() {
   while read -r name _; do
     [[ -n $name ]] && { systemctl enable "$(proc_unit "$app" "$name")" >/dev/null 2>&1 || true; }
   done <<<"$new"
+  return 0   # the loop's last test would otherwise be the status: add runs under set -e
 }
 
 # sandbox_args <role> <port> — the args a sandbox runs ./bin with: the web's
@@ -862,6 +863,9 @@ host_arch() {
 }
 
 # build_job_check <file> — the job, every field in its shape, into BJ_*.
+# run_plan <build-plan json> — just how the app runs, always every key
+run_plan() { jq -c '{run: (.run // ""), release: (.release // ""), processes: (.processes // [])}' <<<"$1"; }
+
 build_job_check() {
   local f=$1 j
   j=$(head -c 65536 "$f")
@@ -870,6 +874,7 @@ build_job_check() {
   BJ_SHA=$(jq -r '.sha // empty' <<<"$j"); BJ_ARCH=$(jq -r '.arch // empty' <<<"$j")
   BJ_SOURCE=$(jq -r '.source // empty' <<<"$j"); BJ_UPLOAD=$(jq -r '.upload // empty' <<<"$j")
   BJ_TIMEOUT=$(jq -r 'if (.timeout | type) == "number" then .timeout else "" end' <<<"$j")
+  BJ_PLAN=$(jq -r 'if has("plan") then (.plan | if type == "string" then . else "bad" end) else "" end' <<<"$j")
   local uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
   local url='^https://[^[:space:]"'"'"'`\\]+$'
   [[ $BJ_BUILD =~ $uuid ]] || die "build: bad build id"
@@ -878,6 +883,8 @@ build_job_check() {
   [[ $BJ_ARCH == "$(host_arch)" ]] || die "build: this builder is $(host_arch), the job wants '$BJ_ARCH'"
   [[ $BJ_SOURCE =~ $url ]] || die "build: bad source link"
   [[ $BJ_UPLOAD =~ $url ]] || die "build: bad upload link"
+  # where how the app runs goes; an older control plane sends none
+  [[ -z $BJ_PLAN || $BJ_PLAN =~ $url ]] || die "build: bad plan link"
   [[ $BJ_TIMEOUT =~ ^[0-9]+$ ]] && (( BJ_TIMEOUT >= 60 && BJ_TIMEOUT <= 3600 )) ||
     die "build: the timeout must be 60-3600 seconds"
 }
@@ -1024,6 +1031,12 @@ cmd_build_run() {
   image=$(jq -r .image <<<"$plan"); install=$(jq -r '.install // ""' <<<"$plan")
   command=$(jq -r .command <<<"$plan"); artifact=$(jq -r .artifact <<<"$plan")
   echo "==> $(jq -r .toolchain <<<"$plan"): $image"
+  # how the app runs (run, release, processes), for the control plane - sent
+  # now, before any of the repository's code runs
+  if [[ -n ${BJ_PLAN:-} ]]; then
+    run_plan "$plan" | curl -fsS --proto =https --max-time 60 -X PUT -H 'Content-Type: application/json' \
+      --data-binary @- "$BJ_PLAN" >/dev/null || die "build: couldn't send the run plan"
+  fi
 
   local platform=linux/amd64; [[ $BJ_ARCH == arm64 ]] && platform=linux/arm64
   local img; img=$(build_image "$image" "$platform") || exit 1
@@ -3260,6 +3273,7 @@ stop_processes() {
   while read -r name _; do
     [[ -n $name ]] && { systemctl stop "$(proc_unit "$app" "$name")" 2>/dev/null || true; }
   done < <(app_proc_slots)
+  return 0
 }
 
 run_deploy_hook() {
