@@ -546,14 +546,6 @@
 				class="hover:text-foam">GitHub</a
 			>
 			<a
-				href="https://www.npmjs.com/package/svelte-bun-compile"
-				target="_blank"
-				rel="noopener noreferrer"
-				class="hover:text-foam"
-			>
-				svelte-bun-compile
-			</a>
-			<a
 				href="https://www.npmjs.com/package/next-bun-compile"
 				target="_blank"
 				rel="noopener noreferrer"

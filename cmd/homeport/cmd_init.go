@@ -73,7 +73,7 @@ func detectStatic(has func(string) bool, app, bunCI string) *projectInfo {
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // nbcArtifact is where next-bun-compile writes the binary, by the version
-// the project asks for: dist/app from 2.0 (as svelte-bun-compile does),
+// the project asks for: dist/app from 2.0,
 // ./server before. A spec with no readable major ("latest", a tag) gets
 // the newest's.
 func nbcArtifact(spec string) string {
@@ -122,6 +122,22 @@ func detectProject() projectInfo {
 				}
 			}
 
+			// SvelteKit's own Bun adapter compiles the server, assets embedded,
+			// into one executable at build/server when buildOptions.compile is
+			// set; without it there's only a build/ folder to run with bun.
+			if has("@sveltejs/adapter-bun") {
+				return projectInfo{
+					kind:     "sveltekit-adapter-bun",
+					app:      sanitizeAppName(pkg.Name),
+					build:    "bun --bun run build",
+					artifact: "build/server",
+					note: `# @sveltejs/adapter-bun makes the single executable only when asked, and
+# for the machine it builds on unless told otherwise. In vite.config:
+#   adapter({ buildOptions: { compile: 'bun-linux-x64' } })   (or bun-linux-arm64)`,
+					ciToolchain: bunCI,
+				}
+			}
+
 			if has("svelte-bun-compile") {
 				return projectInfo{
 					kind: "svelte-bun-compile",
@@ -129,7 +145,9 @@ func detectProject() projectInfo {
 					// --bun is required: the adapter compiles via Bun.build.
 					build:    "bun --bun vite build",
 					artifact: "dist/app",
-					note: `# svelte-bun-compile builds for the machine it runs on. Deploying
+					note: `# svelte-bun-compile is deprecated: SvelteKit's own @sveltejs/adapter-bun
+# now compiles a single executable (https://svelte.dev/docs/kit/adapter-bun).
+# Until you switch: it builds for the machine it runs on. Deploying
 # from macOS to a Linux box? Set the adapter target in svelte.config.js:
 #   adapter({ target: 'bun-linux-x64' })   (or bun-linux-arm64 for ARM)
 # — or deploy from CI (homeport ci setup github), which is already Linux.`,
