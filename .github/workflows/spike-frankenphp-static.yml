@@ -32,7 +32,7 @@ jobs:
 
       - name: the base, cached between runs
         id: base
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             spc
@@ -53,6 +53,15 @@ jobs:
           tail -5 /tmp/base.log
           echo "BASE: $(( $(date +%s) - start ))s, libphp $(du -h spc/buildroot/lib/libphp.a | cut -f1), base dir $(sudo du -sh spc | cut -f1), go cache $(sudo du -sh gocache | cut -f1)"
 
+      - name: keep the base for the next run
+        if: steps.base.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            spc
+            gocache
+            gomod
+          key: frankenphp-base-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v1
       - name: per app (our builder's cap) - embed and link only
         run: |
           set -euo pipefail
@@ -68,7 +77,7 @@ jobs:
               export SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS="-fPIE -fstack-protector-strong -O2 -w -s"
               export SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES="--with github.com/dunglas/mercure/caddy --with github.com/dunglas/vulcain/caddy --with github.com/dunglas/caddy-cbrotli"
               cd dist/static-php-cli
-              rm -f buildroot/bin/frankenphp   # so a build that does nothing can't pass off the base
+              rm -f buildroot/bin/frankenphp   # a build that does nothing must not pass off the base as its output
               ./spc build --enable-zts --build-frankenphp --disable-opcache-jit \
                 --with-config-file-path=/etc/frankenphp --with-config-file-scan-dir=/etc/frankenphp/php.d \
                 --with-frankenphp-app=/app "$EXTS" --with-libs="$LIBS" > /out/perapp.log 2>&1
