@@ -24,7 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - name: log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      # The build cache lives beside the image (the :buildcache tag): PHP's
+      # compile is cached until the Dockerfile's build stage changes. A "run"
+      # step can't reach GitHub's own cache, and the stage outgrows its limit.
       - name: build the base (PHP compiled once)
         run: |
           start=$(date +%s)
@@ -32,7 +37,8 @@ jobs:
           alpine=$(docker run --rm --entrypoint cat "$builder" /etc/alpine-release | cut -d. -f1,2)
           echo "the builder is Alpine $alpine"
           docker buildx build --load -t "$IMAGE:$TAG" --build-arg ALPINE="$alpine" \
-            --cache-from type=gha,scope=frankenphp --cache-to type=gha,scope=frankenphp,mode=max \
+            --cache-from type=registry,ref="$IMAGE:buildcache" \
+            --cache-to type=registry,ref="$IMAGE:buildcache",mode=max,image-manifest=true,oci-mediatypes=true \
             images/frankenphp
           echo "BASE: $(( $(date +%s) - start ))s, image $(docker image inspect "$IMAGE:$TAG" -f '{{.Size}}' | numfmt --to=iec)"
 
@@ -76,7 +82,6 @@ jobs:
       - name: publish
         if: github.ref == 'refs/heads/main'
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker tag "$IMAGE:$TAG" "$IMAGE:8.5"
           docker push "$IMAGE:$TAG"
           docker push "$IMAGE:8.5"
