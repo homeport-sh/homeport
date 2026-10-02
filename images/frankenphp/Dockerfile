@@ -47,9 +47,8 @@ ENV GOCACHE=/opt/go/cache GOMODCACHE=/opt/go/mod \
 ADD --checksum=sha256:${COMPOSER_SHA256} https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar /opt/homeport/composer.phar
 COPY php composer frankenphp-embed /opt/homeport/bin/
 RUN chmod 755 /opt/homeport/bin/* && chmod 644 /opt/homeport/composer.phar \
+ && test "$(/opt/homeport/bin/php -d memory_limit=321M -r 'echo ini_get("memory_limit");')" = 321M \
  && /opt/homeport/bin/php -r 'echo PHP_VERSION, " ", count(get_loaded_extensions()), " extensions\n";' \
  && /opt/homeport/bin/composer --version
-# composer runs scripts' "@php" with the PHP it found; that must be our php
-# wrapper (php-cli on the base FrankenPHP), not the frankenphp binary itself -
-# or Laravel's "@php artisan package:discover" runs "frankenphp artisan"
+# composer runs scripts' "@php" with the PHP it found: our php wrapper
 ENV PATH=/opt/homeport/bin:${PATH} PHP_BINARY=/opt/homeport/bin/php
