@@ -303,6 +303,15 @@ has "ci-gate: still denies remove"         "$(gate web "sudo $hd remove web --ye
 has "cgate: deny an unscoped certificate" "$(cert_gate_decision "" "sudo $hd upload web r1")" "deny"
 has "cgate: deny a wildcard scope"        "$(cert_gate_decision "*" "sudo $hd upload web r1")" "deny"
 has "cgate: deny an invalid scope"        "$(cert_gate_decision "../x" "sudo $hd upload ../x r1")" "deny"
+# runtime logs: the control plane reads its own app's journal and sets the
+# plan's limits - never another app's, and not a CI key
+has "cgate: read its own logs"             "$(cgate "sudo $hd logs-read web - 200")" "allow"
+has "cgate: read on from a cursor"         "$(cgate "sudo $hd logs-read web s=ab12;i=3f;b=9c;m=1a;t=5e;x=77 200")" "allow"
+has "cgate: deny another app's logs"       "$(cgate "sudo $hd logs-read shop - 200")" "deny"
+has "cgate: deny logs-read without a count" "$(cgate "sudo $hd logs-read web -")" "deny"
+has "cgate: set its own log limits"        "$(cgate "sudo $hd logs-limits web 7 500")" "allow"
+has "cgate: deny another app's limits"     "$(cgate "sudo $hd logs-limits shop 7 500")" "deny"
+has "ci-gate: no logs-read"                "$(gate web "sudo $hd logs-read web - 200")" "deny"
 has "cgate: version"              "$(cgate "sudo $hd version")"              "allow"
 has "cgate: no-sudo form"         "$(cgate "$hd status web")"                "allow"
 eq  "cgate: sudo offset"          "$(cgate "sudo $hd upload web r1")"        "allow 2"
@@ -784,6 +793,26 @@ eq  "sandbox unit: no User= (runsc drops privileges itself)" "$(grep -c '^User='
 has "sandbox unit: replicas keep %i" "$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits= emit_service_body '%i')" "sandbox-run web %i"
 nsu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX= limits= emit_service_body 8100)
 has "native unit unchanged" "$nsu" "ExecStart=/opt/homeport/web/current/bin"
+# a tenant's logs go to its own journal: its own size, retention and rate
+# limit, so a noisy app can't evict the others' logs on a shared host
+has "sandbox unit: its own journal"       "$sbu" "LogNamespace=hp-web"
+eq  "native unit: the system journal"     "$(grep -c LogNamespace <<<"$nsu")" "0"
+jc=$(journal_conf 7 500)
+has "journal: on disk"                    "$jc" "Storage=persistent"
+has "journal: size cap"                   "$jc" "SystemMaxUse=500M"
+has "journal: retention"                  "$jc" "MaxRetentionSec=7day"
+has "journal: a flood is rate limited"    "$jc" "RateLimitBurst="
+lv() { (valid_log_limits "$@") >/dev/null 2>&1 && echo ok || echo deny; }
+eq "log limits: in range"                 "$(lv 1 10; lv 365 10240)" $'ok\nok'
+eq "log limits: out of range or not numbers" "$(lv 0 500; lv 7 5; lv 400 500; lv 7 99999; lv x 500; lv 7 '5;id')" $'deny\ndeny\ndeny\ndeny\ndeny\ndeny'
+# logs-read: journalctl on the app's namespace, as JSON, from a cursor
+lr() { (logs_read_args "$@") 2>/dev/null | tr '\n' ' '; }
+has "logs-read: the app's namespace"      "$(lr web - 200)" "--namespace=hp-web"
+has "logs-read: structured"               "$(lr web - 200)" "-o json"
+has "logs-read: the last N to start"      "$(lr web - 200)" "-n 200"
+has "logs-read: on from a cursor"         "$(lr web 's=ab;i=3f' 200)" "--after-cursor=s=ab;i=3f"
+eq  "logs-read: no cursor, no after"      "$(lr web - 200 | grep -c after-cursor)" "0"
+eq  "logs-read: a bad cursor refused"     "$(lr web 's=ab i=3' 200; lr web '$(id)' 200; lr web 's=ab' 0; lr web 's=ab' 99999)" ""
 eq  "native unit: not in the tenant slice" "$(grep -c 'Slice=' <<<"$nsu")" "0"
 
 # hooks run natively as the app user — customer code outside the sandbox — so
