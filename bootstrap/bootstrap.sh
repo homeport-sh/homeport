@@ -3815,6 +3815,20 @@ status_json_one() { # caller must have run load_app for $1
     printf '%s"%s"' "$sep" "$r"
     sep=","
   done < <(ls -1 "$HOMEPORT_ROOT/$app/releases" 2>/dev/null | sort -r)
+  # each process: its state and how often systemd restarted it (a worker in a
+  # crash loop shows "activating" and a climbing count)
+  printf '],"processes":['
+  local pn pst prs unit; sep=""
+  while read -r pn _; do
+    [[ -n $pn ]] || continue
+    unit=$(proc_unit "$app" "$pn")
+    pst=$(systemctl is-active "$unit" 2>/dev/null || true)
+    prs=$(systemctl show "$unit" -p NRestarts --value 2>/dev/null || true)
+    [[ $pst =~ ^[a-z-]+$ ]] || pst=unknown
+    [[ $prs =~ ^[0-9]+$ ]] || prs=0
+    printf '%s{"name":"%s","state":"%s","restarts":%d}' "$sep" "$pn" "$pst" "$prs"
+    sep=","
+  done < <(app_proc_slots)
   printf ']}'
 }
 
