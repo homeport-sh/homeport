@@ -38,10 +38,10 @@ jobs:
             spc
             gocache
             gomod
-          key: frankenphp-base-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v1
-          restore-keys: frankenphp-base-
+          key: frankenphp-base-v2-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v2
+          restore-keys: frankenphp-base-v2-
       - name: the base (our CI, once per PHP version) - PHP + standard extensions, no app
-        if: steps.base.outputs.cache-hit != 'true' && hashFiles('spc/buildroot/lib/libphp.a') == ''
+        if: hashFiles('spc/link/xcaddy.cmd') == ''
         run: |
           set -euo pipefail
           mkdir -p spc gocache gomod out
@@ -51,17 +51,24 @@ jobs:
             -e PHP_EXTENSIONS="$EXTS" -e PHP_EXTENSION_LIBS="$LIBS" "$IMAGE" ./build-static.sh > /tmp/base.log 2>&1 \
             || { tail -40 /tmp/base.log; echo "--- spc's own log"; sudo tail -60 spc/log/spc.output.log 2>/dev/null; exit 1; }
           tail -5 /tmp/base.log
+          # how spc linked FrankenPHP: its env and its xcaddy command, so a
+          # per-app build can run just that step
+          sudo mkdir -p spc/link
+          grep -a 'Setting env:' /tmp/base.log | sed 's/.*Setting env: //' | sudo tee spc/link/env.txt >/dev/null
+          grep -a '\[EXEC\].*xcaddy build' /tmp/base.log | sed 's/.*\[EXEC\] *//' | tail -1 | sudo tee spc/link/xcaddy.cmd >/dev/null
+          echo "--- env spc set ($(wc -l < spc/link/env.txt) lines):"; cut -c1-160 spc/link/env.txt
+          echo "--- xcaddy:"; cut -c1-400 spc/link/xcaddy.cmd
           echo "BASE: $(( $(date +%s) - start ))s, libphp $(du -h spc/buildroot/lib/libphp.a | cut -f1), base dir $(sudo du -sh spc | cut -f1), go cache $(sudo du -sh gocache | cut -f1)"
 
       - name: keep the base for the next run
-        if: steps.base.outputs.cache-hit != 'true'
+        if: steps.base.outputs.cache-hit != 'true' && hashFiles('spc/link/xcaddy.cmd') != ''
         uses: actions/cache/save@v4
         with:
           path: |
             spc
             gocache
             gomod
-          key: frankenphp-base-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v1
+          key: frankenphp-base-v2-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v2
       - name: per app (our builder's cap) - embed and link only
         run: |
           set -euo pipefail
