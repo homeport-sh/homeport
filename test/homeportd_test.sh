@@ -1055,6 +1055,7 @@ has "edge site: the wildcard and the apex"        "$site" "*.homeport.run, homep
 has "edge site: Cloudflare's origin certificate"  "$site" "tls $EDGE_DIR/origin.pem $EDGE_DIR/origin.key"
 has "edge site: only through our Cloudflare zone" "$site" "import homeport_origin_auth"
 has "edge site: the route table"                  "$site" "import $EDGE_DIR/routes.map"
+has "edge site: no cookie for the whole apps' domain" "$site" 'header_down Set-Cookie "(?i);\s*domain=\.?homeport\.run\s*(;|$)" "$1"'
 has "edge site: an unknown name stops here"       "$site" 'respond @homeport_unrouted "No app here" 404'
 eq  "edge site: a bad domain is refused"          "$( (edge_site 'not a domain' https://api.homeport.sh/v1/edge/ask) 2>/dev/null || echo deny)" "deny"
 # customers' own domains: any other name, a certificate on demand - only for
