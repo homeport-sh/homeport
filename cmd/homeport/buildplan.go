@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -23,6 +25,21 @@ type buildPlan struct {
 	Install   string `json:"install,omitempty"`
 	Command   string `json:"command"`
 	Artifact  string `json:"artifact"` // relative to the repository
+
+	// how the app runs, from the same homeport.yaml - checked by the
+	// sandbox's rules, since a hosted app always runs in one
+	Run       string        `json:"run,omitempty"`
+	Release   string        `json:"release,omitempty"`
+	Processes []planProcess `json:"processes,omitempty"`
+}
+
+// planProcess is one of the app's processes; Memory and CPU are left out when
+// the app's own apply.
+type planProcess struct {
+	Name   string `json:"name"`
+	Run    string `json:"run"`
+	Memory string `json:"memory,omitempty"`
+	CPU    string `json:"cpu,omitempty"`
 }
 
 var (
@@ -51,7 +68,10 @@ func cmdBuildPlan(args []string) error {
 // untrusted. A ${VAR} stays literal, for the build's own shell to expand.
 func planBuild(dir string) (buildPlan, error) {
 	var cfg struct {
-		Build buildConfig `yaml:"build"`
+		Build     buildConfig              `yaml:"build"`
+		Run       string                   `yaml:"run"`
+		Release   string                   `yaml:"release"`
+		Processes map[string]processConfig `yaml:"processes"`
 	}
 	if b, err := readSmall(dir, configFile); err == nil {
 		if err := yaml.Unmarshal(b, &cfg); err != nil {
@@ -61,7 +81,20 @@ func planBuild(dir string) (buildPlan, error) {
 		return buildPlan{}, err
 	}
 
-	p := buildPlan{Command: cfg.Build.Command, Artifact: cfg.Build.Artifact}
+	if err := checkRun(cfg.Run); err != nil {
+		return buildPlan{}, err
+	}
+	if err := checkSandboxedRelease(cfg.Release); err != nil {
+		return buildPlan{}, err
+	}
+	if err := (&config{Processes: cfg.Processes}).checkProcesses(); err != nil {
+		return buildPlan{}, err
+	}
+	p := buildPlan{Command: cfg.Build.Command, Artifact: cfg.Build.Artifact, Run: cfg.Run, Release: cfg.Release}
+	for _, name := range slices.Sorted(maps.Keys(cfg.Processes)) {
+		pc := cfg.Processes[name]
+		p.Processes = append(p.Processes, planProcess{Name: name, Run: pc.Run, Memory: pc.Memory, CPU: pc.CPU})
+	}
 	if p.Artifact == "" {
 		p.Artifact = "server"
 	}

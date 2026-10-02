@@ -63,9 +63,20 @@ func TestParseConfigRejects(t *testing.T) {
 		{"run extra var", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrun: serve --port $PORT --db $DBHOST\n", "only reference"},
 		{"multiline release", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nrelease: \"a\\nb\"\n", "single line"},
 		{"bad sandbox", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: loose\n", "sandbox"},
-		// hooks run natively as the app user, i.e. outside the sandbox
-		{"gvisor with release hook", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nrelease: ./bin migrate\n", "gvisor"},
+		// a gvisor release command runs sandboxed, with no shell: args to ./bin
+		{"gvisor release as a shell command", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nrelease: php artisan migrate && echo ok\n", "args to ./bin"},
+		{"gvisor release naming ./bin", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nrelease: ./bin migrate\n", "write `migrate`"},
 		{"gvisor with post_release hook", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\npost_release: ./bin warm\n", "gvisor"},
+		{"process bad name", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  Queue_Worker: work\n", "process name"},
+		{"process named web", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  web: serve\n", "process name"},
+		{"process shell syntax", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  worker: work; rm -rf /\n", "args to ./bin"},
+		{"process variable", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  worker: work $QUEUE\n", "args to ./bin"},
+		{"process no args", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  worker:\n    memory: 128M\n", "run"},
+		{"process bad memory", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  worker:\n    run: work\n    memory: lots\n", "memory"},
+		{"process bad cpu", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  worker:\n    run: work\n    cpu: 2\n", "cpu"},
+		{"too many processes", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nprocesses:\n  a: x\n  b: x\n  c: x\n  d: x\n  e: x\n", "at most 4"},
+		{"processes on an idle app", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nidle: true\nprocesses:\n  worker: work\n", "always-on"},
+		{"processes on a static site", "app: docs\nserver: deploy@1.2.3.4\ndomain: d.example.com\nstatic: ./dist\nprocesses:\n  worker: work\n", "static"},
 		{"bad strategy", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nstrategy: canary\n", "strategy"},
 		{"bad tls", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ntls: self-signed\n", "tls must be"},
 		{"bad dns provider", "app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\ntls: 'dns:Cloud_Flare!'\n", "tls must be"},
@@ -151,7 +162,7 @@ func TestParseConfigMultiDomain(t *testing.T) {
 		if extras := cfg.extraDomains(); len(extras) != 1 || extras[0] != "www.example.com" {
 			t.Errorf("%s: extras = %v, want [www.example.com]", label, extras)
 		}
-		args := cfg.addArgs()
+		args := cfg.addArgs()[:24]
 		if args[len(args)-1] != "www.example.com" { // extras csv
 			t.Errorf("%s: extras arg = %q", label, args[len(args)-1])
 		}
@@ -227,7 +238,7 @@ func TestAddArgsPositions(t *testing.T) {
 		Strategy:  "recreate",
 		Resources: resourcesConfig{Memory: "512M"},
 	}
-	args := cfg.addArgs()
+	args := cfg.addArgs()[:24]
 	// add <app> <domain> <health> <mem> <cpu> <idle> <timeout> <replicas>
 	//   <autoscale> <run> <release> <post> <path> <sandbox> <strategy>
 	//   <health-timeout> <static> <spa>
@@ -254,7 +265,7 @@ func TestAddArgsPositions(t *testing.T) {
 func TestAddArgsStatic(t *testing.T) {
 	spa := true
 	cfg := &config{App: "docs", Domain: "docs.example.com", Static: "./dist", SPA: &spa, spaResolved: true, Health: healthConfig{Path: "/"}, Replicas: 1}
-	args := cfg.addArgs()
+	args := cfg.addArgs()[:24]
 	if args[len(args)-7] != "1" { // static
 		t.Errorf("static marker should be '1', got %q", args[len(args)-7])
 	}
@@ -280,7 +291,7 @@ func TestAddArgsHeaders(t *testing.T) {
 			"/_app/immutable/*": {"Cache-Control": "public, max-age=31536000, immutable"},
 		},
 	}
-	args := cfg.addArgs()
+	args := cfg.addArgs()[:24]
 	dec, err := base64.StdEncoding.DecodeString(args[len(args)-5]) // headers arg (tls, dns-env, redirect-from, extras follow)
 	if err != nil {
 		t.Fatalf("headers arg is not base64: %q", args[len(args)-5])
@@ -292,7 +303,7 @@ func TestAddArgsHeaders(t *testing.T) {
 		t.Errorf("decoded headers = %q, want %q", dec, want)
 	}
 	cfg.Headers = nil
-	if a := cfg.addArgs(); a[len(a)-5] != "-" {
+	if a := cfg.addArgs()[:24]; a[len(a)-5] != "-" {
 		t.Errorf("no headers should render '-', got %q", a[len(a)-5])
 	}
 }
@@ -323,16 +334,16 @@ func TestValidCaddyModule(t *testing.T) {
 
 func TestAddArgsTLS(t *testing.T) {
 	cfg := &config{App: "web", Domain: "web.example.com", Health: healthConfig{Path: "/"}, Replicas: 1, TLS: "manual"}
-	if a := cfg.addArgs(); a[len(a)-4] != "manual" {
+	if a := cfg.addArgs()[:24]; a[len(a)-4] != "manual" {
 		t.Errorf("tls: manual should render 'manual', got %q", a[len(a)-4])
 	}
 	cfg.TLS = "auto"
-	if a := cfg.addArgs(); a[len(a)-4] != "-" {
+	if a := cfg.addArgs()[:24]; a[len(a)-4] != "-" {
 		t.Errorf("tls: auto should render '-', got %q", a[len(a)-4])
 	}
 	cfg.TLS = "dns:cloudflare"
 	cfg.DNSTokenEnv = "CF_API_TOKEN"
-	a := cfg.addArgs()
+	a := cfg.addArgs()[:24]
 	if a[len(a)-4] != "dns:cloudflare" || a[len(a)-3] != "CF_API_TOKEN" {
 		t.Errorf("dns mode should pass through mode+env, got %q %q", a[len(a)-4], a[len(a)-3])
 	}
@@ -347,7 +358,7 @@ func TestParseConfigCloudflare(t *testing.T) {
 	if cfg.TLS != "dns:cloudflare" {
 		t.Errorf("cloudflare: true should expand to dns:cloudflare, got %q", cfg.TLS)
 	}
-	if a := cfg.addArgs(); a[len(a)-4] != "dns:cloudflare" {
+	if a := cfg.addArgs()[:24]; a[len(a)-4] != "dns:cloudflare" {
 		t.Errorf("cloudflare: true should render dns:cloudflare, got %q", a[len(a)-4])
 	}
 
@@ -406,5 +417,54 @@ func TestWithoutFlag(t *testing.T) {
 	in := []string{"deploy@1.2.3.4"}
 	if out := withoutFlag(in, "--lock"); len(out) != 1 || out[0] != "deploy@1.2.3.4" {
 		t.Errorf("withoutFlag with no match should return args unchanged, got %v", out)
+	}
+}
+
+// processes: a short form (just the args) or run + limits; they reach
+// homeportd sorted, after the egress slot the CLI leaves unset.
+func TestProcessesReachHomeportd(t *testing.T) {
+	cfg, err := parseConfig([]byte("app: web\nserver: deploy@1.2.3.4\ndomain: web.example.com\nsandbox: gvisor\nrelease: php-cli artisan migrate --force\nprocesses:\n  worker: php-cli artisan queue:work\n  scheduler:\n    run: php-cli artisan schedule:work\n    memory: 128M\n    cpu: 25%\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := cfg.addArgs()
+	if len(args) != 26 || args[24] != "-" {
+		t.Fatalf("want add + 25 args with egress unset, got %d: %v", len(args), args)
+	}
+	got, _ := base64.StdEncoding.DecodeString(args[25])
+	want := "scheduler 128M 25% php-cli artisan schedule:work\nworker - - php-cli artisan queue:work"
+	if string(got) != want {
+		t.Fatalf("processes arg:\n%s\nwant:\n%s", got, want)
+	}
+	if plain := (&config{App: "web", Replicas: 1}).addArgs(); plain[25] != "-" {
+		t.Fatalf("no processes: %q", plain[25])
+	}
+}
+
+// Processes and a sandboxed release command need homeportd API 2: an older
+// one would ignore them and deploy an app without its workers.
+func TestNewFeaturesNeedANewEnoughHomeportd(t *testing.T) {
+	plain := &config{App: "web"}
+	jobs := &config{App: "web", Processes: map[string]processConfig{"worker": {Run: "work"}}}
+	sandboxedRelease := &config{App: "web", Sandbox: "gvisor", Release: "migrate"}
+	nativeRelease := &config{App: "web", Release: "./bin migrate"}
+	for name, c := range map[string]*config{"plain": plain, "native release": nativeRelease} {
+		if n := c.neededAPI(); n != 1 {
+			t.Errorf("%s needs api %d", name, n)
+		}
+	}
+	for name, c := range map[string]*config{"processes": jobs, "sandboxed release": sandboxedRelease} {
+		if n := c.neededAPI(); n != 2 {
+			t.Errorf("%s needs api %d", name, n)
+		}
+	}
+	if err := checkAPI(`{"homeportd":"0.12.0","api":1}`, 2); err == nil || !strings.Contains(err.Error(), "homeport server update") {
+		t.Fatalf("an old homeportd: %v", err)
+	}
+	if err := checkAPI(`{"homeportd":"0.13.0","api":2}`, 2); err != nil {
+		t.Fatalf("a new one: %v", err)
+	}
+	if err := checkAPI("homeportd: unknown command --json", 2); err == nil {
+		t.Fatal("an unreadable answer passed")
 	}
 }
