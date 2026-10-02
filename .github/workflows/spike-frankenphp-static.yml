@@ -3,6 +3,7 @@
 # is compiled? Measures wall time and peak memory of a cold build and of a
 # rebuild that reuses static-php-cli's build cache, then runs the binary.
 name: spike-frankenphp-static
+# our builders cap a build at 2 CPUs / 4 GB: both builds run under that cap
 on:
   push:
     branches: [spike/frankenphp-static]
@@ -12,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
+      - name: tools
+        run: sudo apt-get install -y -qq moreutils >/dev/null
       - name: a demo Laravel app
         run: |
           set -euo pipefail
@@ -30,12 +33,13 @@ jobs:
       - name: cold build (PHP + extensions compiled, app embedded)
         run: |
           set -euo pipefail
-          mkdir -p cache out
+          mkdir -p cache out gocache gomod
           : > /tmp/mem.log
           start=$(date +%s)
-          docker run --rm \
+          docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
             -v "$PWD/demo:/go/src/app/dist/app" \
             -v "$PWD/cache:/go/src/app/dist/static-php-cli" \
+            -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" \
             -v "$PWD/out:/out" \
             -e EMBED=dist/app/ \
             dunglas/frankenphp:static-builder-musl \
@@ -48,13 +52,14 @@ jobs:
           echo "<?php Route::get('/spike', fn () => 'rebuilt');" >> demo/routes/web.php
           : > /tmp/mem.log
           start=$(date +%s)
-          docker run --rm \
+          docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
             -v "$PWD/demo:/go/src/app/dist/app" \
             -v "$PWD/cache:/go/src/app/dist/static-php-cli" \
+            -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" \
             -v "$PWD/out:/out" \
             -e EMBED=dist/app/ \
             dunglas/frankenphp:static-builder-musl \
-            sh -c './build-static.sh && cp dist/frankenphp-linux-* /out/' 2>&1 | tail -20
+            sh -c './build-static.sh && cp dist/frankenphp-linux-* /out/' 2>&1 | ts '%H:%M:%S' | grep -E 'Building|building|xcaddy|go build|Downloading|Extracting|spc|link' | cut -c1-140 | tail -60
           echo "REBUILD: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used"
 
       - name: run it
