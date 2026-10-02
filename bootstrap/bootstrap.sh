@@ -2274,13 +2274,29 @@ ensure_edge_only_snippet() {
 }
 
 # edge_gate_decision <orig> — the control plane's certificate for the edge:
-# set its route table (on stdin) and nothing else.
-edge_gate_decision() { single_verb_gate_decision edge-routes "${1:-}"; }
+# set it up (edge-cert, on stdin; edge-install <domain>) and keep its route
+# table (edge-routes, on stdin) - nothing else.
+edge_gate_decision() {
+  local orig=${1:-}
+  [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
+  local -a a; read -ra a <<<"$orig"
+  local off; off=$(gate_offset "$orig")
+  [[ -n $off ]] || { echo "deny may only run homeportd"; return; }
+  local n=$(( ${#a[@]} - off ))
+  case ${a[off]:-} in
+    edge-routes|edge-cert) (( n == 1 )) && { echo "allow $off"; return; } ;;
+    edge-install)
+      if (( n == 2 )) && [[ ${a[off+1]} =~ ^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$ && ${a[off+1]} == *.* ]]; then
+        echo "allow $off"; return
+      fi ;;
+  esac
+  echo "deny verb '${a[off]:-(none)}' is not permitted"
+}
 
 cmd_edge_gate() {
   local orig=${1:-} d
   d=$(edge_gate_decision "$orig")
-  gate_run "$d" "$orig" "this certificate may only set the edge's routes"
+  gate_run "$d" "$orig" "this certificate may only set up the edge and its routes"
 }
 
 # cmd_edge_cert — the edge's origin certificate (Cloudflare Origin CA) on
