@@ -12,12 +12,15 @@ ARG PHP_VERSION=8.5.11
 # every database driver (an unused one costs a few MB, never a dependency),
 # what Laravel and its common packages need, and pcntl for queue workers
 ARG PHP_EXTENSIONS=bcmath,ctype,curl,dom,exif,fileinfo,filter,gd,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,redis,session,simplexml,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,zip,zlib,apcu
-# libssh2 and zstd: the prebuilt curl is built with both, so they must link
-ARG PHP_EXTENSION_LIBS=libavif,nghttp2,nghttp3,ngtcp2,watcher,brotli,libssh2,zstd
+ARG PHP_EXTENSION_LIBS=libavif,nghttp2,nghttp3,ngtcp2,watcher,brotli
 ARG COMPOSER_VERSION=2.10.3
 ARG COMPOSER_SHA256=7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
 
 # the Go caches the base build warms, where an unprivileged build can use them
+# Every library from source (no --prefer-pre-built): a prebuilt one can be
+# compiled with optional dependencies this build doesn't link (curl with
+# libssh2 and zstd, libzip with bzip2 and xz), and can change under us
+ENV SPC_OPT_DOWNLOAD_ARGS="--ignore-cache-sources=php-src --retry 5"
 ENV GOCACHE=/opt/go/cache GOMODCACHE=/opt/go/mod \
     FRANKENPHP_VERSION=${FRANKENPHP_VERSION} PHP_VERSION=${PHP_VERSION} \
     PHP_EXTENSIONS=${PHP_EXTENSIONS} PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS}
