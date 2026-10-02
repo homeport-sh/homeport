@@ -21,6 +21,14 @@ jobs:
       - name: go test
         run: go test ./...
 
+      # the release builds what a tag would, so a broken config fails here,
+      # not at the tag
+      - name: the release builds (GoReleaser snapshot)
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+
       - name: bash syntax (bootstrap + embedded homeportd)
         run: |
           bash -n bootstrap/bootstrap.sh
