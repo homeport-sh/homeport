@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +72,19 @@ func detectStatic(has func(string) bool, app, bunCI string) *projectInfo {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+// nbcArtifact is where next-bun-compile writes the binary, by the version
+// the project asks for: dist/app from 2.0 (as svelte-bun-compile does),
+// ./server before. A spec with no readable major ("latest", a tag) gets
+// the newest's.
+func nbcArtifact(spec string) string {
+	v := strings.TrimLeft(spec, "^~=>v ")
+	major, _, _ := strings.Cut(v, ".")
+	if n, err := strconv.Atoi(major); err == nil && n < 2 {
+		return "server"
+	}
+	return "dist/app"
+}
+
 func detectProject() projectInfo {
 	if data, err := os.ReadFile("package.json"); err == nil {
 		var pkg struct {
@@ -100,7 +114,7 @@ func detectProject() projectInfo {
 					// NBC_TARGET cross-compiles; default to a standard x86-64
 					// Linux box so a macOS build deploys as-is.
 					build:    "NBC_TARGET=bun-linux-x64 bun --bun run build",
-					artifact: "server",
+					artifact: nbcArtifact(pkg.Dependencies["next-bun-compile"] + pkg.DevDependencies["next-bun-compile"]),
 					note: `# NBC_TARGET cross-compiles the binary: bun-linux-x64 for a standard
 # x86-64 Linux box, bun-linux-arm64 for ARM. Drop it to build for the
 # current machine (e.g. in CI, which is already Linux).`,
