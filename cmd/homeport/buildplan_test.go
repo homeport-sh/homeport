@@ -158,3 +158,35 @@ func TestThePlanSaysHowTheAppRuns(t *testing.T) {
 		}
 	}
 }
+
+// A PHP app builds on homeport's FrankenPHP base: PHP is already compiled,
+// so the build checks the app's platform needs first (seconds, not a failed
+// link later), installs, and embeds the app into a static binary.
+func TestAPHPRepoBuildsOnTheFrankenPHPBase(t *testing.T) {
+	p := plan(t, map[string]string{"composer.json": `{"require":{"php":"^8.3"}}`, "composer.lock": "{}"})
+	if p.Toolchain != "php" || p.Image != frankenphpImage || p.Artifact != "server" ||
+		p.Install != "composer check-platform-reqs --no-dev --lock && composer install --no-dev --optimize-autoloader --no-interaction" ||
+		p.Command != "frankenphp-embed . server" {
+		t.Fatalf("%+v", p)
+	}
+	// front-end assets (Vite) are built before the app is embedded
+	p = plan(t, map[string]string{"composer.json": `{}`, "composer.lock": "{}",
+		"package.json": `{"scripts":{"build":"vite build"}}`, "package-lock.json": "{}"})
+	if p.Toolchain != "php" || !strings.HasSuffix(p.Install, " && bun install && bun run build") {
+		t.Fatalf("assets: %+v", p)
+	}
+	if p := plan(t, map[string]string{"composer.json": `{}`, "composer.lock": "{}", "package.json": `{"scripts":{"dev":"vite"}}`, "bun.lock": "{}"}); strings.Contains(p.Install, "bun run build") {
+		t.Fatalf("no build script: %+v", p)
+	}
+	if p := plan(t, map[string]string{"composer.json": `{}`, "composer.lock": "{}", "package.json": `{"scripts":{"build":"vite build"}}`, "bun.lock": "{}"}); !strings.Contains(p.Install, "bun install --frozen-lockfile") {
+		t.Fatalf("bun lockfile: %+v", p)
+	}
+	// homeport.yaml still says how, and where the binary lands
+	if p := plan(t, map[string]string{"composer.json": `{}`, "composer.lock": "{}", "homeport.yaml": "build:\n  artifact: dist/app\n"}); p.Command != "frankenphp-embed . dist/app" {
+		t.Fatalf("artifact: %+v", p)
+	}
+	// without a lockfile the build isn't reproducible: say so
+	if _, err := planBuild(repo(t, map[string]string{"composer.json": `{}`})); err == nil || !strings.Contains(err.Error(), "composer.lock") {
+		t.Fatalf("no lockfile: %v", err)
+	}
+}
