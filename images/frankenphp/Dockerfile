@@ -17,10 +17,6 @@ ARG COMPOSER_VERSION=2.10.3
 ARG COMPOSER_SHA256=7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
 
 # the Go caches the base build warms, where an unprivileged build can use them
-# Every library from source (no --prefer-pre-built): a prebuilt one can be
-# compiled with optional dependencies this build doesn't link (curl with
-# libssh2 and zstd, libzip with bzip2 and xz), and can change under us
-ENV SPC_OPT_DOWNLOAD_ARGS="--ignore-cache-sources=php-src --retry 5"
 ENV GOCACHE=/opt/go/cache GOMODCACHE=/opt/go/mod \
     FRANKENPHP_VERSION=${FRANKENPHP_VERSION} PHP_VERSION=${PHP_VERSION} \
     PHP_EXTENSIONS=${PHP_EXTENSIONS} PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS}

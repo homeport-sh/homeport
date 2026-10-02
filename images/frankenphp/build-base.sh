@@ -6,6 +6,10 @@ set -eu
 S=/go/src/app/dist/static-php-cli
 H=/opt/homeport
 mkdir -p "$H/bin" "$GOCACHE" "$GOMODCACHE"
+# The builder image ships a build of its own default extension set (ldap,
+# gmp, a curl with ssh and zstd...). Reused, its libraries would be linked
+# with this set's flags and fail: start from nothing, as a fresh checkout does.
+rm -rf "$S"
 ./build-static.sh > /tmp/base.log 2>&1 || { tail -80 /tmp/base.log; exit 1; }
 sed 's/\x1b\[[0-9;]*m//g' /tmp/base.log | grep -a '\[EXEC\].*xcaddy build' | sed 's/.*\[EXEC\] *//' | tail -1 > "$H/xcaddy.cmd"
 test -s "$H/xcaddy.cmd" || { echo "no xcaddy command in the build's log"; exit 1; }
