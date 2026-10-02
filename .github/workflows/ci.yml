@@ -46,6 +46,9 @@ jobs:
       - name: homeportd unit tests (bash 5 — runs the full suite incl. gateway)
         run: bash test/homeportd_test.sh
 
+      - name: bootstrap order (lock wait first, root login last)
+        run: bash test/bootstrap_order_test.sh
+
       # Behavioural origin-auth test against a real Caddy: what Caddy DOES with
       # the generated config (directive ordering decides whether a gateway path
       # or redirect alias skips the check — text assertions can't see that).
