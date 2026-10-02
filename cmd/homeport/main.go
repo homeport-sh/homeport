@@ -29,6 +29,8 @@ func main() {
 		err = cmdInit(rest)
 	case "bootstrap":
 		err = cmdBootstrap(rest)
+	case "build-plan":
+		err = cmdBuildPlan(rest)
 	case "deploy":
 		err = cmdDeploy(rest)
 	case "rollback":
@@ -104,6 +106,7 @@ setup (once per project):
 
 everyday:
   homeport deploy [--no-build]     build → upload → health-checked activate (auto-reverts)
+  homeport build-plan [dir]        what a hosted build would run for this repo (JSON)
   homeport rollback [release]      instant rollback to the previous (or given) release
   homeport remove [app]            delete an app + its releases, env, and user (confirms; --yes to skip)
   homeport secrets set K=V ...     set/update env values (merge)
