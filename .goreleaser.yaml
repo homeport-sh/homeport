@@ -27,7 +27,7 @@ archives:
     name_template: "homeport_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - README.md
-      - LICENSE
+      - LICENSE.md
 
 checksum:
   name_template: "checksums.txt"
