@@ -94,7 +94,11 @@ import "fmt"
 
 func main() { fmt.Println("hello from a hosted build") }
 ' 'build:
-  command: echo "UID=$(id -u)"; echo "metadata: $(curl -s -m 5 -o /dev/null http://169.254.169.254/ && echo reached || echo blocked)"; echo "internet: $(curl -fsS -m 20 -o /dev/null https://proxy.golang.org/ && echo reached || echo blocked)"; CGO_ENABLED=0 go build -o server .
+  command: |
+    echo "UID=$(id -u)"
+    echo "metadata: $(curl -s -m 5 -o /dev/null http://169.254.169.254/ && echo reached || echo blocked)"
+    echo "internet: $(curl -fsS -m 20 -o /dev/null https://proxy.golang.org/ && echo reached || echo blocked)"
+    CGO_ENABLED=0 go build -o server .
 '
 build hello 11111111-1111-4111-8111-111111111111
 if [[ $RC -eq 0 ]]; then ok "a Go repo builds"; else fail "build failed ($RC): $OUT"; fi
