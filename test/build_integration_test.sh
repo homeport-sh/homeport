@@ -26,7 +26,6 @@ fails=0
 ok()   { echo "ok   $1"; }
 fail() { echo "FAIL $1"; fails=$((fails + 1)); }
 has()  { if [[ $2 == *"$3"* ]]; then ok "$1"; else fail "$1: [$3] not in output"; fi; }
-lacks() { if [[ $2 != *"$3"* ]]; then ok "$1"; else fail "$1: [$3] in output"; fi; }
 
 HD=/usr/local/bin/homeportd
 awk "/<<'HOMEPORTD_SCRIPT'/{f=1;next} /^HOMEPORTD_SCRIPT\$/{f=0} f" bootstrap/bootstrap.sh > /tmp/homeportd.new
@@ -95,13 +94,14 @@ import "fmt"
 
 func main() { fmt.Println("hello from a hosted build") }
 ' 'build:
-  command: echo "UID=$(id -u)"; if curl -s -m 5 http://169.254.169.254/ >/dev/null 2>&1; then echo METADATA-REACHED; fi; if curl -fsS -m 20 https://proxy.golang.org/ >/dev/null 2>&1; then echo INTERNET-OK; fi; CGO_ENABLED=0 go build -o server .
+  command: echo "UID=$(id -u)"; echo "metadata: $(curl -s -m 5 -o /dev/null http://169.254.169.254/ && echo reached || echo blocked)"; echo "internet: $(curl -fsS -m 20 -o /dev/null https://proxy.golang.org/ && echo reached || echo blocked)"; CGO_ENABLED=0 go build -o server .
 '
 build hello 11111111-1111-4111-8111-111111111111
 if [[ $RC -eq 0 ]]; then ok "a Go repo builds"; else fail "build failed ($RC): $OUT"; fi
 has "it ran unprivileged" "$OUT" "UID=64000"
-has "it reached the internet" "$OUT" "INTERNET-OK"
-lacks "it couldn't reach the cloud metadata service" "$OUT" "METADATA-REACHED"
+# (the log echoes the script, so look for what only its output can say)
+has "it reached the internet" "$OUT" "internet: reached"
+has "it couldn't reach the cloud metadata service" "$OUT" "metadata: blocked"
 up="$W/www/uploaded_up_11111111-1111-4111-8111-111111111111"
 if [[ -s $up ]]; then
   chmod +x "$up"
