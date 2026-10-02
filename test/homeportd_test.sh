@@ -1061,7 +1061,14 @@ eq  "edge site: a bad domain is refused"          "$( (edge_site 'not a domain')
 eg() { edge_gate_decision "$1"; }
 has "edge-gate: the route table"      "$(eg "sudo $hd edge-routes")"    "allow"
 has "edge-gate: no arguments"         "$(eg "sudo $hd edge-routes x")"  "deny"
-has "edge-gate: nothing else"         "$(eg "sudo $hd edge-cert")"      "deny"
+# …and setting the edge up: its certificate, its site for one domain
+has "edge-gate: the origin certificate"  "$(eg "sudo $hd edge-cert")"                 "allow"
+has "edge-gate: …no arguments"           "$(eg "sudo $hd edge-cert x")"               "deny"
+has "edge-gate: install for a domain"    "$(eg "sudo $hd edge-install homeport.run")" "allow"
+has "edge-gate: …one domain"             "$(eg "sudo $hd edge-install a.run b.run")"  "deny"
+has "edge-gate: …a real one"             "$(eg "sudo $hd edge-install ../etc")"       "deny"
+has "edge-gate: nothing else"            "$(eg "sudo $hd edge-from -")"               "deny"
+has "edge-gate: not a deploy"            "$(eg "sudo $hd upload web r1")"             "deny"
 has "edge-gate: not a shell"          "$(eg "")"                        "deny"
 
 # a host behind the edge: its apps serve plain HTTP, to the edge alone
