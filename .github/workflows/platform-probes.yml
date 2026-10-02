@@ -25,9 +25,9 @@ jobs:
   negative:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: '1.27.1' # no checkout here, so no go.mod to read
 
       - name: probe
         run: |
@@ -76,14 +76,14 @@ jobs:
       run:
         working-directory: examples/tanstack-start
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: |
           bun --bun run build
           bun build --compile --bytecode --production --minify --sourcemap \
             --target=bun-linux-x64 --outfile dist/app .output/server/index.mjs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: demo-app
           path: examples/tanstack-start/dist/app
@@ -93,7 +93,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: demo-app
       - name: two completes at the same instant
