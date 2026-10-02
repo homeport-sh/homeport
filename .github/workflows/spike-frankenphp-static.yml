@@ -1,17 +1,21 @@
-# SPIKE (not for main): can a Laravel app become one static FrankenPHP
-# binary on builder-sized resources, and is a rebuild cheap once PHP itself
-# is compiled? Measures wall time and peak memory of a cold build and of a
-# rebuild that reuses static-php-cli's build cache, then runs the binary.
+# SPIKE (not for main): a FrankenPHP base built once (PHP + the standard
+# extension set, no app), then a per-app build that only embeds the app and
+# links - under our builders' per-build cap (2 CPUs, 4 GB). Then the binary
+# runs the way a deploy would: release command, a worker, the web.
 name: spike-frankenphp-static
-# our builders cap a build at 2 CPUs / 4 GB: both builds run under that cap
 on:
   push:
     branches: [spike/frankenphp-static]
 
+env:
+  EXTS: bcmath,ctype,curl,dom,exif,fileinfo,filter,gd,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,redis,session,simplexml,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,zip,zlib,apcu
+  LIBS: libavif,nghttp2,nghttp3,ngtcp2,watcher,brotli
+  IMAGE: dunglas/frankenphp:static-builder-musl
+
 jobs:
   static:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
     steps:
       - name: tools
         run: sudo apt-get install -y -qq moreutils >/dev/null
@@ -23,62 +27,56 @@ jobs:
           composer install --no-dev --optimize-autoloader --no-interaction --quiet
           sed -i 's/^APP_ENV=.*/APP_ENV=production/; s/^APP_DEBUG=.*/APP_DEBUG=false/' .env
           php artisan config:clear
-          echo "app: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
-
       - name: watch memory
-        run: |
-          (while true; do free -m | awk '/Mem:/ {print $3}' >> /tmp/mem.log; sleep 2; done) &
-          echo "machine: $(nproc) cpus, $(free -g | awk '/Mem:/ {print $2}') GB"
+        run: (while true; do free -m | awk '/Mem:/ {print $3}' >> /tmp/mem.log; sleep 2; done) &
 
-      - name: cold build (PHP + extensions compiled, app embedded)
+      - name: the base (our CI, once per PHP version) - PHP + standard extensions, no app
         run: |
           set -euo pipefail
-          mkdir -p cache out gocache gomod
-          : > /tmp/mem.log
+          mkdir -p spc gocache gomod out
           start=$(date +%s)
-          docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
-            -v "$PWD/demo:/go/src/app/dist/app" \
-            -v "$PWD/cache:/go/src/app/dist/static-php-cli" \
+          docker run --rm -v "$PWD/spc:/go/src/app/dist/static-php-cli" \
             -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" \
-            -v "$PWD/out:/out" \
-            -e EMBED=dist/app/ \
-            dunglas/frankenphp:static-builder-musl \
-            sh -c './build-static.sh && cp dist/frankenphp-linux-* /out/' 2>&1 | tail -40
-          echo "COLD: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used, binary $(du -h out/frankenphp-linux-* | cut -f1)"
+            -e PHP_EXTENSIONS="$EXTS" -e PHP_EXTENSION_LIBS="$LIBS" "$IMAGE" ./build-static.sh 2>&1 | tail -5
+          echo "BASE: $(( $(date +%s) - start ))s, libphp $(du -h spc/buildroot/lib/libphp.a | cut -f1), base dir $(sudo du -sh spc | cut -f1), go cache $(sudo du -sh gocache | cut -f1)"
 
-      - name: rebuild after an app change (PHP cache reused)
+      - name: per app (our builder's cap) - embed and link only
         run: |
           set -euo pipefail
-          # routes/web.php already opens with <?php: append a route, not a second tag
           printf "\nRoute::get('/spike', fn () => 'rebuilt');\n" >> demo/routes/web.php
           : > /tmp/mem.log
           start=$(date +%s)
           docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
-            -v "$PWD/demo:/go/src/app/dist/app" \
-            -v "$PWD/cache:/go/src/app/dist/static-php-cli" \
+            -v "$PWD/spc:/go/src/app/dist/static-php-cli" -v "$PWD/demo:/app:ro" -v "$PWD/out:/out" \
             -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" \
-            -v "$PWD/out:/out" \
-            -e EMBED=dist/app/ \
-            dunglas/frankenphp:static-builder-musl \
-            sh -c './build-static.sh && cp dist/frankenphp-linux-* /out/' 2>&1 | ts '%H:%M:%S' | grep -E 'Building|building|xcaddy|go build|Downloading|Extracting|spc|link' | cut -c1-140 | tail -60
-          echo "REBUILD: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used"
+            -e EXTS -e LIBS "$IMAGE" bash -c '
+              set -e
+              export FRANKENPHP_SOURCE_PATH=/go/src/app SPC_DEFAULT_C_FLAGS="-fPIC -O2"
+              export SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS="-fPIE -fstack-protector-strong -O2 -w -s"
+              export SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES="--with github.com/dunglas/mercure/caddy --with github.com/dunglas/vulcain/caddy --with github.com/dunglas/caddy-cbrotli"
+              cd dist/static-php-cli
+              ./spc build --enable-zts --build-frankenphp --disable-opcache-jit \
+                --with-config-file-path=/etc/frankenphp --with-config-file-scan-dir=/etc/frankenphp/php.d \
+                --with-frankenphp-app=/app "$EXTS" --with-libs="$LIBS" 2>&1 | ts "%H:%M:%S" | grep -E "building|Building|xcaddy build|go build|Extracting php-src|configure|libtool" | cut -c1-120 | head -30
+              cp buildroot/bin/frankenphp /out/app'
+          echo "PER-APP: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used, binary $(du -h out/app | cut -f1)"
 
-      - name: run it
+      - name: run it like a deploy
         run: |
           set -euo pipefail
-          cp out/frankenphp-linux-* ./app   # docker left it root-owned
-          chmod +x ./app
-          ./app version || true
-          # what a deploy does: config in the env, the release command first
+          cp out/app ./app && chmod +x ./app
+          ./app version
+          ./app php-cli -m | tr '\n' ' '; echo
           export LOG_CHANNEL=stderr DB_CONNECTION=sqlite DB_DATABASE=/tmp/app.sqlite
           export APP_KEY=$(grep '^APP_KEY=' demo/.env | cut -d= -f2-)
           touch /tmp/app.sqlite
           echo "--- release: php-cli artisan migrate --force"
-          ./app php-cli artisan migrate --force 2>&1 | tail -15
+          ./app php-cli artisan migrate --force 2>&1 | tail -8
           echo "--- worker: php-cli artisan queue:work --once"
-          timeout 20 ./app php-cli artisan queue:work --once --stop-when-empty 2>&1 | tail -5 || true
+          timeout 20 ./app php-cli artisan queue:work --once --stop-when-empty 2>&1 | tail -3 || true
           ( ./app php-server --listen 127.0.0.1:8080 > /tmp/server.log 2>&1 & )
           sleep 5
           echo "GET /      -> $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)"
           echo "GET /spike -> $(curl -s http://127.0.0.1:8080/spike)"
-          tail -20 /tmp/server.log
+          ps -o rss=,cmd= -C app | head -3
+          grep -i error /tmp/server.log | tail -5 || true
