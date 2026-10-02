@@ -37,7 +37,9 @@ jobs:
           start=$(date +%s)
           docker run --rm -v "$PWD/spc:/go/src/app/dist/static-php-cli" \
             -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" \
-            -e PHP_EXTENSIONS="$EXTS" -e PHP_EXTENSION_LIBS="$LIBS" "$IMAGE" ./build-static.sh 2>&1 | tail -5
+            -e PHP_EXTENSIONS="$EXTS" -e PHP_EXTENSION_LIBS="$LIBS" "$IMAGE" ./build-static.sh > /tmp/base.log 2>&1 \
+            || { tail -40 /tmp/base.log; echo "--- spc's own log"; sudo tail -60 spc/log/spc.output.log 2>/dev/null; exit 1; }
+          tail -5 /tmp/base.log
           echo "BASE: $(( $(date +%s) - start ))s, libphp $(du -h spc/buildroot/lib/libphp.a | cut -f1), base dir $(sudo du -sh spc | cut -f1), go cache $(sudo du -sh gocache | cut -f1)"
 
       - name: per app (our builder's cap) - embed and link only
