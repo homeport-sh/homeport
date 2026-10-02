@@ -12,7 +12,8 @@ ARG PHP_VERSION=8.5.11
 # every database driver (an unused one costs a few MB, never a dependency),
 # what Laravel and its common packages need, and pcntl for queue workers
 ARG PHP_EXTENSIONS=bcmath,ctype,curl,dom,exif,fileinfo,filter,gd,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,redis,session,simplexml,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,zip,zlib,apcu
-ARG PHP_EXTENSION_LIBS=libavif,nghttp2,nghttp3,ngtcp2,watcher,brotli
+# libssh2 and zstd: the prebuilt curl is built with both, so they must link
+ARG PHP_EXTENSION_LIBS=libavif,nghttp2,nghttp3,ngtcp2,watcher,brotli,libssh2,zstd
 ARG COMPOSER_VERSION=2.10.3
 ARG COMPOSER_SHA256=7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
 
