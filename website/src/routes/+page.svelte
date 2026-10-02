@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { reveal } from '$lib/reveal';
+	import { reveal } from '#lib/reveal.js';
 
 	const install = 'curl -fsSL homeport.sh/install | sh';
 	let copied = $state(false);
@@ -111,10 +111,20 @@
 	];
 
 	const compare = [
-		['On the server', 'systemd + Caddy + a bash helper', 'Docker + Postgres + Redis', 'Docker daemon'],
+		[
+			'On the server',
+			'systemd + Caddy + a bash helper',
+			'Docker + Postgres + Redis',
+			'Docker daemon'
+		],
 		['Platform RAM', '~0', '~2 GB baseline', 'Docker overhead'],
 		['Ships to the box', 'one binary (scp)', 'containers (registry)', 'images (registry)'],
-		['Zero-downtime deploys', 'blue/green + rolling, default', 'per-service config', 'rolling via proxy'],
+		[
+			'Zero-downtime deploys',
+			'blue/green + rolling, default',
+			'per-service config',
+			'rolling via proxy'
+		],
 		['Scale to zero', 'built in, socket-activated', 'no', 'no'],
 		['Rollback', 'symlink flip, instant', 'redeploy container', 'redeploy image'],
 		['Access to deploy', 'per-app scoped SSH keys', 'web UI + SSH', 'root SSH']
@@ -171,7 +181,9 @@
 		</nav>
 		<div class="flex items-center gap-3">
 			<a
-				href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer"
+				href="https://github.com/homeport-sh/homeport"
+				target="_blank"
+				rel="noopener noreferrer"
 				class="mono hidden text-sm text-mist transition-colors hover:text-foam sm:block"
 			>
 				GitHub ↗
@@ -191,11 +203,10 @@
 	</h1>
 
 	<p class="hero-rise mt-7 max-w-2xl text-lg leading-relaxed text-mist md:text-xl" style="--i: 2">
-		Deploy Go, Rust, Next, Nuxt, SvelteKit and TanStack Start apps to a plain VPS
-		as a single executable — or serve a static site straight from a folder. No
-		Docker. No registry. Nothing installed on the server. One command hardens the
-		box — one command deploys. Zero-downtime releases, scale-to-zero and
-		migrations come standard.
+		Deploy Go, Rust, Next, Nuxt, SvelteKit and TanStack Start apps to a plain VPS as a single
+		executable — or serve a static site straight from a folder. No Docker. No registry. Nothing
+		installed on the server. One command hardens the box — one command deploys. Zero-downtime
+		releases, scale-to-zero and migrations come standard.
 	</p>
 
 	<div class="hero-rise mt-9 flex flex-wrap items-center gap-3" style="--i: 3">
@@ -208,7 +219,12 @@
 			<span>{install}</span>
 			<span class="ml-1 text-mist-dim">{copied ? '✓ copied' : '⧉'}</span>
 		</button>
-		<a href="https://docs.homeport.sh" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
+		<a
+			href="https://docs.homeport.sh"
+			target="_blank"
+			rel="noopener noreferrer"
+			class="btn btn-primary rounded-none"
+		>
 			Read the docs →
 		</a>
 	</div>
@@ -264,8 +280,8 @@
 			style="border-top: 1px solid var(--color-line);"
 		>
 			<span class="beacon"></span>
-			Real numbers — five production apps across four frameworks, live on one €6.49
-			Hetzner box, 85% of it still idle.
+			Real numbers — five production apps across four frameworks, live on one €6.49 Hetzner box, 85% of
+			it still idle.
 		</div>
 	</div>
 </section>
@@ -304,9 +320,8 @@
 			<p class="kicker">The harbor</p>
 			<h2 class="display mt-4 text-[clamp(2.4rem,6vw,4.5rem)]">One box.<br />The whole fleet.</h2>
 			<p class="mt-5 max-w-xl text-mist">
-				Every vessel below is a real app compiled to a single binary and docked on
-				the same server — each in its own hardened systemd unit, served from memory
-				behind Caddy.
+				Every vessel below is a real app compiled to a single binary and docked on the same server —
+				each in its own hardened systemd unit, served from memory behind Caddy.
 			</p>
 		</div>
 
@@ -378,10 +393,10 @@
 		<p class="kicker">Off-the-shelf</p>
 		<h2 class="display mt-4 text-[clamp(2.4rem,6vw,4.5rem)]">Cargo you<br />didn’t build</h2>
 		<p class="mt-5 max-w-xl text-mist">
-			Homeport ships whatever your build step produces — and that needn’t be your
-			own code. Point the build at a released binary and it docks like any other
-			vessel: one hardened unit, HTTPS, health-gated deploys. Here’s the Lightpanda
-			headless browser, live straight from its GitHub release.
+			Homeport ships whatever your build step produces — and that needn’t be your own code. Point
+			the build at a released binary and it docks like any other vessel: one hardened unit, HTTPS,
+			health-gated deploys. Here’s the Lightpanda headless browser, live straight from its GitHub
+			release.
 		</p>
 	</div>
 
@@ -394,17 +409,25 @@
 				<span class="term-dot" style="background: var(--color-signal)"></span>
 				<span class="mono ml-3 text-xs text-mist-dim">homeport.yaml — cargo manifest</span>
 			</div>
-<pre class="mono max-w-full overflow-x-auto p-5 text-[0.8rem] leading-7 text-foam"><span class="text-mist">app:</span> lightpanda
+			<pre class="mono max-w-full overflow-x-auto p-5 text-[0.8rem] leading-7 text-foam"><span
+					class="text-mist">app:</span
+				> lightpanda
 <span class="text-mist">server:</span> deploy@vps
 <span class="text-mist">domain:</span> browser.example.com
 
 <span class="text-mist-dim"># the build just fetches a release — no compile step</span>
 <span class="text-mist">build:</span>
-  <span class="text-mist">command:</span> <span class="text-signal">curl</span> -fsSL github.com/lightpanda-io/…/lightpanda-x86_64-linux <span class="text-signal">-o</span> server
+  <span class="text-mist">command:</span> <span class="text-signal">curl</span
+				> -fsSL github.com/lightpanda-io/…/lightpanda-x86_64-linux <span class="text-signal"
+					>-o</span
+				> server
   <span class="text-mist">artifact:</span> server
 
-<span class="text-mist">run:</span> serve --host <span style="color: var(--color-flare)">&#123;HOST&#125;</span> --port <span style="color: var(--color-flare)">&#123;PORT&#125;</span>
-<span class="text-mist">sandbox:</span> <span style="color: var(--color-flare)">relaxed</span>   <span class="text-mist-dim"># runs its own browser sandbox</span></pre>
+<span class="text-mist">run:</span> serve --host <span style="color: var(--color-flare)"
+					>&#123;HOST&#125;</span
+				> --port <span style="color: var(--color-flare)">&#123;PORT&#125;</span>
+<span class="text-mist">sandbox:</span> <span style="color: var(--color-flare)">relaxed</span
+				>   <span class="text-mist-dim"># runs its own browser sandbox</span></pre>
 		</div>
 
 		<!-- why it works -->
@@ -429,15 +452,15 @@
 	<div use:reveal class="rise mb-12">
 		<h2 class="display text-[clamp(2.4rem,6vw,4.5rem)]">The difference<br />is the server</h2>
 		<p class="mt-5 max-w-xl text-mist">
-			Everyone can deploy an app. The question is what's left running on the box
-			afterward — and how many apps fit before it fills up.
+			Everyone can deploy an app. The question is what's left running on the box afterward — and how
+			many apps fit before it fills up.
 		</p>
 	</div>
 
 	<!-- overflow-x-auto is for phones (table min-w). On md+ the table fits but
 	     border-collapse rounds it 1px wide, which would summon a do-nothing
 	     scrollbar pair — clip swallows that pixel instead. -->
-	<div use:reveal class="rise panel ticked overflow-x-auto md:overflow-x-clip rounded-none">
+	<div use:reveal class="rise panel ticked overflow-x-auto rounded-none md:overflow-x-clip">
 		<table class="w-full min-w-[640px] border-collapse text-left">
 			<thead>
 				<tr class="mono text-xs tracking-wide text-mist-dim uppercase">
@@ -492,7 +515,12 @@
 		</button>
 
 		<div class="mt-8 flex flex-wrap justify-center gap-3">
-			<a href="https://docs.homeport.sh/quick-start" target="_blank" rel="noopener noreferrer" class="btn btn-primary rounded-none">
+			<a
+				href="https://docs.homeport.sh/quick-start"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="btn btn-primary rounded-none"
+			>
 				Get started →
 			</a>
 			<a href="#fleet" class="btn btn-ghost rounded-none">See the fleet</a>
@@ -511,11 +539,26 @@
 			<span class="mono ml-2 text-xs text-mist">the fastest way to ship binaries</span>
 		</div>
 		<div class="mono flex flex-wrap gap-6 text-sm text-mist">
-			<a href="https://github.com/homeport-sh/homeport" target="_blank" rel="noopener noreferrer" class="hover:text-foam">GitHub</a>
-			<a href="https://www.npmjs.com/package/svelte-bun-compile" target="_blank" rel="noopener noreferrer" class="hover:text-foam">
+			<a
+				href="https://github.com/homeport-sh/homeport"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="hover:text-foam">GitHub</a
+			>
+			<a
+				href="https://www.npmjs.com/package/svelte-bun-compile"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="hover:text-foam"
+			>
 				svelte-bun-compile
 			</a>
-			<a href="https://www.npmjs.com/package/next-bun-compile" target="_blank" rel="noopener noreferrer" class="hover:text-foam">
+			<a
+				href="https://www.npmjs.com/package/next-bun-compile"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="hover:text-foam"
+			>
 				next-bun-compile
 			</a>
 			<span class="text-mist">FSL-1.1-MIT</span>
@@ -523,8 +566,8 @@
 	</div>
 	<div class="mx-auto max-w-[1200px] px-5 pb-8">
 		<p class="mono text-xs text-mist">
-			This site is a prerendered SvelteKit build, served as static files by
-			Homeport on a cheap VPS — no process, no runtime, just Caddy.
+			This site is a prerendered SvelteKit build, served as static files by Homeport on a cheap VPS
+			— no process, no runtime, just Caddy.
 		</p>
 	</div>
 </footer>

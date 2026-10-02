@@ -12,7 +12,7 @@ build:
   # current machine (e.g. in CI, which is already Linux).
   command: NBC_TARGET=bun-linux-x64 bun run build
   # path to the single Linux executable the build produces
-  artifact: server
+  artifact: dist/app
 
 health:
   # a deploy is only promoted once this path returns 200 on the new binary
