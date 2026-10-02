@@ -30,7 +30,18 @@ jobs:
       - name: watch memory
         run: (while true; do free -m | awk '/Mem:/ {print $3}' >> /tmp/mem.log; sleep 2; done) &
 
+      - name: the base, cached between runs
+        id: base
+        uses: actions/cache@v4
+        with:
+          path: |
+            spc
+            gocache
+            gomod
+          key: frankenphp-base-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v1
+          restore-keys: frankenphp-base-
       - name: the base (our CI, once per PHP version) - PHP + standard extensions, no app
+        if: steps.base.outputs.cache-hit != 'true' && hashFiles('spc/buildroot/lib/libphp.a') == ''
         run: |
           set -euo pipefail
           mkdir -p spc gocache gomod out
@@ -57,10 +68,12 @@ jobs:
               export SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS="-fPIE -fstack-protector-strong -O2 -w -s"
               export SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES="--with github.com/dunglas/mercure/caddy --with github.com/dunglas/vulcain/caddy --with github.com/dunglas/caddy-cbrotli"
               cd dist/static-php-cli
+              rm -f buildroot/bin/frankenphp   # so a build that does nothing can't pass off the base
               ./spc build --enable-zts --build-frankenphp --disable-opcache-jit \
                 --with-config-file-path=/etc/frankenphp --with-config-file-scan-dir=/etc/frankenphp/php.d \
-                --with-frankenphp-app=/app "$EXTS" --with-libs="$LIBS" 2>&1 | ts "%H:%M:%S" | grep -E "building|Building|xcaddy build|go build|Extracting php-src|configure|libtool" | cut -c1-120 | head -30
+                --with-frankenphp-app=/app "$EXTS" --with-libs="$LIBS" > /out/perapp.log 2>&1
               cp buildroot/bin/frankenphp /out/app'
+          grep -E "building|Building|xcaddy build|Extracting php-src|buildconf|libtool --silent.*--mode=link" out/perapp.log | cut -c1-120 | head -20 || true
           echo "PER-APP: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used, binary $(du -h out/app | cut -f1)"
 
       - name: run it like a deploy
@@ -68,7 +81,8 @@ jobs:
           set -euo pipefail
           cp out/app ./app && chmod +x ./app
           ./app version
-          ./app php-cli -m | tr '\n' ' '; echo
+          echo '<?php echo implode(" ", get_loaded_extensions()), "\n";' > /tmp/ext.php
+          ./app php-cli /tmp/ext.php
           export LOG_CHANNEL=stderr DB_CONNECTION=sqlite DB_DATABASE=/tmp/app.sqlite
           export APP_KEY=$(grep '^APP_KEY=' demo/.env | cut -d= -f2-)
           touch /tmp/app.sqlite
