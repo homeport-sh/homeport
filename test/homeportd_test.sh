@@ -1074,6 +1074,7 @@ write_caddy shop shop.homeport.run 8120 plain 1
 eb=$(cat "$CADDY_DIR/shop.caddy")
 has "behind the edge: plain HTTP, TLS ended upstream" "$eb" "http://shop.homeport.run {"
 has "behind the edge: the edge alone"                 "$eb" "import homeport_edge_only"
+if [[ $eb == *"homeport_origin_auth"* ]]; then echo "FAIL behind the edge: origin auth (the edge strips its header)"; fails=$((fails + 1)); else echo "ok   behind the edge: no origin-auth check (the edge did it)"; fi
 if [[ $eb == *"tls "* ]]; then echo "FAIL behind the edge: a tls directive"; fails=$((fails + 1)); else echo "ok   behind the edge: no tls directive"; fi
 TLS_MODE=""; rm -rf "$CADDY_DIR"
 

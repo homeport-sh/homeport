@@ -1850,8 +1850,9 @@ write_caddy() {
   # hop between is the private network), and only the edge may ask
   [[ ${TLS_MODE:-} == edge ]] && { hosts="http://${hosts//, /, http://}"; ensure_edge_only_snippet; }
   { printf '%s {\n\tencode zstd gzip\n' "$hosts"
-    [[ ${TLS_MODE:-} == edge ]] && printf '\timport homeport_edge_only\n'
-    emit_origin_auth $'\t'
+    # behind the edge, the edge is the gate (it already checked origin auth,
+    # and stripped the header); otherwise, only through our Cloudflare zone
+    if [[ ${TLS_MODE:-} == edge ]]; then printf '\timport homeport_edge_only\n'; else emit_origin_auth $'\t'; fi
     emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     emit_reverse_proxy $'\t' "$mode" "$upstreams"

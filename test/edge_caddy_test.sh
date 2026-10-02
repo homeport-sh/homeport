@@ -57,7 +57,7 @@ write_caddy shop shop.homeport.test "$APP_PORT" plain 1
 # hop (here 127.0.0.1, in production Cloudflare) and the edge
 GDNS_PROVIDER="" GECH="" GTRUSTED="127.0.0.1/32 $HOSTIP/32" CADDY_ADMIN_SOCK=$work/admin.sock write_caddy_globals
 # the app: says who the visitor was
-printf 'http://:%s {\n\trespond "app sees {header.X-Forwarded-For} via {header.X-Forwarded-Proto}"\n}\n' "$APP_PORT" > "$CADDY_DIR/zz-app.caddy"
+printf 'http://:%s {\n\trespond "app sees {header.X-Forwarded-For} via {header.X-Forwarded-Proto} auth[{header.X-Origin-Auth}]"\n}\n' "$APP_PORT" > "$CADDY_DIR/zz-app.caddy"
 printf 'import %s/*.caddy\n' "$CADDY_DIR" > "$CADDYFILE"
 
 caddy validate --config "$CADDYFILE" --adapter caddyfile >"$work/validate.log" 2>&1 \
@@ -71,9 +71,14 @@ edge() { # <host> [curl args…] — a request to the edge, as Cloudflare sends 
 }
 got=$(edge shop.homeport.test -H 'X-Origin-Auth: s3cret' -H 'X-Forwarded-For: 203.0.113.7')
 # each trusted hop appends itself: the visitor comes first
-[[ $got == "app sees 203.0.113.7,"*" via https" ]] \
+[[ $got == "app sees 203.0.113.7,"*" via https auth[]" ]] \
   && ok "a routed name reaches its app, with the visitor's address first and the scheme ($got)" \
   || fail "routed: got [$got]"
+# the origin-auth secret proves a request came through our Cloudflare zone; the
+# app never receives it, and no response carries it back to the visitor
+[[ $got == *"auth[]"* ]] && ok "the app never receives the origin-auth header" || fail "the app saw origin auth: [$got]"
+hdrs=$(edge shop.homeport.test -H 'X-Origin-Auth: s3cret' -D - -o /dev/null)
+[[ ${hdrs,,} != *x-origin-auth* && $hdrs != *s3cret* ]] && ok "no response carries it back" || fail "a response header carried it: $hdrs"
 eq "an unknown name stops at the edge" \
   "$(edge nope.homeport.test -H 'X-Origin-Auth: s3cret' -w ' %{http_code}')" "No app here 404"
 eq "not through our Cloudflare zone: refused" \
