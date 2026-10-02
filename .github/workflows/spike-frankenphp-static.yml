@@ -38,7 +38,7 @@ jobs:
             -v "$PWD/cache:/go/src/app/dist/static-php-cli" \
             -v "$PWD/out:/out" \
             -e EMBED=dist/app/ -e FRANKENPHP_VERSION=main \
-            dunglas/frankenphp:static-builder-gnu \
+            dunglas/frankenphp:static-builder-musl \
             sh -c './build-static.sh && cp dist/frankenphp-linux-* /out/' 2>&1 | tail -40
           echo "COLD: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used, binary $(du -h out/frankenphp-linux-* | cut -f1)"
 
@@ -53,7 +53,7 @@ jobs:
             -v "$PWD/cache:/go/src/app/dist/static-php-cli" \
             -v "$PWD/out:/out" \
             -e EMBED=dist/app/ -e FRANKENPHP_VERSION=main \
-            dunglas/frankenphp:static-builder-gnu \
+            dunglas/frankenphp:static-builder-musl \
             sh -c './build-static.sh && cp dist/frankenphp-linux-* /out/' 2>&1 | tail -20
           echo "REBUILD: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used"
 
