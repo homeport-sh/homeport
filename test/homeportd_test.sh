@@ -675,6 +675,36 @@ rm -rf "$hc"
 has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
 
 # --- pause / resume (abuse response; reversible, nothing deleted) ---------------
+# run: an app's current release, once, as the app, with its environment -
+# an operator's one-off command. systemd-run is stubbed: we check what it's
+# asked to run, as whom, with what; the arguments reach the binary as given.
+( fails=0
+  rn_etc=$(mktemp -d); rn_root=$(mktemp -d); HOMEPORT_ETC=$rn_etc; HOMEPORT_ROOT=$rn_root
+  rn_log=$(mktemp); systemd-run() { printf '%s\n' "$@" > "$rn_log"; }
+  mkdir -p "$rn_etc/api" "$rn_root/api/current" "$rn_etc/box" "$rn_root/box/current" "$rn_etc/new"
+  printf 'PORT=8100\n' > "$rn_etc/api/config"; printf '#!/bin/sh\n' > "$rn_root/api/current/bin"; chmod +x "$rn_root/api/current/bin"
+  printf 'PORT=8101\nSANDBOX=gvisor\n' > "$rn_etc/box/config"; cp "$rn_root/api/current/bin" "$rn_root/box/current/bin"
+  printf 'PORT=8102\n' > "$rn_etc/new/config"
+
+  cmd_run api set-plan 'team with spaces' "it's \$HOME" >/dev/null
+  argv=$(cat "$rn_log")
+  has "run: as the app's own user"            "$argv" "--uid=homeport-api"
+  has "run: in its release"                   "$argv" "WorkingDirectory=$rn_root/api/current"
+  has "run: with its environment"             "$argv" "EnvironmentFile=-$rn_root/api/shared/env"
+  has "run: its state dir"                    "$argv" "STATE_DIR=$rn_root/api/shared"
+  eq  "run: the binary, then the arguments as given (no shell)" \
+      "$(sed -n '/^--$/,$p' "$rn_log" | tail -n +2)" \
+      "$(printf '%s\n' "$rn_root/api/current/bin" set-plan 'team with spaces' "it's \$HOME")"
+  ( cmd_run box anything >/dev/null 2>&1 ) && a=ran || a=refused
+  eq  "run: refused for a sandboxed app (its code runs only in its sandbox)" "$a" "refused"
+  ( cmd_run new anything >/dev/null 2>&1 ) && a=ran || a=refused
+  eq  "run: refused before a first release" "$a" "refused"
+  ( cmd_run ../etc x >/dev/null 2>&1 ) && a=ran || a=refused
+  eq  "run: refused for an invalid app" "$a" "refused"
+  has "run: no CI key may run anything"      "$(gate_decision api 'sudo /usr/local/bin/homeportd run api x')" "deny"
+  has "run: no deploy certificate may either" "$(cert_gate_decision api 'sudo /usr/local/bin/homeportd run api x')" "deny"
+  exit "$fails" ) || fails=$((fails + $?))
+
 # systemctl is stubbed: we check what pause/resume ask systemd to do per mode.
 ( fails=0
   pr_etc=$(mktemp -d); HOMEPORT_ETC=$pr_etc

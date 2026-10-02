@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.13.0
+HOMEPORTD_VERSION=0.14.0
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -1369,6 +1369,29 @@ die_if_paused() { # <app> — for verbs that would start or reconfigure it
   if grep -qs '^PAUSED=1$' "$HOMEPORT_ETC/$1/config"; then
     die "app '$1' is paused — resume it first"
   fi
+}
+
+# cmd_run <app> [args…] — the app's current release, once, as the app, with
+# its environment: an operator's one-off command (an admin command, a manual
+# migration). Its output comes back, and its exit status is run's. No shell:
+# the arguments reach the binary as given. Not for a sandboxed app (its code
+# runs only in its sandbox), and no gate allows it: CI keys and the control
+# plane's certificates can't run anything on a box.
+cmd_run() {
+  local app=${1:-}
+  local SANDBOX=""
+  valid_app "$app"
+  shift
+  [[ -f "$HOMEPORT_ETC/$app/config" ]] || die "unknown app '$app'"
+  load_app "$app"
+  [[ -z ${SANDBOX:-} ]] || die "'$app' runs in a sandbox: its code runs only there"
+  [[ -x "$HOMEPORT_ROOT/$app/current/bin" ]] || die "'$app' has no release yet: deploy it first"
+  systemd-run --quiet --pipe --wait --collect --service-type=exec \
+    --uid="homeport-$app" --gid="homeport-$app" \
+    -p "WorkingDirectory=$HOMEPORT_ROOT/$app/current" \
+    -p "EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env" \
+    --setenv="STATE_DIR=$HOMEPORT_ROOT/$app/shared" --setenv=HOST=127.0.0.1 \
+    -- "$HOMEPORT_ROOT/$app/current/bin" "$@"
 }
 
 cmd_pause() {
@@ -4417,6 +4440,7 @@ homeportd — root-side homeport helper (run via sudo)
   env-rm <app> <key>...              remove keys from the app env
   env-list <app> [--json]            list env keys (values never printed)
   status [app] [--json]              show one app, or all
+  run <app> [args…]                  the app's binary once, as the app, with its env
   logs <app> [-f] [-n N]             app journal
   logs-read <app> <cursor|-> <N>     a sandboxed app's log lines as JSON, after a cursor (control plane)
   logs-limits <app> <days> <MB>      a sandboxed app's log retention and size (control plane)
@@ -4480,6 +4504,7 @@ main() {
     env-rm)   cmd_env_rm "$@" ;;
     env-list) cmd_env_list "$@" ;;
     status)   cmd_status "$@" ;;
+    run)      cmd_run "$@" ;;
     logs)     cmd_logs "$@" ;;
     logs-read)   cmd_logs_read "$@" ;;
     logs-limits) cmd_logs_limits "$@" ;;
