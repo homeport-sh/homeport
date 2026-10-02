@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.11.0
+HOMEPORTD_VERSION=0.12.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -278,6 +278,7 @@ emit_service_body() {
     cat <<EOF
 [Service]
 Slice=homeport-tenants.slice
+LogNamespace=$(log_namespace "$app")
 ExecStart=/usr/local/bin/homeportd sandbox-run $app $1
 ExecStop=/usr/local/bin/homeportd sandbox-stop $app $1
 ExecStopPost=/usr/local/bin/homeportd sandbox-clean $app $1
@@ -2667,6 +2668,10 @@ EOF
   touch "$HOMEPORT_ROOT/$app/shared/env"
   chown root:"$user" "$HOMEPORT_ROOT/$app/shared/env"
   chmod 640 "$HOMEPORT_ROOT/$app/shared/env"
+  # a tenant's own journal, at the defaults until the control plane sets the plan's
+  if sandbox_on && [[ ! -f "/etc/systemd/journald@$(log_namespace "$app").conf" ]]; then
+    write_journal_conf "$app" "$LOG_DEFAULT_DAYS" "$LOG_DEFAULT_MB"
+  fi
 
   # --- write the app's systemd unit(s) for its mode ---
   local caddy_upstreams=""
@@ -3176,6 +3181,15 @@ cert_gate_decision() {
       echo "allow $off"
     else
       echo "deny may only remove '$1', as: remove $1 --yes"
+    fi
+    return
+  fi
+  # …reads its runtime logs and sets their limits, its own app only
+  if (( off >= 0 )) && [[ ${a[off]:-} == logs-read || ${a[off]:-} == logs-limits ]]; then
+    if [[ ${a[off+1]:-} == "$1" && ${#a[@]} -eq $(( off + 4 )) ]]; then
+      echo "allow $off"
+    else
+      echo "deny may only ${a[off]} '$1' <2 arguments>"
     fi
     return
   fi
@@ -3740,6 +3754,81 @@ cmd_self_update() { # replace this script with a validated copy from stdin
   echo "homeportd updated: $HOMEPORTD_VERSION -> $newver"
 }
 
+# --- runtime logs of sandboxed (tenant) apps ----------------------------------
+# A tenant logs to its own journal namespace (LogNamespace= on its unit), so on
+# a shared host each app has its own size cap, retention and rate limit: a
+# noisy one can't evict the others' logs, and they're read per app, never
+# mixed. The control plane reads them with logs-read (through cert-gate, its
+# own app only) and sets the plan's limits with logs-limits.
+LOG_DEFAULT_DAYS=1
+LOG_DEFAULT_MB=50
+
+log_namespace() { printf 'hp-%s' "$1"; }
+
+# journal_conf <days> <MB> — a namespace's journald.conf.
+journal_conf() {
+  cat <<EOF
+# homeport: this app's own journal
+[Journal]
+Storage=persistent
+SystemMaxUse=${2}M
+MaxRetentionSec=${1}day
+RateLimitIntervalSec=30s
+RateLimitBurst=10000
+EOF
+}
+
+valid_log_limits() {
+  [[ ${1:-} =~ ^[0-9]{1,3}$ && ${2:-} =~ ^[0-9]{1,5}$ ]] || die "log limits: whole days and MB"
+  (( $1 >= 1 && $1 <= 365 )) || die "log limits: 1-365 days"
+  (( $2 >= 10 && $2 <= 10240 )) || die "log limits: 10-10240 MB"
+}
+
+# write_journal_conf <app> <days> <MB> — and restart its journald if it runs.
+write_journal_conf() {
+  local ns; ns=$(log_namespace "$1")
+  journal_conf "$2" "$3" > "/etc/systemd/journald@$ns.conf"
+  systemctl try-restart "systemd-journald@$ns.service" 2>/dev/null || true
+}
+
+# logs_read_args <app> <cursor|-> <max> — journalctl's arguments, one a line.
+logs_read_args() {
+  local app=$1 cursor=$2 max=$3
+  valid_app "$app"
+  local re='^[a-z0-9=;]+$'   # a journal cursor: s=…;i=…;b=…;m=…;t=…;x=…
+  [[ $cursor == - ]] || { [[ $cursor =~ $re ]] && (( ${#cursor} <= 512 )); } || die "logs-read: bad cursor"
+  [[ $max =~ ^[0-9]{1,4}$ ]] && (( max >= 1 && max <= 5000 )) || die "logs-read: 1-5000 lines"
+  printf '%s\n' "--namespace=$(log_namespace "$app")" -o json --no-pager -n "$max" \
+    --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT
+  [[ $cursor == - ]] || printf '%s\n' "--after-cursor=$cursor"
+}
+
+# cmd_logs_read <app> <cursor|-> <max> — the app's newest <max> lines, or
+# those after <cursor>: one JSON object a line, each with its __CURSOR.
+cmd_logs_read() {
+  local -a args
+  mapfile -t args < <(logs_read_args "${1:-}" "${2:-}" "${3:-}") || exit 1
+  [[ ${#args[@]} -gt 0 ]] || exit 1
+  journalctl "${args[@]}" 2>/dev/null || true
+}
+
+# cmd_logs_limits <app> <days> <MB> — the plan's retention for this app's logs.
+cmd_logs_limits() {
+  local app=${1:-}
+  valid_app "$app"
+  valid_log_limits "${2:-}" "${3:-}"
+  write_journal_conf "$app" "$2" "$3"
+  echo "logs: $app keeps $2 days, up to $3 MB"
+}
+
+# remove_app_journal <app> — its namespace's config and its logs.
+remove_app_journal() {
+  local ns; ns=$(log_namespace "$1")
+  systemctl stop "systemd-journald@$ns.service" "systemd-journald@$ns.socket" "systemd-journald-varlink@$ns.socket" 2>/dev/null || true
+  rm -f "/etc/systemd/journald@$ns.conf"
+  rm -rf /var/log/journal/*."$ns" /run/log/journal/*."$ns"
+}
+
 cmd_logs() {
   local app=${1:-}
   valid_app "$app"
@@ -3747,6 +3836,11 @@ cmd_logs() {
   # exact units only — a bare "homeport-$app*" glob would also match a
   # sibling app whose name shares the prefix (web vs webshop)
   local -a args=(-u "homeport-$app.service" -u "homeport-$app@*" -u "homeport-$app-proxy.service" --no-pager -n 100)
+  # a sandboxed app has a journal of its own
+  if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
+    load_app "$app"
+    sandbox_on && args=("--namespace=$(log_namespace "$app")" --no-pager -n 100)
+  fi
   while (( $# )); do
     case $1 in
       -f) args+=(-f) ;;
@@ -3795,6 +3889,7 @@ cmd_remove() {
   systemctl reload caddy 2>/dev/null || true
   # the BYO cert dir holds a private key — it must not outlive the app
   rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}" "${TLS_CERT_DIR:?}/${app:?}"
+  remove_app_journal "$app"
   # if this was a path-mounted app, rebuild its host's gateway without it (the
   # config is gone now, so the scan naturally excludes it).
   if [[ -n $gwpath && -n $gwdom ]]; then
@@ -3818,6 +3913,8 @@ homeportd — root-side homeport helper (run via sudo)
   env-list <app> [--json]            list env keys (values never printed)
   status [app] [--json]              show one app, or all
   logs <app> [-f] [-n N]             app journal
+  logs-read <app> <cursor|-> <N>     a sandboxed app's log lines as JSON, after a cursor (control plane)
+  logs-limits <app> <days> <MB>      a sandboxed app's log retention and size (control plane)
   upload <app> <release>             receive the app binary on stdin into a release dir
   key-add [--scope <app>]            authorize key(s) from stdin; --scope locks them to one app
   key-list                           fingerprints + scope of authorized deploy keys
@@ -3879,6 +3976,8 @@ main() {
     env-list) cmd_env_list "$@" ;;
     status)   cmd_status "$@" ;;
     logs)     cmd_logs "$@" ;;
+    logs-read)   cmd_logs_read "$@" ;;
+    logs-limits) cmd_logs_limits "$@" ;;
     key-add)  cmd_key_add "$@" ;;
     key-list) cmd_key_list "$@" ;;
     key-rm)   cmd_key_rm "$@" ;;

@@ -22,6 +22,10 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "ok") })
 	http.HandleFunc("/env", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, os.Getenv(r.URL.Query().Get("k"))) })
 	http.HandleFunc("/uid", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, os.Getuid()) })
+	http.HandleFunc("/log", func(w http.ResponseWriter, r *http.Request) { // a line on stdout, for the logs tests
+		fmt.Println(r.URL.Query().Get("m"))
+		fmt.Fprint(w, "logged")
+	})
 	http.HandleFunc("/kernel", func(w http.ResponseWriter, _ *http.Request) {
 		b, _ := os.ReadFile("/proc/sys/kernel/osrelease")
 		fmt.Fprint(w, strings.TrimSpace(string(b)))

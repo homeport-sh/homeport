@@ -27,6 +27,7 @@ fi
 fails=0
 ok()   { echo "ok   $1"; }
 fail() { echo "FAIL $1"; fails=$((fails + 1)); }
+has()  { if [[ $2 == *"$3"* ]]; then ok "$1"; else fail "$1: [$3] not in [${2:0:300}]"; fi; }
 eq()   { if [[ $2 == "$3" ]]; then ok "$1"; else fail "$1: got [$2] want [$3]"; fi; }
 
 HD=/usr/local/bin/homeportd
@@ -114,6 +115,30 @@ deploy_probe probe-two 256M >/dev/null && ok "deploy a second tenant" || fail "d
 P2=$(sed -n 's/^PORT=//p' "$HOMEPORT_ETC/probe-two/config"); G2=$(sandbox_ip "$P2" guest)
 eq "tenant can't reach another tenant"        "$(get "/dial?addr=$G2:$P2")" "blocked"
 eq "…and the host still can"                  "$(curl -s --max-time 5 "http://$G2:$P2/")" "ok"
+
+echo "--- runtime logs"
+# each tenant logs to its own journal, read by the control plane through its
+# app-scoped certificate, as JSON lines that carry a cursor to read on from
+cg() { "$HD" cert-gate "$1" "sudo /usr/local/bin/homeportd $2"; }
+get '/log?m=hello-from-probe' >/dev/null
+curl -s --max-time 5 "http://$G2:$P2/log?m=hello-from-two" >/dev/null
+sleep 2
+lr=$(cg probe "logs-read probe - 200" 2>&1)
+has "logs-read: the app's own output"          "$lr" "hello-from-probe"
+has "logs-read: from its start"                "$lr" "probe listening on"
+eq  "logs-read: never another tenant's"        "$(grep -c hello-from-two <<<"$lr")" "0"
+eq  "logs-read: JSON lines with a cursor"      "$(tail -1 <<<"$lr" | jq -r 'has("__CURSOR") and has("MESSAGE")')" "true"
+cur=$(tail -1 <<<"$lr" | jq -r .__CURSOR)
+get '/log?m=after-the-cursor' >/dev/null; sleep 2
+more=$(cg probe "logs-read probe $cur 200" 2>&1)
+has "logs-read: on from a cursor"              "$more" "after-the-cursor"
+eq  "logs-read: …and only what's new"          "$(grep -c hello-from-probe <<<"$more")" "0"
+eq  "not in the system journal"                "$(journalctl -u homeport-probe --no-pager 2>/dev/null | grep -c hello-from-probe)" "0"
+eq  "another app's certificate can't read it"  "$(cg probe-two "logs-read probe - 200" >/dev/null 2>&1 && echo read || echo refused)" "refused"
+has "the app's journal starts at the defaults" "$(cat /etc/systemd/journald@hp-probe.conf)" "MaxRetentionSec=1day"
+cg probe "logs-limits probe 7 500" >/dev/null
+has "the control plane sets the plan's limits" "$(cat /etc/systemd/journald@hp-probe.conf)" "MaxRetentionSec=7day"
+has "…and its size cap"                        "$(cat /etc/systemd/journald@hp-probe.conf)" "SystemMaxUse=500M"
 
 echo "--- usage metering"
 eq "meter timer installed with the sandbox" "$(systemctl is-enabled homeport-meter.timer 2>/dev/null)" "enabled"
