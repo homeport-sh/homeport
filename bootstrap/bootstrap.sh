@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.10.0
+HOMEPORTD_VERSION=0.11.0
 HOMEPORTD_API=1
 
 HOMEPORT_ROOT=/opt/homeport
@@ -700,6 +700,244 @@ cmd_sandbox_install() {
   echo "sandbox: $(runsc --version | head -1) installed (usage metering on)"
 }
 
+# --- hosted builds ---------------------------------------------------------------
+# A builder runs customers' builds: the control plane hands it one job at a
+# time through build-gate (its build certificate can do nothing else). The
+# job names a short-lived link to the commit's source and one to upload the
+# binary to; the builder holds no credential of its own. Each build runs in
+# gVisor as an unprivileged user, in the toolchain image `homeport
+# build-plan` picks from the repository's own files, with outbound network
+# through its own slot's sandbox network (the same firewall as apps: no
+# mail, nothing private), its app's dependency cache, and hard limits.
+BUILD_ROOT=/var/lib/homeport/builds          # one workspace per build, removed after
+BUILD_IMAGES=/var/lib/homeport/build-images  # toolchain rootfs, by image digest
+BUILD_CACHE=/var/lib/homeport/build-cache    # dependency caches, by app
+BUILD_LOCKS=/run/homeport-build              # one lock per slot
+BUILD_RUNSC_ROOT=/run/homeport-build-runsc
+BUILD_UID=64000                              # who a build runs as, inside its sandbox
+BUILD_SLOTS_FILE=/etc/homeport/build-slots   # how many at once (default 2)
+BUILD_PORT_BASE=62000                        # a slot's sandbox network: port base+slot
+BUILD_MEMORY=4G
+BUILD_CPU=200%
+CRANE_VERSION=v0.22.1
+CRANE_SHA256_X86_64=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+CRANE_SHA256_ARM64=898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110
+
+build_gate_decision() { single_verb_gate_decision build-run "${1:-}"; }
+
+cmd_build_gate() {
+  local orig=${1:-} d
+  d=$(build_gate_decision "$orig")
+  gate_run "$d" "$orig" "this certificate may only run a build"
+}
+
+host_arch() {
+  case $(uname -m) in
+    x86_64) echo x86-64 ;; aarch64|arm64) echo arm64 ;; *) uname -m ;;
+  esac
+}
+
+# build_job_check <file> — the job, every field in its shape, into BJ_*.
+build_job_check() {
+  local f=$1 j
+  j=$(head -c 65536 "$f")
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$j" || die "build: the job isn't a JSON object"
+  BJ_BUILD=$(jq -r '.build // empty' <<<"$j"); BJ_APP=$(jq -r '.app // empty' <<<"$j")
+  BJ_SHA=$(jq -r '.sha // empty' <<<"$j"); BJ_ARCH=$(jq -r '.arch // empty' <<<"$j")
+  BJ_SOURCE=$(jq -r '.source // empty' <<<"$j"); BJ_UPLOAD=$(jq -r '.upload // empty' <<<"$j")
+  BJ_TIMEOUT=$(jq -r 'if (.timeout | type) == "number" then .timeout else "" end' <<<"$j")
+  local uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  local url='^https://[^[:space:]"'"'"'`\\]+$'
+  [[ $BJ_BUILD =~ $uuid ]] || die "build: bad build id"
+  [[ $BJ_APP =~ $uuid ]] || die "build: bad app id"
+  [[ $BJ_SHA =~ ^[0-9a-f]{40}$ ]] || die "build: bad commit"
+  [[ $BJ_ARCH == "$(host_arch)" ]] || die "build: this builder is $(host_arch), the job wants '$BJ_ARCH'"
+  [[ $BJ_SOURCE =~ $url ]] || die "build: bad source link"
+  [[ $BJ_UPLOAD =~ $url ]] || die "build: bad upload link"
+  [[ $BJ_TIMEOUT =~ ^[0-9]+$ ]] && (( BJ_TIMEOUT >= 60 && BJ_TIMEOUT <= 3600 )) ||
+    die "build: the timeout must be 60-3600 seconds"
+}
+
+# build_spec — the OCI spec of one build: the plan's script in a shell, as an
+# unprivileged user, in /src (the checkout), with /cache (the app's
+# dependency cache), the image's own environment plus ours, and the slot's
+# network. Nothing else of the host is mounted.
+build_spec() {
+  local uid gid src cache netns script ienv rootfs=rootfs resolv=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --uid) uid=$2 ;; --gid) gid=$2 ;; --src) src=$2 ;; --cache) cache=$2 ;;
+      --netns) netns=$2 ;; --script) script=$2 ;; --image-env) ienv=$2 ;;
+      --rootfs) rootfs=$2 ;; --resolv) resolv=$2 ;;
+      *) die "build_spec: unknown flag $1" ;;
+    esac
+    shift 2
+  done
+  jq -n --argjson uid "$uid" --argjson gid "$gid" --arg src "$src" --arg cache "$cache" \
+    --arg netns "$netns" --arg script "$script" --arg rootfs "$rootfs" --arg resolv "$resolv" \
+    --rawfile ienv "$ienv" '
+    def ours: ["HOME=/cache/home", "TMPDIR=/tmp", "CI=true", "GOCACHE=/cache/go/build", "GOMODCACHE=/cache/go/mod",
+               "BUN_INSTALL_CACHE_DIR=/cache/bun", "npm_config_cache=/cache/npm", "CARGO_HOME=/cache/cargo"];
+    (ours | map(split("=")[0])) as $mine
+    | {
+      ociVersion: "1.0.2",
+      process: {
+        terminal: false,
+        user: {uid: $uid, gid: $gid},
+        args: ["/bin/sh", "-ec", $script],
+        env: (($ienv | split("\n") | map(select(length > 0 and (split("=")[0] as $k | $mine | index($k) | not)))) + ours),
+        cwd: "/src",
+        noNewPrivileges: true,
+        capabilities: {bounding: [], effective: [], inheritable: [], permitted: [], ambient: []},
+        rlimits: [{type: "RLIMIT_NOFILE", hard: 65536, soft: 65536}]
+      },
+      root: {path: $rootfs, readonly: false},
+      hostname: "build",
+      mounts: (
+        [ {destination: "/proc", type: "proc", source: "proc"},
+          {destination: "/tmp", type: "tmpfs", source: "tmpfs", options: ["nosuid", "nodev", "size=1g"]},
+          {destination: "/src", type: "bind", source: $src, options: ["rbind", "rw"]},
+          {destination: "/cache", type: "bind", source: $cache, options: ["rbind", "rw"]} ]
+        + (if $resolv == "" then [] else [{destination: "/etc/resolv.conf", type: "bind", source: $resolv, options: ["bind", "ro"]}] end)
+      ),
+      linux: {namespaces: [{type: "pid"}, {type: "ipc"}, {type: "uts"}, {type: "mount"}, {type: "network", path: $netns}]}
+    }'
+}
+
+# cmd_builder_install — make this host a builder: gVisor (sandbox-install),
+# crane (pinned, hash-checked) to unpack toolchain images without Docker, and
+# the build directories. `homeport` (for build-plan) is installed by the
+# host's first boot, pinned to a release.
+cmd_builder_install() {
+  cmd_sandbox_install
+  local arch sum tmp
+  case $(uname -m) in
+    x86_64) arch=x86_64 sum=$CRANE_SHA256_X86_64 ;;
+    aarch64|arm64) arch=arm64 sum=$CRANE_SHA256_ARM64 ;;
+    *) die "builder-install: unsupported architecture $(uname -m)" ;;
+  esac
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/crane.tgz" \
+    "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_$arch.tar.gz"
+  echo "$sum  $tmp/crane.tgz" | sha256sum -c - >/dev/null || { rm -rf "$tmp"; die "builder-install: crane's checksum doesn't match"; }
+  tar -xzf "$tmp/crane.tgz" -C "$tmp" crane
+  install -m 755 "$tmp/crane" /usr/local/bin/crane
+  rm -rf "$tmp"
+  install -d -m 700 "$BUILD_ROOT" "$BUILD_IMAGES" "$BUILD_RUNSC_ROOT"
+  install -d -m 755 "$BUILD_CACHE"
+  echo "builder: $(runsc --version | head -1), crane $CRANE_VERSION"
+}
+
+# image_repo <ref> — the repository of an image reference (no tag, no digest).
+image_repo() {
+  local ref=${1%%@*} last
+  last=${ref##*/}
+  [[ $last == *:* ]] && ref=${ref%:*}
+  printf '%s' "$ref"
+}
+
+# build_image <image> <platform> — the toolchain's rootfs, unpacked once per
+# digest and shared by every build that uses it (each build writes to an
+# overlay, never to it). Prints its directory.
+build_image() {
+  local image=$1 platform=$2 digest dir tmp
+  [[ $image =~ ^[a-z0-9][a-z0-9._/:@-]*$ && ${#image} -le 255 ]] || die "build: bad image '$image'"
+  digest=$(crane digest --platform "$platform" "$image") || die "build: can't find image $image"
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "build: bad digest for $image"
+  dir=$BUILD_IMAGES/${digest#sha256:}
+  if [[ ! -d $dir/rootfs ]]; then
+    tmp=$(mktemp -d "$BUILD_IMAGES/.pull.XXXXXX")
+    mkdir "$tmp/rootfs"
+    crane export --platform "$platform" "$(image_repo "$image")@$digest" - | tar -x -C "$tmp/rootfs" --no-same-owner ||
+      { rm -rf "$tmp"; die "build: can't unpack $image"; }
+    crane config --platform "$platform" "$(image_repo "$image")@$digest" | jq -r '.config.Env[]?' > "$tmp/env" ||
+      { rm -rf "$tmp"; die "build: can't read $image's config"; }
+    mv -T "$tmp" "$dir" 2>/dev/null || rm -rf "$tmp"   # another build got there first
+  fi
+  printf '%s' "$dir"
+}
+
+# cmd_build_run — run one build; its job on stdin. Prints the build's output
+# (the build log) and exits non-zero, saying why, if it didn't produce a
+# binary it could upload.
+cmd_build_run() {
+  for t in runsc crane jq curl tar homeport systemd-run; do
+    command -v "$t" >/dev/null || die "build: $t isn't installed (homeportd builder-install)"
+  done
+  local job; job=$(mktemp)
+  head -c 65537 > "$job"
+  (( $(wc -c < "$job") <= 65536 )) || { rm -f "$job"; die "build: the job is too large"; }
+  build_job_check "$job"; rm -f "$job"
+
+  # a slot: its lock is held until this process exits
+  local slots=2 n port="" fd
+  [[ -s $BUILD_SLOTS_FILE ]] && slots=$(<"$BUILD_SLOTS_FILE")
+  [[ $slots =~ ^[0-9]{1,2}$ ]] || slots=2
+  install -d -m 700 "$BUILD_LOCKS"
+  for (( n = 1; n <= slots; n++ )); do
+    exec {fd}>"$BUILD_LOCKS/slot-$n"
+    if flock -n "$fd"; then port=$(( BUILD_PORT_BASE + n )); break; fi
+    exec {fd}>&-
+  done
+  [[ -n $port ]] || die "build: every build slot is busy"
+
+  local ws=$BUILD_ROOT/$BJ_BUILD id="hpb_${BJ_BUILD//-/}" cache=$BUILD_CACHE/$BJ_APP
+  rm -rf "$ws"; install -d -m 700 "$ws" "$ws/src" "$ws/bundle"
+  # whatever happens, leave nothing behind but the caches
+  trap 'runsc --root="$BUILD_RUNSC_ROOT" delete -force "'"$id"'" >/dev/null 2>&1; sandbox_net_down "'"$port"'" >/dev/null 2>&1; rm -rf "'"$ws"'"' EXIT
+
+  echo "==> fetching ${BJ_SHA:0:12}"
+  curl -fsSL --proto =https --max-time 300 --max-filesize $(( 1 << 30 )) -o "$ws/source.tgz" "$BJ_SOURCE" ||
+    die "build: couldn't download the source"
+  tar -xzf "$ws/source.tgz" -C "$ws/src" --strip-components=1 --no-same-owner --no-same-permissions ||
+    die "build: couldn't unpack the source"
+  rm -f "$ws/source.tgz"
+
+  # the plan, from the repository's files - which are untrusted: an empty
+  # environment, and build-plan runs nothing from them
+  local plan image install command artifact
+  plan=$(env -i PATH=/usr/local/bin:/usr/bin:/bin homeport build-plan "$ws/src" 2>&1) || die "build: $plan"
+  image=$(jq -r .image <<<"$plan"); install=$(jq -r '.install // ""' <<<"$plan")
+  command=$(jq -r .command <<<"$plan"); artifact=$(jq -r .artifact <<<"$plan")
+  echo "==> $(jq -r .toolchain <<<"$plan"): $image"
+
+  local platform=linux/amd64; [[ $BJ_ARCH == arm64 ]] && platform=linux/arm64
+  local img; img=$(build_image "$image" "$platform") || exit 1
+
+  install -d -m 755 "$cache" "$cache/home"
+  chown -R "$BUILD_UID:$BUILD_UID" "$ws/src" "$cache"
+  local d; : > "$ws/resolv.conf"
+  for d in $SANDBOX_DNS; do echo "nameserver $d" >> "$ws/resolv.conf"; done
+  local script=$command
+  [[ -n $install ]] && script="$install && $command"
+  build_spec --uid "$BUILD_UID" --gid "$BUILD_UID" --src "$ws/src" --cache "$cache" \
+    --netns "/var/run/netns/hp-$port" --script "$script" --image-env "$img/env" \
+    --rootfs "$img/rootfs" --resolv "$ws/resolv.conf" > "$ws/bundle/config.json"
+  ensure_sandbox_firewall
+  sandbox_net_down "$port" >/dev/null 2>&1 || true   # a crash may have left one
+  sandbox_net_up "$port"
+  install -d -m 700 "$BUILD_RUNSC_ROOT"
+
+  echo "==> building: $script"
+  local rc=0
+  # the build's own scope: memory (no swap) and CPU caps; a hard time limit
+  systemd-run --quiet --collect --scope -p MemoryMax="$BUILD_MEMORY" -p MemorySwapMax=0 -p CPUQuota="$BUILD_CPU" -- \
+    timeout --kill-after=15 "$BJ_TIMEOUT" \
+    runsc --root="$BUILD_RUNSC_ROOT" --ignore-cgroups --network=sandbox --overlay2=root:memory \
+      run --bundle "$ws/bundle" "$id" 2>&1 || rc=$?
+  (( rc == 124 || rc == 137 )) && die "build: timed out after ${BJ_TIMEOUT}s"
+  (( rc == 0 )) || die "build: the build failed (exit $rc)"
+
+  # the binary: a regular file inside the checkout, nowhere else
+  local bin=$ws/src/$artifact real
+  [[ -f $bin && ! -L $bin ]] || die "build: no binary at $artifact - did the build produce it?"
+  real=$(realpath -e "$bin") && [[ $real == "$ws/src/"* ]] || die "build: $artifact isn't inside the repository"
+  echo "==> uploading $artifact ($(( $(stat -c %s "$real") / 1024 )) KiB)"
+  curl -fsS --proto =https --max-time 600 -X PUT -H 'Content-Type: application/octet-stream' \
+    --upload-file "$real" "$BJ_UPLOAD" >/dev/null || die "build: couldn't upload the binary"
+  echo "==> built ${BJ_SHA:0:12}"
+}
+
 # --- usage metering --------------------------------------------------------------
 # Every 60s `meter-tick` (a systemd timer) records, per app: time awake, its
 # size, CPU used and bytes sent, into a numbered local spool. The control plane
@@ -879,13 +1117,17 @@ cmd_meter_gate() {
 # host_gate_decision <orig> — the control plane's host certificate: renew
 # this host's own certificate (host-cert-install, the certificate on stdin)
 # and nothing else.
-host_gate_decision() {
-  local orig=${1:-}
+host_gate_decision() { single_verb_gate_decision host-cert-install "${1:-}"; }
+
+# single_verb_gate_decision <verb> <orig> — a gate that lets exactly one
+# homeportd verb through, with no arguments (its input comes on stdin).
+single_verb_gate_decision() {
+  local verb=$1 orig=${2:-}
   [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
   local -a a; read -ra a <<<"$orig"
   local off; off=$(gate_offset "$orig")
   [[ -n $off ]] || { echo "deny may only run homeportd"; return; }
-  [[ ${a[off]:-} == host-cert-install && ${#a[@]} -eq $(( off + 1 )) ]] ||
+  [[ ${a[off]:-} == "$verb" && ${#a[@]} -eq $(( off + 1 )) ]] ||
     { echo "deny verb '${a[off]:-(none)}' is not permitted"; return; }
   echo "allow $off"
 }
@@ -3604,6 +3846,8 @@ homeportd — root-side homeport helper (run via sudo)
   meter-read <after-seq>             spooled usage records (control plane, via meter-gate)
   meter-ack <seq>                    drop records the control plane has stored
   host-cert-install                  replace this host's certificate (stdin; control plane, via host-gate)
+  builder-install                    make this host a builder: gVisor, crane, build directories
+  build-run                          run one hosted build (its job on stdin; control plane, via build-gate)
   origin-auth-set [--keep-previous]  require X-Origin-Auth (secret on stdin) on every public site
   origin-auth-retire                 end a rotation: drop the previous value
   origin-auth-clear                  stop requiring it
@@ -3664,6 +3908,9 @@ main() {
     meter-read)  cmd_meter_read "$@" ;;
     meter-ack)   cmd_meter_ack "$@" ;;
     meter-gate)  cmd_meter_gate "$@" ;;
+    build-gate)  cmd_build_gate "$@" ;;
+    build-run)   cmd_build_run "$@" ;;
+    builder-install) cmd_builder_install "$@" ;;
     host-gate)   cmd_host_gate "$@" ;;
     host-cert-install) cmd_host_cert_install "$@" ;;
     origin-auth-set)    cmd_origin_auth_set "$@" ;;
