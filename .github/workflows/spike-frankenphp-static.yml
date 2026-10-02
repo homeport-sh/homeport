@@ -86,6 +86,7 @@ jobs:
           cd $S
           INC=$(./spc spc-config "$EXTS" --with-libs="$LIBS" --includes 2>/dev/null | tail -1)
           LNK=$(./spc spc-config "$EXTS" --with-libs="$LIBS" --libs 2>/dev/null | tail -1)
+          LNK=$(tr ' ' '\n' <<<"$LNK" | grep -v ',' | tr '\n' ' ')   # spc-config echoes the lib list back
           echo "includes: ${INC:0:150}"; echo "libs: ${LNK:0:300}"
           DYN=$S/buildroot/lib/libphp.a.dynsym
           [[ -f $DYN ]] && DYNARG="-Wl,--dynamic-list=$DYN" || DYNARG=""
@@ -96,7 +97,9 @@ jobs:
           export XCADDY_GO_BUILD_FLAGS="-buildmode=pie -ldflags \"-linkmode=external -extldflags '-static-pie -Wl,-z,stack-size=0x80000 $DYNARG' -X 'github.com/caddyserver/caddy/v2.CustomBinaryName=frankenphp'\" -tags=static_build,nobadger,nomysql,nopgx,deprecated_topic,deprecated_claim"
           cd $S/buildroot/lib
           rm -f frankenphp
-          eval "$(cat $S/link/xcaddy.cmd)"
+          XC=$(sed 's/\x1b\[[0-9;]*m//g' $S/link/xcaddy.cmd)   # captured from a coloured log
+          echo "running: ${XC:0:200}"
+          eval "$XC"
           cp frankenphp /out/app
           SH
           : > /tmp/mem.log
