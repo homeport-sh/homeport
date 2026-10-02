@@ -1579,7 +1579,8 @@ validate_tls_mode() {
         echo "tls: env var '$tokenv' is not set for caddy — cert issuance will fail until you run 'homeport server caddy-env $tokenv'" >&2
       fi
       ;;
-    *) die "tls: mode must be 'manual' or 'dns:<provider>', got '$mode'" ;;
+    edge) [[ -s $EDGE_FROM_FILE ]] || die "tls: edge, but this host isn't behind an edge (homeportd edge-from <edge CIDR>)" ;;
+    *) die "tls: mode must be 'manual', 'dns:<provider>' or 'edge', got '$mode'" ;;
   esac
 }
 
@@ -1845,8 +1846,13 @@ write_caddy() {
   # a cert per hostname automatically.
   hosts=$domain
   [[ -n ${ALIASES:-} ]] && hosts="$domain, ${ALIASES//,/, }"
+  # behind the edge: plain HTTP (TLS ended at Cloudflare and the edge, the
+  # hop between is the private network), and only the edge may ask
+  [[ ${TLS_MODE:-} == edge ]] && { hosts="http://${hosts//, /, http://}"; ensure_edge_only_snippet; }
   { printf '%s {\n\tencode zstd gzip\n' "$hosts"
-    emit_origin_auth $'\t'
+    # behind the edge, the edge is the gate (it already checked origin auth,
+    # and stripped the header); otherwise, only through our Cloudflare zone
+    if [[ ${TLS_MODE:-} == edge ]]; then printf '\timport homeport_edge_only\n'; else emit_origin_auth $'\t'; fi
     emit_tls $'\t' "$app"
     emit_user_headers $'\t'
     emit_reverse_proxy $'\t' "$mode" "$upstreams"
@@ -2187,6 +2193,180 @@ cmd_caddy_plugin_list() {
 }
 
 # ---------------------------------------------------------------------------
+# The edge (design/edge.md in homeport-cloud): one wildcard (*.<apps domain>,
+# proxied by Cloudflare) in front of every host. The edge box routes each
+# hostname to its app's host over the private network; hosts behind it serve
+# their apps over plain HTTP to the edge alone.
+# ---------------------------------------------------------------------------
+EDGE_DIR=/etc/homeport/edge
+EDGE_FROM_FILE=/etc/homeport/edge-from
+EDGE_ONLY_FRAG=$CADDY_DIR/00-edge-only.caddy
+EDGE_SITE_FRAG=$CADDY_DIR/_edge.caddy
+EDGE_UPSTREAM_PORT=80
+EDGE_ROUTES_MAX=200000
+
+# edge_private_ip <ipv4> — an address in 10/8, 172.16/12 or 192.168/16: where
+# hosts are on the private network. Never loopback, the metadata service, or
+# anywhere public - the edge must not be a way to reach those.
+edge_private_ip() {
+  local o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  [[ ${1:-} =~ ^$o\.$o\.$o\.$o$ ]] || return 1
+  local a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+  (( a == 10 )) || (( a == 172 && b >= 16 && b <= 31 )) || (( a == 192 && b == 168 ))
+}
+
+# edge_route_lines <file> — the route table, checked: "<hostname> <private IP>"
+# lines, one address per name; printed as Caddy map entries, sorted.
+edge_route_lines() {
+  local line host ip extra n=0 out=""
+  local -A seen=()
+  local hre='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -n ${line//[[:space:]]/} ]] || continue
+    host="" ip="" extra=""
+    read -r host ip extra <<<"$line"
+    host=${host,,}
+    [[ -n $ip && -z $extra ]] || die "edge-routes: '$line' isn't '<hostname> <private IP>'"
+    [[ $host =~ $hre && ${#host} -le 253 ]] || die "edge-routes: '$host' isn't a hostname"
+    edge_private_ip "$ip" || die "edge-routes: $host: '$ip' isn't a private IPv4 address"
+    [[ -z ${seen[$host]:-} ]] || die "edge-routes: $host is listed twice"
+    seen[$host]=1
+    out+="$host $ip:$EDGE_UPSTREAM_PORT"$'\n'
+    n=$((n + 1)); (( n <= EDGE_ROUTES_MAX )) || die "edge-routes: more than $EDGE_ROUTES_MAX routes"
+  done < "$1"
+  printf '%s' "$out" | sort
+}
+
+# edge_site <apps domain> — the edge's one site: every app's name and the
+# apex, Cloudflare's origin certificate, only through our zone, then the route
+# table. A name with no route stops at the edge.
+edge_site() {
+  valid_domain "${1:-}"
+  cat <<EOF
+# managed by homeport — edit via \`homeportd edge-install\`
+*.$1, $1 {
+	tls $EDGE_DIR/origin.pem $EDGE_DIR/origin.key
+	import homeport_origin_auth
+	map {host} {homeport_upstream} {
+		import $EDGE_DIR/routes.map
+		default none
+	}
+	@homeport_unrouted vars {homeport_upstream} none
+	respond @homeport_unrouted "No app here" 404
+	reverse_proxy {homeport_upstream} {
+		header_up -X-Origin-Auth
+	}
+}
+EOF
+}
+
+# edge_only_snippet <edge CIDR|""> — on a host behind the edge, refuse every
+# request that doesn't come from it. Empty when the host has no edge.
+edge_only_snippet() {
+  printf '# managed by homeport — edit via `homeportd edge-from`\n(homeport_edge_only) {\n'
+  [[ -n ${1:-} ]] && printf '\t@homeport_not_edge not remote_ip %s\n\tabort @homeport_not_edge\n' "$1"
+  printf '}\n'
+}
+
+ensure_edge_only_snippet() {
+  [[ -d $CADDY_DIR && ! -f $EDGE_ONLY_FRAG ]] || return 0
+  edge_only_snippet "$(cat "$EDGE_FROM_FILE" 2>/dev/null)" > "$EDGE_ONLY_FRAG"
+}
+
+# edge_gate_decision <orig> — the control plane's certificate for the edge:
+# set its route table (on stdin) and nothing else.
+edge_gate_decision() { single_verb_gate_decision edge-routes "${1:-}"; }
+
+cmd_edge_gate() {
+  local orig=${1:-} d
+  d=$(edge_gate_decision "$orig")
+  gate_run "$d" "$orig" "this certificate may only set the edge's routes"
+}
+
+# cmd_edge_cert — the edge's origin certificate (Cloudflare Origin CA) on
+# stdin: the certificate, then its private key. Kept readable by Caddy alone.
+cmd_edge_cert() {
+  local in cert key
+  install -d -m 755 "$EDGE_DIR"
+  in=$(mktemp); cert=$(mktemp); key=$(mktemp)
+  head -c 65536 > "$in"
+  awk '/-----BEGIN CERTIFICATE-----/{c=1} c{print} /-----END CERTIFICATE-----/{c=0}' "$in" > "$cert"
+  awk '/-----BEGIN [A-Z ]*PRIVATE KEY-----/{k=1} k{print} /-----END [A-Z ]*PRIVATE KEY-----/{k=0}' "$in" > "$key"
+  rm -f "$in"
+  openssl x509 -noout -in "$cert" 2>/dev/null || { rm -f "$cert" "$key"; die "edge-cert: no certificate on stdin"; }
+  [[ $(openssl x509 -noout -pubkey -in "$cert" 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum) == \
+     $(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | sha256sum) ]] ||
+    { rm -f "$cert" "$key"; die "edge-cert: the key doesn't match the certificate"; }
+  install -o root -g caddy -m 640 "$cert" "$EDGE_DIR/origin.pem"
+  install -o root -g caddy -m 640 "$key" "$EDGE_DIR/origin.key"
+  rm -f "$cert" "$key"
+  echo "edge: origin certificate for $(openssl x509 -noout -subject -in "$EDGE_DIR/origin.pem" | sed 's/^subject=//'), until $(openssl x509 -noout -enddate -in "$EDGE_DIR/origin.pem" | cut -d= -f2)"
+  if [[ -f $EDGE_SITE_FRAG ]]; then caddy_validate || die "edge-cert: caddy rejected it"; systemctl reload caddy; fi
+}
+
+# cmd_edge_install <apps domain> — make this box the edge: its site, an empty
+# route table, and Caddy trusting the proxies the web firewall admits
+# (Cloudflare's ranges: lock it first with `homeport server firewall cloudflare`).
+cmd_edge_install() {
+  local d=${1:-}
+  valid_domain "$d"
+  [[ -s $EDGE_DIR/origin.pem && -s $EDGE_DIR/origin.key ]] ||
+    die "edge-install: no origin certificate yet - edge-cert first (the Cloudflare Origin CA certificate, then its key, on stdin)"
+  [[ -s $FIREWALL_WEB_FILE ]] ||
+    die "edge-install: lock 80/443 to Cloudflare first (homeport server firewall cloudflare): the edge trusts exactly those ranges"
+  [[ -f $EDGE_DIR/routes.map ]] || install -m 644 /dev/null "$EDGE_DIR/routes.map"
+  ensure_origin_auth_snippet
+  load_globals; GTRUSTED=$(paste -sd' ' "$FIREWALL_WEB_FILE"); save_globals; write_caddy_globals
+  edge_site "$d" > "$EDGE_SITE_FRAG"
+  caddy_validate || { rm -f "$EDGE_SITE_FRAG"; die "edge-install: caddy rejected the edge's config"; }
+  systemctl reload caddy
+  echo "edge: serving *.$d - routes come from the control plane (edge-routes)"
+}
+
+# cmd_edge_routes — the whole route table on stdin, checked, swapped in, Caddy
+# reloaded; a table Caddy rejects leaves the previous one serving.
+cmd_edge_routes() {
+  [[ -f $EDGE_SITE_FRAG ]] || die "edge-routes: this box isn't an edge (edge-install)"
+  local in table
+  in=$(mktemp)
+  head -c 33554432 > "$in"
+  table=$(edge_route_lines "$in") || { rm -f "$in"; exit 1; }
+  rm -f "$in"
+  { [[ -n $table ]] && printf '%s\n' "$table"; } > "$EDGE_DIR/routes.map.new" || true
+  chmod 644 "$EDGE_DIR/routes.map.new"
+  cp -p "$EDGE_DIR/routes.map" "$EDGE_DIR/routes.map.prev"
+  mv "$EDGE_DIR/routes.map.new" "$EDGE_DIR/routes.map"
+  if ! caddy_validate; then
+    mv "$EDGE_DIR/routes.map.prev" "$EDGE_DIR/routes.map"
+    die "edge-routes: caddy rejected the table; the previous one is still serving"
+  fi
+  systemctl reload caddy
+  echo "edge: $(grep -c . "$EDGE_DIR/routes.map" || true) routes"
+}
+
+# cmd_edge_from <edge CIDR | -> — put this host behind the edge: its web
+# firewall admits the edge alone, Caddy refuses anyone else and trusts the
+# edge's forwarded client address. "-" takes it out again.
+cmd_edge_from() {
+  local c=${1:-}
+  [[ $c == - ]] || valid_cidr "$c" || die "edge-from: '$c' isn't a CIDR (the edge's private address, e.g. 10.116.0.3/32)"
+  load_globals
+  if [[ $c == - ]]; then
+    rm -f "$EDGE_FROM_FILE"; GTRUSTED=""
+    edge_only_snippet "" > "$EDGE_ONLY_FRAG"
+    cmd_firewall_clear
+  else
+    printf '%s\n' "$c" > "$EDGE_FROM_FILE"; GTRUSTED=$c
+    edge_only_snippet "$c" > "$EDGE_ONLY_FRAG"
+    printf '%s\n' "$c" | cmd_firewall_set
+  fi
+  save_globals; write_caddy_globals
+  caddy_validate || die "edge-from: caddy rejected the config"
+  systemctl reload caddy
+  [[ $c == - ]] && echo "edge: this host serves the internet directly again" || echo "edge: this host serves only $c"
+}
+
+# ---------------------------------------------------------------------------
 # Web-ingress firewall — restrict ports 80/443 to a set of CIDR ranges (e.g.
 # Cloudflare's published IPs) so a known origin IP can't be hit directly,
 # bypassing the edge's WAF/DDoS protection. Declarative: the uploaded list IS
@@ -2400,7 +2580,7 @@ CADDY_GLOBALS_STATE=/etc/homeport/caddy-globals
 CADDY_GLOBALS_FRAG=$CADDY_DIR/00-globals.caddy
 
 load_globals() {
-  GDNS_PROVIDER="" GDNS_ENV="" GECH=""
+  GDNS_PROVIDER="" GDNS_ENV="" GECH="" GTRUSTED=""
   # shellcheck disable=SC1090
   [[ -f $CADDY_GLOBALS_STATE ]] && source "$CADDY_GLOBALS_STATE"
   return 0
@@ -2411,6 +2591,7 @@ save_globals() {
 GDNS_PROVIDER=$GDNS_PROVIDER
 GDNS_ENV=$GDNS_ENV
 GECH=$GECH
+GTRUSTED="$GTRUSTED"
 EOF
 }
 
@@ -2436,6 +2617,9 @@ write_caddy_globals() {
       fi
     fi
     [[ -n $GECH ]] && printf '\tech %s\n' "$GECH"
+    # the proxies in front (Cloudflare, or the edge): their forwarded client
+    # address is believed, so apps see the visitor's
+    [[ -n ${GTRUSTED:-} ]] && printf '\tservers {\n\t\ttrusted_proxies static %s\n\t}\n' "$GTRUSTED"
     printf '}\n'
   } > "$CADDY_GLOBALS_FRAG"
 }
@@ -4263,6 +4447,11 @@ main() {
     meter-read)  cmd_meter_read "$@" ;;
     meter-ack)   cmd_meter_ack "$@" ;;
     meter-gate)  cmd_meter_gate "$@" ;;
+    edge-gate)   cmd_edge_gate "$@" ;;
+    edge-cert)    cmd_edge_cert "$@" ;;
+    edge-install) cmd_edge_install "$@" ;;
+    edge-routes)  cmd_edge_routes "$@" ;;
+    edge-from)    cmd_edge_from "$@" ;;
     build-gate)  cmd_build_gate "$@" ;;
     build-run)   cmd_build_run "$@" ;;
     builder-install) cmd_builder_install "$@" ;;
