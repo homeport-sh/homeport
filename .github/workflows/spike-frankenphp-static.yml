@@ -60,10 +60,10 @@ jobs:
       - name: run it
         run: |
           set -euo pipefail
-          bin=$(ls out/frankenphp-linux-*)
-          chmod +x "$bin"
-          "$bin" version || true
-          ( "$bin" php-server --listen 127.0.0.1:8080 --root public > /tmp/server.log 2>&1 & )
+          cp out/frankenphp-linux-* ./app   # docker left it root-owned
+          chmod +x ./app
+          ./app version || true
+          ( ./app php-server --listen 127.0.0.1:8080 > /tmp/server.log 2>&1 & )
           sleep 5
           echo "GET /      -> $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)"
           echo "GET /spike -> $(curl -s http://127.0.0.1:8080/spike)"
