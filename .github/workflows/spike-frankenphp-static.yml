@@ -69,27 +69,43 @@ jobs:
             gocache
             gomod
           key: frankenphp-base-v2-${{ hashFiles('.github/workflows/spike-frankenphp-static.yml') }}-v2
-      - name: per app (our builder's cap) - embed and link only
+      - name: per app (our builder's cap) - embed and link only, xcaddy directly
         run: |
           set -euo pipefail
           printf "\nRoute::get('/spike', fn () => 'rebuilt');\n" >> demo/routes/web.php
+          cat > link.sh <<'SH'
+          set -euo pipefail
+          S=/go/src/app/dist/static-php-cli
+          cd /go/src/app                                   # FrankenPHP's source
+          # what --with-frankenphp-app does: the app as app.tar, and its md5
+          tar -cf app.tar -C /app .
+          md5sum app.tar | cut -d' ' -f1 > app.checksum
+          echo "app.tar $(du -h app.tar | cut -f1)"
+          export PATH=$S/pkgroot/x86_64-linux/go-xcaddy/bin:$S/pkgroot/x86_64-linux/bin:$S/buildroot/bin:$PATH
+          export GOROOT=$S/pkgroot/x86_64-linux/go-xcaddy
+          cd $S
+          INC=$(./spc spc-config "$EXTS" --with-libs="$LIBS" --includes 2>/dev/null | tail -1)
+          LNK=$(./spc spc-config "$EXTS" --with-libs="$LIBS" --libs 2>/dev/null | tail -1)
+          echo "includes: ${INC:0:150}"; echo "libs: ${LNK:0:300}"
+          DYN=$S/buildroot/lib/libphp.a.dynsym
+          [[ -f $DYN ]] && DYNARG="-Wl,--dynamic-list=$DYN" || DYNARG=""
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="$INC -fPIE -fstack-protector-strong -O2 -w -s -DFRANKENPHP_VERSION=1.12.7"
+          export CGO_LDFLAGS="-static-pie $LNK"
+          export LD_LIBRARY_PATH=$S/buildroot/lib
+          export XCADDY_GO_BUILD_FLAGS="-buildmode=pie -ldflags \"-linkmode=external -extldflags '-static-pie -Wl,-z,stack-size=0x80000 $DYNARG' -X 'github.com/caddyserver/caddy/v2.CustomBinaryName=frankenphp'\" -tags=static_build,nobadger,nomysql,nopgx,deprecated_topic,deprecated_claim"
+          cd $S/buildroot/lib
+          rm -f frankenphp
+          eval "$(cat $S/link/xcaddy.cmd)"
+          cp frankenphp /out/app
+          SH
           : > /tmp/mem.log
           start=$(date +%s)
           docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
             -v "$PWD/spc:/go/src/app/dist/static-php-cli" -v "$PWD/demo:/app:ro" -v "$PWD/out:/out" \
-            -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" \
-            -e EXTS -e LIBS "$IMAGE" bash -c '
-              set -e
-              export FRANKENPHP_SOURCE_PATH=/go/src/app SPC_DEFAULT_C_FLAGS="-fPIC -O2"
-              export SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS="-fPIE -fstack-protector-strong -O2 -w -s"
-              export SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES="--with github.com/dunglas/mercure/caddy --with github.com/dunglas/vulcain/caddy --with github.com/dunglas/caddy-cbrotli"
-              cd dist/static-php-cli
-              rm -f buildroot/bin/frankenphp   # a build that does nothing must not pass off the base as its output
-              ./spc build --enable-zts --build-frankenphp --disable-opcache-jit \
-                --with-config-file-path=/etc/frankenphp --with-config-file-scan-dir=/etc/frankenphp/php.d \
-                --with-frankenphp-app=/app "$EXTS" --with-libs="$LIBS" > /out/perapp.log 2>&1
-              cp buildroot/bin/frankenphp /out/app' || { echo "--- spc said:"; grep -v "^\s*$" out/perapp.log | tail -40; exit 1; }
-          grep -E "building|Building|xcaddy build|Extracting php-src|buildconf|libtool --silent.*--mode=link" out/perapp.log | cut -c1-120 | head -20 || true
+            -v "$PWD/gocache:/root/.cache/go-build" -v "$PWD/gomod:/go/pkg/mod" -v "$PWD/link.sh:/link.sh:ro" \
+            -e EXTS -e LIBS "$IMAGE" bash /link.sh 2>&1 | grep -v '^\s*$' | tail -40
+          [[ -f out/app ]] || { echo "no binary"; exit 1; }
           echo "PER-APP: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used, binary $(du -h out/app | cut -f1)"
 
       - name: run it like a deploy
