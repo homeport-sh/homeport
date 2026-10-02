@@ -55,6 +55,8 @@ jobs:
       # As root so the "another local user is refused" case runs too.
       - name: admin API off TCP, against real caddy
         run: sudo REQUIRE_CADDY=1 bash test/caddy_admin_test.sh
+      - name: the edge and a host behind it (real Caddy)
+        run: sudo REQUIRE_CADDY=1 bash test/edge_caddy_test.sh
 
   # sandbox: gvisor, end to end on a real kernel: deploys a probe app through
   # homeportd and attacks the sandbox from inside. Its own job — it installs

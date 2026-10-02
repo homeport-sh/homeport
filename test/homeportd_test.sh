@@ -1031,6 +1031,60 @@ has "process unit (gvisor): the app's journal" "$psu" "LogNamespace=hp-web"
 psn=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX= limits= RUN='artisan queue:work' emit_service_body 30002 worker)
 has "process unit (native): its args"          "$psn" "ExecStart=/opt/homeport/web/current/bin artisan queue:work"
 
+# --- the edge: one wildcard in front of every host -------------------------
+# the route table: "<hostname> <host private IP>" lines - checked, sorted, one
+# address per name; only private addresses (never loopback, the metadata
+# service, or anywhere public), always the host's port 80
+et=$(mktemp -d)
+rl() { printf '%s\n' "$@" > "$et/routes"; (edge_route_lines "$et/routes") 2>/dev/null || echo deny; }
+eq "edge routes: normalized and sorted" "$(rl 'Blog.homeport.run 10.0.0.5' 'api.homeport.run 10.116.0.9')" \
+  $'api.homeport.run 10.116.0.9:80\nblog.homeport.run 10.0.0.5:80'
+eq "edge routes: 172.16/12 and 192.168/16" "$(rl 'a.homeport.run 172.31.2.3' 'b.homeport.run 192.168.1.1')" \
+  $'a.homeport.run 172.31.2.3:80\nb.homeport.run 192.168.1.1:80'
+printf '' > "$et/routes"; eq "edge routes: none yet is a table" "$( (edge_route_lines "$et/routes") 2>/dev/null || echo deny)" ""
+for bad in 'a.homeport.run 1.2.3.4' 'a.homeport.run 127.0.0.1' 'a.homeport.run 169.254.169.254' 'a.homeport.run 172.32.0.1' \
+           'a.homeport.run 10.0.0.5:22' 'a b 10.0.0.5' '-a.homeport.run 10.0.0.5' 'a.homeport.run 10.0.0.5 extra' \
+           'a.homeport.run 10.0.0.256' 'a.homeport.run' $'a.homeport.run 10.0.0.5\na.homeport.run 10.0.0.6'; do
+  eq "edge routes: refuse [${bad//$'\n'/|}]" "$(rl "$bad")" "deny"
+done
+rm -rf "$et"
+
+EDGE_DIR=/etc/homeport/edge
+site=$(edge_site homeport.run)
+has "edge site: the wildcard and the apex"        "$site" "*.homeport.run, homeport.run {"
+has "edge site: Cloudflare's origin certificate"  "$site" "tls $EDGE_DIR/origin.pem $EDGE_DIR/origin.key"
+has "edge site: only through our Cloudflare zone" "$site" "import homeport_origin_auth"
+has "edge site: the route table"                  "$site" "import $EDGE_DIR/routes.map"
+has "edge site: an unknown name stops here"       "$site" 'respond @homeport_unrouted "No app here" 404'
+eq  "edge site: a bad domain is refused"          "$( (edge_site 'not a domain') 2>/dev/null || echo deny)" "deny"
+
+eg() { edge_gate_decision "$1"; }
+has "edge-gate: the route table"      "$(eg "sudo $hd edge-routes")"    "allow"
+has "edge-gate: no arguments"         "$(eg "sudo $hd edge-routes x")"  "deny"
+has "edge-gate: nothing else"         "$(eg "sudo $hd edge-cert")"      "deny"
+has "edge-gate: not a shell"          "$(eg "")"                        "deny"
+
+# a host behind the edge: its apps serve plain HTTP, to the edge alone
+eo=$(edge_only_snippet 10.116.0.3/32)
+has "edge-only: anyone else is refused" "$eo" "not remote_ip 10.116.0.3/32"
+has "edge-only: …by aborting"           "$eo" "abort @homeport_not_edge"
+eq  "edge-only: unset is an empty snippet" "$(edge_only_snippet '')" $'# managed by homeport — edit via `homeportd edge-from`\n(homeport_edge_only) {\n}'
+CADDY_DIR=$(mktemp -d); TLS_MODE=edge ALIASES="" HEADERS_B64="" REDIRECT_FROM=""
+write_caddy shop shop.homeport.run 8120 plain 1
+eb=$(cat "$CADDY_DIR/shop.caddy")
+has "behind the edge: plain HTTP, TLS ended upstream" "$eb" "http://shop.homeport.run {"
+has "behind the edge: the edge alone"                 "$eb" "import homeport_edge_only"
+if [[ $eb == *"tls "* ]]; then echo "FAIL behind the edge: a tls directive"; fails=$((fails + 1)); else echo "ok   behind the edge: no tls directive"; fi
+TLS_MODE=""; rm -rf "$CADDY_DIR"
+
+# the proxies Caddy trusts for the visitor's address
+CADDY_DIR=$(mktemp -d); CADDY_GLOBALS_FRAG=$CADDY_DIR/00-globals.caddy
+GDNS_PROVIDER="" GECH="" GTRUSTED="173.245.48.0/20 10.116.0.3/32" write_caddy_globals
+has "globals: trusted proxies" "$(cat "$CADDY_GLOBALS_FRAG")" "trusted_proxies static 173.245.48.0/20 10.116.0.3/32"
+GTRUSTED="" write_caddy_globals
+if grep -q trusted_proxies "$CADDY_GLOBALS_FRAG"; then echo "FAIL globals: trusted proxies when none"; fails=$((fails + 1)); else echo "ok   globals: none trusted by default"; fi
+rm -rf "$CADDY_DIR"
+
 echo "----"
 if (( fails > 0 )); then echo "$fails bash test(s) FAILED"; exit 1; fi
 echo "all bash tests passed"
