@@ -997,6 +997,32 @@ eq "meter_record: processes billed at their own size" "$(meter_record 1 0 60 web
   rm -rf "$sysd"
 )
 
+# status --json reports each process: its state, and how often it restarted
+if command -v jq >/dev/null; then
+(
+  systemctl() {
+    case "$1 $2" in
+      "is-active homeport-web_worker") echo active ;;
+      "is-active homeport-web_ticker") echo activating ;;
+      "is-active"*) echo active ;;
+      "show homeport-web_ticker") echo 7 ;;
+      "show"*) echo 0 ;;
+    esac
+  }
+  HOMEPORT_ROOT=$(mktemp -d); mkdir -p "$HOMEPORT_ROOT/web/releases/r1"; ln -s releases/r1 "$HOMEPORT_ROOT/web/current"
+  APP=web PORT=8100 DOMAIN=web.example.com REPLICAS=1 IDLE="" AUTOSCALE_MAX="" STATIC=""
+  PROCESSES_B64=$(b64 $'worker - - work\nticker 128M - tick')
+  sj=$(status_json_one web)
+  eq "status: still JSON"                "$(jq -r .app <<<"$sj")" "web"
+  eq "status: each process, by name"     "$(jq -r '[.processes[].name] | join(" ")' <<<"$sj")" "ticker worker"
+  eq "status: a process's state"         "$(jq -r '.processes[] | select(.name=="worker") | .state' <<<"$sj")" "active"
+  eq "status: …and its restarts"         "$(jq -r '.processes[] | select(.name=="ticker") | "\(.state) \(.restarts)"' <<<"$sj")" "activating 7"
+  PROCESSES_B64=""
+  eq "status: no processes is an empty list" "$(status_json_one web | jq -c .processes)" "[]"
+  rm -rf "$HOMEPORT_ROOT"
+)
+fi
+
 # a process unit: the app's body, its own ExecStart and limits
 psu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits=$'MemoryMax=128M' emit_service_body 30001 scheduler)
 has "process unit (gvisor): its own sandbox"   "$psu" "ExecStart=/usr/local/bin/homeportd sandbox-run web 30001 scheduler"

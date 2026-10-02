@@ -246,6 +246,8 @@ done
 eq  "a process gets its own memory limit"        "$(systemctl show homeport-probe-jobs_ticker -p MemoryMax --value)" "$(( 128 * 1024 * 1024 ))"
 eq  "…or the app's"                              "$(systemctl show homeport-probe-jobs_worker -p MemoryMax --value)" "$(( 256 * 1024 * 1024 ))"
 has "status lists the processes"                 "$("$HD" status probe-jobs)" "process:  worker (active)"
+sjj=$(cg probe-jobs "status probe-jobs --json")
+eq  "status --json, through the app's certificate" "$(jq -r '[.processes[] | "\(.name)=\(.state)"] | join(" ")' <<<"$sjj")" "ticker=active worker=active"
 has "a process's output is in the app's journal" "$(cg probe-jobs "logs-read probe-jobs - 500")" "beat ticker"
 
 # billed at their own sizes: the ticker's 128M makes the app's MB·ms less
