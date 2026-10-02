@@ -2245,9 +2245,14 @@ edge_ask_ok() { [[ ${1:-} =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._
 # name: a customer's own domain, straight from the visitor, a certificate on
 # demand for a name the control plane says is someone's. One route table for
 # both; a name with no route stops at the edge.
+#
+# Apps on the wildcard are different customers': an app's cookie for the
+# whole apps' domain would reach every other app, so the edge drops that
+# Domain and the cookie stays the app's own.
 edge_site() {
   valid_domain "${1:-}"
   edge_ask_ok "${2:-}" || die "edge: the ask URL must be https, got '${2:-}'"
+  local apps=${1//./\\.}
   cat <<EOF
 # managed by homeport — edit via \`homeportd edge-install\`
 (homeport_edge_route) {
@@ -2259,6 +2264,7 @@ edge_site() {
 	respond @homeport_unrouted "No app here" 404
 	reverse_proxy {homeport_upstream} {
 		header_up -X-Origin-Auth
+		header_down Set-Cookie "(?i);\\s*domain=\\.?$apps\\s*(;|\$)" "\$1"
 	}
 }
 
