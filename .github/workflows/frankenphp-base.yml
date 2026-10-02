@@ -49,8 +49,8 @@ jobs:
               -e HOME=/tmp -e HOMEPORT_FRANKENPHP_PGO="$2" -v "$PWD/demo:/app" -v "$PWD/out:/out" -w /app "$IMAGE:$TAG" \
               bash -c 'set -e
                 t0=$(date +%s); composer install --no-dev --optimize-autoloader --no-interaction 2>&1 | tail -30
-                t1=$(date +%s); composer check-platform-reqs --no-dev --quiet
-                t2=$(date +%s); frankenphp-embed /app /out/app 2>/dev/null
+                t1=$(date +%s); composer check-platform-reqs --no-dev 2>&1 | grep -v " success" | tail -15
+                t2=$(date +%s); frankenphp-embed /app /out/app 2>&1 | tail -25
                 t3=$(date +%s); echo "  composer install $((t1-t0))s, extension check $((t2-t1))s, embed + link $((t3-t2))s"'
             echo "$1: $(( $(date +%s) - start ))s, binary $(du -h out/app | cut -f1)"
           }
