@@ -49,7 +49,8 @@ jobs:
       - name: rebuild after an app change (PHP cache reused)
         run: |
           set -euo pipefail
-          echo "<?php Route::get('/spike', fn () => 'rebuilt');" >> demo/routes/web.php
+          # routes/web.php already opens with <?php: append a route, not a second tag
+          printf "\nRoute::get('/spike', fn () => 'rebuilt');\n" >> demo/routes/web.php
           : > /tmp/mem.log
           start=$(date +%s)
           docker run --rm --cpus=2 --memory=4g --memory-swap=4g \
