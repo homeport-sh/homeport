@@ -4571,6 +4571,10 @@ main() {
   [[ $(id -u) -eq 0 ]] || die "run as root (ssh root@your-server, or use as Hetzner user data)"
   command -v apt-get >/dev/null || die "this script supports Ubuntu/Debian only"
 
+  # what this installs is read by system users (apt checks signatures as
+  # _apt, Caddy reads its config as caddy): an inherited strict umask (cloud
+  # user data, homeport's first boot) would leave them root-only
+  umask 022
   export DEBIAN_FRONTEND=noninteractive
   # a fresh cloud box runs its own package updates at first boot and holds
   # apt's lock for minutes: wait for it (every apt-get after this, homeportd's
