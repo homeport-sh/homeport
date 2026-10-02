@@ -42,6 +42,10 @@ type planProcess struct {
 	CPU    string `json:"cpu,omitempty"`
 }
 
+// frankenphpImage is homeport's FrankenPHP base (images/frankenphp): PHP
+// 8.5 with the standard extensions, compiled once, FrankenPHP 1.12.7.
+const frankenphpImage = "ghcr.io/homeport-sh/frankenphp:8.5-1.12.7"
+
 var (
 	versionRe = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,4}){0,2}$`)
 	imageRe   = regexp.MustCompile(`^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9._-]{1,128})?(@sha256:[0-9a-f]{64})?$`)
@@ -111,6 +115,25 @@ func planBuild(dir string) (buildPlan, error) {
 			return buildPlan{}, errors.New("build.image needs a build.command: what to run in it")
 		}
 		p.Toolchain, p.Image = "custom", cfg.Build.Image
+	case exists(dir, "composer.json"):
+		// PHP: on homeport's FrankenPHP base, where PHP is compiled already.
+		// The platform check comes first (seconds), then composer, then
+		// the front-end assets if the app builds any, and the app is embedded.
+		if !exists(dir, "composer.lock") {
+			return buildPlan{}, errors.New("composer.json without composer.lock: commit the lockfile, so the build installs what you tested")
+		}
+		p.Toolchain, p.Image = "php", frankenphpImage
+		p.Install = "composer check-platform-reqs --no-dev --lock && composer install --no-dev --optimize-autoloader --no-interaction"
+		if exists(dir, "package.json") && hasScript(dir, "build") {
+			if exists(dir, "bun.lock") || exists(dir, "bun.lockb") {
+				p.Install += " && bun install --frozen-lockfile && bun run build"
+			} else {
+				p.Install += " && bun install && bun run build"
+			}
+		}
+		if p.Command == "" {
+			p.Command = "frankenphp-embed . " + p.Artifact
+		}
 	case exists(dir, "go.mod"):
 		v, err := goVersion(dir)
 		if err != nil {
@@ -148,7 +171,7 @@ func planBuild(dir string) (buildPlan, error) {
 			p.Command = "npm run build"
 		}
 	default:
-		return buildPlan{}, errors.New("can't tell how to build this repository: no go.mod, no bun or npm lockfile; " +
+		return buildPlan{}, errors.New("can't tell how to build this repository: no go.mod, composer.json, or bun or npm lockfile; " +
 			"set build.image and build.command in homeport.yaml")
 	}
 	return p, nil
@@ -178,6 +201,18 @@ func goVersion(dir string) (string, error) {
 
 // packageManager is the version in package.json's "packageManager":
 // "<name>@<version>", or "".
+// hasScript reports whether package.json defines the named script.
+func hasScript(dir, name string) bool {
+	b, err := readSmall(dir, "package.json")
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	return json.Unmarshal(b, &pkg) == nil && pkg.Scripts[name] != ""
+}
+
 func packageManager(dir, name string) string {
 	b, err := readSmall(dir, "package.json")
 	if err != nil {
