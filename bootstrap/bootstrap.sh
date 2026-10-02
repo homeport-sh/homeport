@@ -2237,16 +2237,20 @@ edge_route_lines() {
   printf '%s' "$out" | sort
 }
 
-# edge_site <apps domain> — the edge's one site: every app's name and the
-# apex, Cloudflare's origin certificate, only through our zone, then the route
-# table. A name with no route stops at the edge.
+# edge_ask_ok <url> — the control plane's on_demand_tls ask: a plain https URL.
+edge_ask_ok() { [[ ${1:-} =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]]; }
+
+# edge_site <apps domain> <ask URL> — the edge's sites. Our wildcard (and the
+# apex): Cloudflare's origin certificate, only through our zone. Any other
+# name: a customer's own domain, straight from the visitor, a certificate on
+# demand for a name the control plane says is someone's. One route table for
+# both; a name with no route stops at the edge.
 edge_site() {
   valid_domain "${1:-}"
+  edge_ask_ok "${2:-}" || die "edge: the ask URL must be https, got '${2:-}'"
   cat <<EOF
 # managed by homeport — edit via \`homeportd edge-install\`
-*.$1, $1 {
-	tls $EDGE_DIR/origin.pem $EDGE_DIR/origin.key
-	import homeport_origin_auth
+(homeport_edge_route) {
 	map {host} {homeport_upstream} {
 		import $EDGE_DIR/routes.map
 		default none
@@ -2256,6 +2260,19 @@ edge_site() {
 	reverse_proxy {homeport_upstream} {
 		header_up -X-Origin-Auth
 	}
+}
+
+*.$1, $1 {
+	tls $EDGE_DIR/origin.pem $EDGE_DIR/origin.key
+	import homeport_origin_auth
+	import homeport_edge_route
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	import homeport_edge_route
 }
 EOF
 }
@@ -2274,8 +2291,9 @@ ensure_edge_only_snippet() {
 }
 
 # edge_gate_decision <orig> — the control plane's certificate for the edge:
-# set it up (edge-cert, on stdin; edge-install <domain>) and keep its route
-# table (edge-routes, on stdin) - nothing else.
+# set it up (edge-cert, edge-trust and origin-auth-set, on stdin;
+# edge-install <domain> <ask URL>) and keep its route table (edge-routes, on
+# stdin) - nothing else.
 edge_gate_decision() {
   local orig=${1:-}
   [[ -n $orig ]] || { echo "deny interactive access is not permitted"; return; }
@@ -2284,9 +2302,9 @@ edge_gate_decision() {
   [[ -n $off ]] || { echo "deny may only run homeportd"; return; }
   local n=$(( ${#a[@]} - off ))
   case ${a[off]:-} in
-    edge-routes|edge-cert) (( n == 1 )) && { echo "allow $off"; return; } ;;
+    edge-routes|edge-cert|edge-trust|origin-auth-set) (( n == 1 )) && { echo "allow $off"; return; } ;;
     edge-install)
-      if (( n == 2 )) && [[ ${a[off+1]} =~ ^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$ && ${a[off+1]} == *.* ]]; then
+      if (( n == 3 )) && [[ ${a[off+1]} =~ ^[a-z0-9]([a-z0-9.-]{0,250}[a-z0-9])?$ && ${a[off+1]} == *.* ]] && edge_ask_ok "${a[off+2]}"; then
         echo "allow $off"; return
       fi ;;
   esac
@@ -2320,23 +2338,44 @@ cmd_edge_cert() {
   if [[ -f $EDGE_SITE_FRAG ]]; then caddy_validate || die "edge-cert: caddy rejected it"; systemctl reload caddy; fi
 }
 
-# cmd_edge_install <apps domain> — make this box the edge: its site, an empty
-# route table, and Caddy trusting the proxies the web firewall admits
-# (Cloudflare's ranges: lock it first with `homeport server firewall cloudflare`).
+# cmd_edge_install <apps domain> <ask URL> — make this box the edge: its
+# sites, an empty route table, and Caddy asking the control plane before it
+# gets a certificate for a customer's domain. The web stays open (customers'
+# domains come straight here, and their certificates need it); our wildcard
+# is guarded by origin auth (origin-auth-set) and the proxies Caddy trusts
+# for the visitor's address are Cloudflare's (edge-trust).
 cmd_edge_install() {
-  local d=${1:-}
+  local d=${1:-} ask=${2:-}
   valid_domain "$d"
+  edge_ask_ok "$ask" || die "edge-install: the ask URL must be https, got '$ask'"
   [[ -s $EDGE_DIR/origin.pem && -s $EDGE_DIR/origin.key ]] ||
     die "edge-install: no origin certificate yet - edge-cert first (the Cloudflare Origin CA certificate, then its key, on stdin)"
-  [[ -s $FIREWALL_WEB_FILE ]] ||
-    die "edge-install: lock 80/443 to Cloudflare first (homeport server firewall cloudflare): the edge trusts exactly those ranges"
   [[ -f $EDGE_DIR/routes.map ]] || install -m 644 /dev/null "$EDGE_DIR/routes.map"
   ensure_origin_auth_snippet
-  load_globals; GTRUSTED=$(paste -sd' ' "$FIREWALL_WEB_FILE"); save_globals; write_caddy_globals
-  edge_site "$d" > "$EDGE_SITE_FRAG"
+  origin_auth_on || echo "edge: warning - origin auth is off: anyone can reach *.$d without Cloudflare (origin-auth-set)" >&2
+  load_globals; GASK=$ask; save_globals; write_caddy_globals
+  edge_site "$d" "$ask" > "$EDGE_SITE_FRAG"
   caddy_validate || { rm -f "$EDGE_SITE_FRAG"; die "edge-install: caddy rejected the edge's config"; }
   systemctl reload caddy
-  echo "edge: serving *.$d - routes come from the control plane (edge-routes)"
+  echo "edge: serving *.$d and customers' domains - routes come from the control plane (edge-routes)"
+}
+
+# cmd_edge_trust — the proxies whose forwarded client address Caddy believes
+# (Cloudflare's ranges), on stdin, one CIDR a line.
+cmd_edge_trust() {
+  local line cidrs=()
+  while IFS= read -r line; do
+    line=${line%%#*}; line=${line//[[:space:]]/}
+    [[ -n $line ]] || continue
+    valid_cidr "$line" || die "edge-trust: invalid CIDR '$line'"
+    cidrs+=("$line")
+    (( ${#cidrs[@]} <= 200 )) || die "edge-trust: too many ranges (max 200)"
+  done < <(head -c 65536)
+  (( ${#cidrs[@]} >= 1 )) || die "edge-trust: no CIDR ranges on stdin"
+  load_globals; GTRUSTED="${cidrs[*]}"; save_globals; write_caddy_globals
+  caddy_validate || die "edge-trust: caddy rejected the config"
+  systemctl reload caddy
+  echo "edge: trusting ${#cidrs[@]} proxy range(s) for the visitor's address"
 }
 
 # cmd_edge_routes — the whole route table on stdin, checked, swapped in, Caddy
@@ -2596,7 +2635,7 @@ CADDY_GLOBALS_STATE=/etc/homeport/caddy-globals
 CADDY_GLOBALS_FRAG=$CADDY_DIR/00-globals.caddy
 
 load_globals() {
-  GDNS_PROVIDER="" GDNS_ENV="" GECH="" GTRUSTED=""
+  GDNS_PROVIDER="" GDNS_ENV="" GECH="" GTRUSTED="" GASK=""
   # shellcheck disable=SC1090
   [[ -f $CADDY_GLOBALS_STATE ]] && source "$CADDY_GLOBALS_STATE"
   return 0
@@ -2608,6 +2647,7 @@ GDNS_PROVIDER=$GDNS_PROVIDER
 GDNS_ENV=$GDNS_ENV
 GECH=$GECH
 GTRUSTED="$GTRUSTED"
+GASK="$GASK"
 EOF
 }
 
@@ -2636,6 +2676,9 @@ write_caddy_globals() {
     # the proxies in front (Cloudflare, or the edge): their forwarded client
     # address is believed, so apps see the visitor's
     [[ -n ${GTRUSTED:-} ]] && printf '\tservers {\n\t\ttrusted_proxies static %s\n\t}\n' "$GTRUSTED"
+    # a customer's domain gets a certificate only if the control plane says
+    # it's someone's (the edge) - never for any name pointed at us
+    [[ -n ${GASK:-} ]] && printf '\ton_demand_tls {\n\t\task %s\n\t}\n' "$GASK"
     printf '}\n'
   } > "$CADDY_GLOBALS_FRAG"
 }
@@ -4468,6 +4511,7 @@ main() {
     edge-install) cmd_edge_install "$@" ;;
     edge-routes)  cmd_edge_routes "$@" ;;
     edge-from)    cmd_edge_from "$@" ;;
+    edge-trust)   cmd_edge_trust "$@" ;;
     build-gate)  cmd_build_gate "$@" ;;
     build-run)   cmd_build_run "$@" ;;
     builder-install) cmd_builder_install "$@" ;;

@@ -17,6 +17,7 @@ work=$(mktemp -d)
 HOSTIP=10.99.0.1
 cleanup() {
   [[ -n ${caddy_pid:-} ]] && kill "$caddy_pid" 2>/dev/null || true
+  [[ -n ${ask_pid:-} ]] && kill "$ask_pid" 2>/dev/null || true
   ip addr del "$HOSTIP/32" dev lo 2>/dev/null || true
   rm -rf "$work"
 }
@@ -44,18 +45,34 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -su
   -addext "subjectAltName=DNS:*.homeport.test,DNS:homeport.test" \
   -keyout "$EDGE_DIR/origin.key" -out "$EDGE_DIR/origin.pem" 2>/dev/null
 origin_auth_snippet "s3cret" > "$ORIGIN_AUTH_FRAG"
-edge_site homeport.test > "$EDGE_SITE_FRAG"
-printf 'shop.homeport.test %s\n' "$HOSTIP" > "$work/routes"
+# the control plane's ask: yes for shop.example (a customer's verified
+# domain), no for anything else
+ASK_PORT=18602
+python3 - "$ASK_PORT" >"$work/ask.log" 2>&1 <<'ASK' & ask_pid=$!
+import sys, http.server, urllib.parse
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        self.send_response(200 if q.get("domain") == ["shop.example"] else 404)
+        self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+ASK
+edge_site homeport.test "https://ask.invalid/v1/edge/ask" | sed "s#https://ask.invalid/v1/edge/ask#http://127.0.0.1:$ASK_PORT/ask#" > "$EDGE_SITE_FRAG"
+printf 'shop.homeport.test %s\nshop.example %s\nother.example %s\n' "$HOSTIP" "$HOSTIP" "$HOSTIP" > "$work/routes"
 edge_route_lines "$work/routes" > "$EDGE_DIR/routes.map"
 # --- the host behind it, as edge-from and an app's add write it
 printf '%s/32\n' "$HOSTIP" > "$EDGE_FROM_FILE"
 edge_only_snippet "$HOSTIP/32" > "$EDGE_ONLY_FRAG"
-SANDBOX="" TLS_MODE=edge ALIASES="" HEADERS_B64="" REDIRECT_FROM=""
+SANDBOX="" TLS_MODE=edge ALIASES="shop.example" HEADERS_B64="" REDIRECT_FROM=""
 app_addr() { echo 127.0.0.1; }
 write_caddy shop shop.homeport.test "$APP_PORT" plain 1
 # one process is both, so it trusts both proxies in front: the visitor's own
 # hop (here 127.0.0.1, in production Cloudflare) and the edge
-GDNS_PROVIDER="" GECH="" GTRUSTED="127.0.0.1/32 $HOSTIP/32" CADDY_ADMIN_SOCK=$work/admin.sock write_caddy_globals
+GDNS_PROVIDER="" GECH="" GTRUSTED="127.0.0.1/32 $HOSTIP/32" GASK="http://127.0.0.1:$ASK_PORT/ask" CADDY_ADMIN_SOCK=$work/admin.sock write_caddy_globals
+# certificates from Caddy's own CA, not Let's Encrypt: the test is about
+# which names get one, not ACME
+sed -i 's#^{$#{\n\tlocal_certs#' "$CADDY_GLOBALS_FRAG"
 # the app: says who the visitor was
 printf 'http://:%s {\n\trespond "app sees {header.X-Forwarded-For} via {header.X-Forwarded-Proto} auth[{header.X-Origin-Auth}]"\n}\n' "$APP_PORT" > "$CADDY_DIR/zz-app.caddy"
 printf 'import %s/*.caddy\n' "$CADDY_DIR" > "$CADDYFILE"
@@ -79,6 +96,14 @@ got=$(edge shop.homeport.test -H 'X-Origin-Auth: s3cret' -H 'X-Forwarded-For: 20
 [[ $got == *"auth[]"* ]] && ok "the app never receives the origin-auth header" || fail "the app saw origin auth: [$got]"
 hdrs=$(edge shop.homeport.test -H 'X-Origin-Auth: s3cret' -D - -o /dev/null)
 [[ ${hdrs,,} != *x-origin-auth* && $hdrs != *s3cret* ]] && ok "no response carries it back" || fail "a response header carried it: $hdrs"
+# a customer's own domain: straight from the visitor (no origin auth), a
+# certificate on demand because the control plane said yes, the same routes
+got=$(edge shop.example)
+[[ $got == "app sees "*" via https auth[]" ]] \
+  && ok "a customer's verified domain gets a certificate and reaches its app ($got)" \
+  || fail "customer domain: got [$got]"
+eq "a name the control plane doesn't know gets no certificate" \
+  "$(edge other.example -o /dev/null -w '%{http_code}' || true)" "000"
 eq "an unknown name stops at the edge" \
   "$(edge nope.homeport.test -H 'X-Origin-Auth: s3cret' -w ' %{http_code}')" "No app here 404"
 eq "not through our Cloudflare zone: refused" \

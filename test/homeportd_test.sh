@@ -1050,13 +1050,21 @@ done
 rm -rf "$et"
 
 EDGE_DIR=/etc/homeport/edge
-site=$(edge_site homeport.run)
+site=$(edge_site homeport.run https://api.homeport.sh/v1/edge/ask)
 has "edge site: the wildcard and the apex"        "$site" "*.homeport.run, homeport.run {"
 has "edge site: Cloudflare's origin certificate"  "$site" "tls $EDGE_DIR/origin.pem $EDGE_DIR/origin.key"
 has "edge site: only through our Cloudflare zone" "$site" "import homeport_origin_auth"
 has "edge site: the route table"                  "$site" "import $EDGE_DIR/routes.map"
 has "edge site: an unknown name stops here"       "$site" 'respond @homeport_unrouted "No app here" 404'
-eq  "edge site: a bad domain is refused"          "$( (edge_site 'not a domain') 2>/dev/null || echo deny)" "deny"
+eq  "edge site: a bad domain is refused"          "$( (edge_site 'not a domain' https://api.homeport.sh/v1/edge/ask) 2>/dev/null || echo deny)" "deny"
+# customers' own domains: any other name, a certificate on demand - only for
+# a name the control plane says is someone's (on_demand_tls ask) - same routes
+has "edge site: customers' domains, any other name" "$site" "https:// {"
+has "edge site: …certificates on demand"            "$site" $'tls {\n\t\ton_demand\n\t}'
+has "edge site: …one route table for both"          "$site" "(homeport_edge_route) {"
+eq  "edge site: …routed by the same snippet"        "$(grep -c 'import homeport_edge_route' <<<"$site")" "2"
+eq  "edge site: …origin auth only on our wildcard"  "$(grep -c 'import homeport_origin_auth' <<<"$site")" "1"
+eq  "edge site: an ask that isn't https is refused" "$( (edge_site homeport.run http://x/ask) 2>/dev/null || echo deny)" "deny"
 
 eg() { edge_gate_decision "$1"; }
 has "edge-gate: the route table"      "$(eg "sudo $hd edge-routes")"    "allow"
@@ -1064,9 +1072,14 @@ has "edge-gate: no arguments"         "$(eg "sudo $hd edge-routes x")"  "deny"
 # …and setting the edge up: its certificate, its site for one domain
 has "edge-gate: the origin certificate"  "$(eg "sudo $hd edge-cert")"                 "allow"
 has "edge-gate: …no arguments"           "$(eg "sudo $hd edge-cert x")"               "deny"
-has "edge-gate: install for a domain"    "$(eg "sudo $hd edge-install homeport.run")" "allow"
-has "edge-gate: …one domain"             "$(eg "sudo $hd edge-install a.run b.run")"  "deny"
-has "edge-gate: …a real one"             "$(eg "sudo $hd edge-install ../etc")"       "deny"
+has "edge-gate: install for a domain"    "$(eg "sudo $hd edge-install homeport.run https://api.homeport.sh/v1/edge/ask")" "allow"
+has "edge-gate: …and its ask URL"        "$(eg "sudo $hd edge-install homeport.run")"  "deny"
+has "edge-gate: …https only"             "$(eg "sudo $hd edge-install homeport.run http://x/ask")" "deny"
+has "edge-gate: …one domain"             "$(eg "sudo $hd edge-install a.run b.run https://x/ask")"  "deny"
+has "edge-gate: …a real one"             "$(eg "sudo $hd edge-install ../etc https://x/ask")"       "deny"
+has "edge-gate: the proxies it trusts"   "$(eg "sudo $hd edge-trust")"                 "allow"
+has "edge-gate: the origin-auth secret"  "$(eg "sudo $hd origin-auth-set")"            "allow"
+has "edge-gate: …not a rotation"         "$(eg "sudo $hd origin-auth-set --keep-previous")" "deny"
 has "edge-gate: nothing else"            "$(eg "sudo $hd edge-from -")"               "deny"
 has "edge-gate: not a deploy"            "$(eg "sudo $hd upload web r1")"             "deny"
 has "edge-gate: not a shell"          "$(eg "")"                        "deny"
@@ -1089,7 +1102,9 @@ TLS_MODE=""; rm -rf "$CADDY_DIR"
 CADDY_DIR=$(mktemp -d); CADDY_GLOBALS_FRAG=$CADDY_DIR/00-globals.caddy
 GDNS_PROVIDER="" GECH="" GTRUSTED="173.245.48.0/20 10.116.0.3/32" write_caddy_globals
 has "globals: trusted proxies" "$(cat "$CADDY_GLOBALS_FRAG")" "trusted_proxies static 173.245.48.0/20 10.116.0.3/32"
-GTRUSTED="" write_caddy_globals
+GTRUSTED="" GASK="https://api.homeport.sh/v1/edge/ask" write_caddy_globals
+has "globals: on-demand certificates ask the control plane" "$(cat "$CADDY_GLOBALS_FRAG")" $'on_demand_tls {\n\t\task https://api.homeport.sh/v1/edge/ask\n\t}'
+GASK="" write_caddy_globals
 if grep -q trusted_proxies "$CADDY_GLOBALS_FRAG"; then echo "FAIL globals: trusted proxies when none"; fails=$((fails + 1)); else echo "ok   globals: none trusted by default"; fi
 rm -rf "$CADDY_DIR"
 
