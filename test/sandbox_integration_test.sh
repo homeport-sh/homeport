@@ -228,7 +228,7 @@ jobs_add() { # <release> <processes>
 }
 JP=$'worker - - worker worker\nticker 128M - worker ticker'
 jobs_add migrate "$JP" && ok "add with processes and a release command" || fail "add probe-jobs"
-"$HD" env probe-jobs </dev/null >/dev/null
+printf 'QUEUE=default\n' | "$HD" env probe-jobs >/dev/null
 "$HD" upload probe-jobs r1 < /tmp/probe >/dev/null
 out=$("$HD" activate probe-jobs r1 2>&1) && ok "activate runs the release, then the processes" || fail "activate probe-jobs: $out"
 has "the release command's output is the deploy's" "$out" "migrated"

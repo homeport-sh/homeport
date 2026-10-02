@@ -981,6 +981,21 @@ eq "meter_record: processes billed at their own size" "$(meter_record 1 0 60 web
   out=$(set -e; write_process_units web 256M 50% ""; stop_processes web; echo SURVIVED)
   eq "no processes: add survives set -e" "$out" "SURVIVED"
 )
+# the units name each process's slot; written to a scratch dir
+(
+  systemctl() { :; }
+  sysd=$(mktemp -d)
+  write_units_in() { sed "s#/etc/systemd/system#$sysd#g" <<<"$(declare -f write_process_units)" > "$sysd/fn"; source "$sysd/fn"; }
+  write_units_in
+  app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor PORT=8100
+  PROCESSES_B64=$(b64 $'worker - - work\nticker 128M - tick')
+  write_process_units web 256M 50% ""
+  has "add: a process unit runs its slot"   "$(cat "$sysd/homeport-web_ticker.service")" "sandbox-run web 30001 ticker"
+  has "add: …with its own memory"           "$(cat "$sysd/homeport-web_ticker.service")" "MemoryMax=128M"
+  has "add: …or the app's"                  "$(cat "$sysd/homeport-web_worker.service")" "MemoryMax=256M"
+  has "add: …and the app's cpu"             "$(cat "$sysd/homeport-web_worker.service")" "CPUQuota=50%"
+  rm -rf "$sysd"
+)
 
 # a process unit: the app's body, its own ExecStart and limits
 psu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits=$'MemoryMax=128M' emit_service_body 30001 scheduler)

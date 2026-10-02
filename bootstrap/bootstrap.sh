@@ -2809,7 +2809,9 @@ REDIRECT_FROM=$redirect_from
 ALIASES=$aliases
 PROCESSES_B64=$processes_b64
 EOF
-  local PROCESSES_B64=$processes_b64
+  # what the process helpers read: this add's processes, at this app's port
+  # (a new app has no PORT loaded yet)
+  local PROCESSES_B64=$processes_b64 PORT=$port
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
   # MemoryHigh (90% of the cap) throttles before MemoryMax OOM-kills.
