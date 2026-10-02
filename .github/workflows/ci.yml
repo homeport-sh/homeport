@@ -85,3 +85,6 @@ jobs:
 
       - name: sandbox end to end (runs as root)
         run: sudo env "PATH=$PATH" REQUIRE_SANDBOX=1 bash test/sandbox_integration_test.sh
+
+      - name: hosted builds end to end (runs as root)
+        run: sudo env "PATH=$PATH" REQUIRE_SANDBOX=1 bash test/build_integration_test.sh

@@ -537,6 +537,67 @@ has "host-gate: deny a deploy"      "$(hg "sudo $hd upload web r1")"           "
 has "host-gate: deny meter"         "$(hg "sudo $hd meter-read 0")"            "deny"
 has "host-gate: deny a shell"       "$(hg "")"                                 "deny"
 has "host-gate: deny other binaries" "$(hg "tee /etc/ssh/ssh_host_ed25519_key-cert.pub")" "deny"
+
+# build-gate: the control plane's build certificate on a builder - run one
+# build (its job on stdin), nothing else
+bg() { build_gate_decision "$1"; }
+has "build-gate: run"               "$(bg "sudo $hd build-run")"               "allow"
+has "build-gate: no arguments"      "$(bg "sudo $hd build-run --as-root")"     "deny"
+has "build-gate: deny a deploy"     "$(bg "sudo $hd upload web r1")"           "deny"
+has "build-gate: deny host certs"   "$(bg "sudo $hd host-cert-install")"       "deny"
+has "build-gate: deny a shell"      "$(bg "")"                                 "deny"
+has "build-gate: deny other binaries" "$(bg "bash -c id")"                     "deny"
+
+# build_job_check: the job from the control plane, every field in its shape
+(
+  host_arch() { echo x86-64; }
+  bj=$(mktemp)
+  job() { # job <jq update> - a valid job, changed
+    jq -n '{build: "0b910ee5-6f1e-4c55-9d1a-2f6c1f0a9b11", app: "1c2d3e4f-0000-4000-8000-000000000001",
+      sha: "0123456789abcdef0123456789abcdef01234567", arch: "x86-64",
+      source: "https://codeload.github.com/alice/blog/legacy.tar.gz/sha?token=abc",
+      upload: "https://nyc3.digitaloceanspaces.com/artifacts/a/b?X-Amz-Signature=def",
+      timeout: 900}' | jq "$1" > "$bj"
+  }
+  job .
+  has "job: a good one" "$(build_job_check "$bj" && echo "$BJ_SHA $BJ_ARCH $BJ_TIMEOUT")" \
+    "0123456789abcdef0123456789abcdef01234567 x86-64 900"
+  for bad in '.build = "x"' '.app = "../etc"' '.sha = "main"' '.arch = "arm64"' \
+             '.source = "http://codeload.github.com/x"' '.upload = "file:///etc/passwd"' \
+             '.source = "https://x\"; rm -rf /"' '.upload = "https://x/ y"' \
+             '.timeout = 5' '.timeout = 99999' '.timeout = "900"' 'del(.sha)'; do
+    job "$bad"
+    has "job: refuse $bad" "[$( (build_job_check "$bj") >/dev/null 2>&1; echo $?)]" "[1]"
+  done
+  printf 'not json' > "$bj"
+  has "job: refuse garbage" "[$( (build_job_check "$bj") >/dev/null 2>&1; echo $?)]" "[1]"
+  rm -f "$bj"
+)
+
+# build_spec: the build's sandbox - unprivileged, its checkout and cache
+# mounted, the image's own environment, network through its slot
+(
+  ie=$(mktemp)
+  printf '%s\n' "PATH=/usr/local/go/bin:/usr/bin:/bin" "GOLANG_VERSION=1.24.2" > "$ie"
+  spec=$(build_spec --uid 64000 --gid 64000 --src /var/lib/homeport/builds/b1/src \
+    --cache /var/lib/homeport/build-cache/a1 --netns /var/run/netns/hp-62001 \
+    --script "bun install --frozen-lockfile && bun run build" --image-env "$ie")
+  rm -f "$ie"
+  q() { jq -r "$1" <<<"$spec"; }
+  has "spec: unprivileged"            "$(q '.process.user | "\(.uid):\(.gid)"')" "64000:64000"
+  has "spec: no new privileges"       "$(q '.process.noNewPrivileges')" "true"
+  has "spec: no capabilities"         "$(q '.process.capabilities.bounding | length')" "0"
+  has "spec: runs the plan in a shell" "$(q '.process.args | join(" ")')" "/bin/sh -ec bun install --frozen-lockfile && bun run build"
+  has "spec: in the checkout"         "$(q '.process.cwd')" "/src"
+  has "spec: the image's PATH"        "$(q '.process.env | join(" ")')" "PATH=/usr/local/go/bin:/usr/bin:/bin"
+  has "spec: the image's env"         "$(q '.process.env | join(" ")')" "GOLANG_VERSION=1.24.2"
+  has "spec: caches in /cache"        "$(q '.process.env | join(" ")')" "GOMODCACHE=/cache/go/mod"
+  has "spec: home in /cache"          "$(q '.process.env | join(" ")')" "HOME=/cache/home"
+  has "spec: checkout mounted rw"     "$(q '.mounts[] | select(.destination == "/src") | "\(.source) \(.options | join(","))"')" "/var/lib/homeport/builds/b1/src rbind,rw"
+  has "spec: cache mounted rw"        "$(q '.mounts[] | select(.destination == "/cache") | .source')" "/var/lib/homeport/build-cache/a1"
+  has "spec: its own network"         "$(q '.linux.namespaces[] | select(.type == "network") | .path')" "/var/run/netns/hp-62001"
+  has "spec: nothing else of the host" "[$(q '[.mounts[].source] | map(select(startswith("/etc") or startswith("/root") or startswith("/var/lib/homeport/apps"))) | length')]" "[0]"
+)
 # the shared prefix parse every gate uses
 has "gate_offset: via sudo"         "[$(gate_offset "sudo $hd version")]"      "[2]"
 has "gate_offset: direct"           "[$(gate_offset "$hd version")]"           "[1]"
