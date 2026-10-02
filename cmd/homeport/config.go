@@ -19,6 +19,9 @@ const configFile = "homeport.yaml"
 type buildConfig struct {
 	Command  string `yaml:"command"`
 	Artifact string `yaml:"artifact"`
+	// Image is the toolchain image a hosted build runs in, for a stack
+	// build-plan doesn't detect. Local builds ignore it.
+	Image string `yaml:"image"`
 }
 
 type healthConfig struct {
@@ -79,28 +82,28 @@ type config struct {
 	// Domain is the canonical (first) domain — what status prints, what
 	// redirect_from targets, what gateway hosts key on. Set from Domains.
 	Domain string `yaml:"-"`
-	Path        string          `yaml:"path"`
-	Static      string          `yaml:"static"` // a directory → Caddy file_server, no process
-	SPA         *bool           `yaml:"spa"`    // nil = auto-detect; true/false override the fallback
+	Path   string `yaml:"path"`
+	Static string `yaml:"static"` // a directory → Caddy file_server, no process
+	SPA    *bool  `yaml:"spa"`    // nil = auto-detect; true/false override the fallback
 	// alias domains that 301 to this app's domain (www → apex, brand domains).
 	// Each gets its own cert + redirect block, and lives/dies with the app.
-	RedirectFrom []string `yaml:"redirect_from"`
-	Run         string          `yaml:"run"`
-	Release     string          `yaml:"release"`
-	PostRelease string          `yaml:"post_release"`
-	Sandbox     string          `yaml:"sandbox"`
-	Strategy    string          `yaml:"strategy"`
-	TLS         string          `yaml:"tls"`           // "auto" (default) | "manual" (BYO cert) | "dns:<provider>" (DNS-01 via a caddy-dns plugin)
-	DNSTokenEnv string          `yaml:"dns_token_env"` // env var holding the DNS provider token (default HOMEPORT_DNS_<PROVIDER>); "none" for SDK-env providers
-	Cloudflare  bool            `yaml:"cloudflare"`    // shorthand for tls: dns:cloudflare (DNS-01 certs that survive the CF proxy); sets nothing else
-	Internal    bool            `yaml:"internal"`
-	Idle        bool            `yaml:"idle"`
-	IdleTimeout string          `yaml:"idle_timeout"`
-	Replicas    int             `yaml:"replicas"`
-	Autoscale   autoscaleConfig `yaml:"autoscale"`
-	Build       buildConfig     `yaml:"build"`
-	Health      healthConfig    `yaml:"health"`
-	Resources   resourcesConfig `yaml:"resources"`
+	RedirectFrom []string        `yaml:"redirect_from"`
+	Run          string          `yaml:"run"`
+	Release      string          `yaml:"release"`
+	PostRelease  string          `yaml:"post_release"`
+	Sandbox      string          `yaml:"sandbox"`
+	Strategy     string          `yaml:"strategy"`
+	TLS          string          `yaml:"tls"`           // "auto" (default) | "manual" (BYO cert) | "dns:<provider>" (DNS-01 via a caddy-dns plugin)
+	DNSTokenEnv  string          `yaml:"dns_token_env"` // env var holding the DNS provider token (default HOMEPORT_DNS_<PROVIDER>); "none" for SDK-env providers
+	Cloudflare   bool            `yaml:"cloudflare"`    // shorthand for tls: dns:cloudflare (DNS-01 certs that survive the CF proxy); sets nothing else
+	Internal     bool            `yaml:"internal"`
+	Idle         bool            `yaml:"idle"`
+	IdleTimeout  string          `yaml:"idle_timeout"`
+	Replicas     int             `yaml:"replicas"`
+	Autoscale    autoscaleConfig `yaml:"autoscale"`
+	Build        buildConfig     `yaml:"build"`
+	Health       healthConfig    `yaml:"health"`
+	Resources    resourcesConfig `yaml:"resources"`
 	// extra response headers, verbatim; homeport never sets any on its own.
 	// keyed by path glob ("/*" = all paths), then header name -> value.
 	Headers map[string]map[string]string `yaml:"headers"`
@@ -438,12 +441,12 @@ func (c *config) addArgs() []string {
 		dashIfEmpty(c.Sandbox),
 		dashIfEmpty(c.Strategy),
 		dashIfEmpty(c.Health.Timeout),
-		boolArg(c.isStatic()),  // arg 17: static mode
-		boolArg(c.spaResolved), // arg 18: SPA fallback
-		encodeHeaders(c.Headers), // arg 19: user response headers (base64 "Name: value" lines)
-		tlsArg(c.TLS),            // arg 20: "manual" | "dns:<provider>" | "-" (auto)
+		boolArg(c.isStatic()),      // arg 17: static mode
+		boolArg(c.spaResolved),     // arg 18: SPA fallback
+		encodeHeaders(c.Headers),   // arg 19: user response headers (base64 "Name: value" lines)
+		tlsArg(c.TLS),              // arg 20: "manual" | "dns:<provider>" | "-" (auto)
 		dashIfEmpty(c.DNSTokenEnv), // arg 21: token env var override for dns: mode
-		dashIfEmpty(strings.Join(c.RedirectFrom, ",")), // arg 22: alias domains that 301 here (comma-safe: commas can't appear in a domain)
+		dashIfEmpty(strings.Join(c.RedirectFrom, ",")),   // arg 22: alias domains that 301 here (comma-safe: commas can't appear in a domain)
 		dashIfEmpty(strings.Join(c.extraDomains(), ",")), // arg 23: extra SERVED hostnames (domain list beyond the first)
 	}
 }
