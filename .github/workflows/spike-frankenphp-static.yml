@@ -81,7 +81,7 @@ jobs:
               ./spc build --enable-zts --build-frankenphp --disable-opcache-jit \
                 --with-config-file-path=/etc/frankenphp --with-config-file-scan-dir=/etc/frankenphp/php.d \
                 --with-frankenphp-app=/app "$EXTS" --with-libs="$LIBS" > /out/perapp.log 2>&1
-              cp buildroot/bin/frankenphp /out/app'
+              cp buildroot/bin/frankenphp /out/app' || { echo "--- spc said:"; grep -v "^\s*$" out/perapp.log | tail -40; exit 1; }
           grep -E "building|Building|xcaddy build|Extracting php-src|buildconf|libtool --silent.*--mode=link" out/perapp.log | cut -c1-120 | head -20 || true
           echo "PER-APP: $(( $(date +%s) - start ))s, peak $(sort -n /tmp/mem.log | tail -1) MB used, binary $(du -h out/app | cut -f1)"
 
