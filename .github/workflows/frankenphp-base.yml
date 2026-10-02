@@ -1,0 +1,79 @@
+# The FrankenPHP base hosted PHP builds use (images/frankenphp). Every change
+# builds it and measures an app's build against it under a builder's per-build
+# cap; main also publishes it to ghcr.io.
+name: frankenphp-base
+on:
+  push:
+    branches: [main]
+    paths: ['images/frankenphp/**', '.github/workflows/frankenphp-base.yml']
+  pull_request:
+    paths: ['images/frankenphp/**', '.github/workflows/frankenphp-base.yml']
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/homeport-sh/frankenphp
+  TAG: 8.5-1.12.7
+
+jobs:
+  base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build the base (PHP compiled once)
+        run: |
+          start=$(date +%s)
+          docker buildx build --load -t "$IMAGE:$TAG" \
+            --cache-from type=gha,scope=frankenphp --cache-to type=gha,scope=frankenphp,mode=max \
+            images/frankenphp
+          echo "BASE: $(( $(date +%s) - start ))s, image $(docker image inspect "$IMAGE:$TAG" -f '{{.Size}}' | numfmt --to=iec)"
+
+      # an app's build, as a hosted builder runs it: unprivileged, 2 CPUs, 4 GB
+      - name: a Laravel app's build against it
+        run: |
+          set -euo pipefail
+          composer create-project laravel/laravel demo --prefer-dist --no-interaction --no-install --quiet
+          printf "\nRoute::get('/hello', fn () => 'embedded');\n" >> demo/routes/web.php
+          mkdir -p out && sudo chown 1000:1000 out demo -R
+          build() { # <label> <pgo 0|1>
+            local start; start=$(date +%s)
+            docker run --rm --user 1000:1000 --cpus=2 --memory=4g --memory-swap=4g \
+              -e HOME=/tmp -e HOMEPORT_FRANKENPHP_PGO="$2" -v "$PWD/demo:/app" -v "$PWD/out:/out" -w /app "$IMAGE:$TAG" \
+              bash -c 'set -e
+                t0=$(date +%s); composer install --no-dev --optimize-autoloader --no-interaction --quiet
+                t1=$(date +%s); composer check-platform-reqs --no-dev --quiet
+                t2=$(date +%s); frankenphp-embed /app /out/app 2>/dev/null
+                t3=$(date +%s); echo "  composer install $((t1-t0))s, extension check $((t2-t1))s, embed + link $((t3-t2))s"'
+            echo "$1: $(( $(date +%s) - start ))s, binary $(du -h out/app | cut -f1)"
+          }
+          build "PER-APP (PGO)" 1
+          build "PER-APP (no PGO)" 0
+
+      - name: it runs like a deploy
+        run: |
+          set -euo pipefail
+          cp out/app ./app && chmod +x ./app
+          ./app version
+          export DB_CONNECTION=sqlite DB_DATABASE=/tmp/app.sqlite LOG_CHANNEL=stderr APP_ENV=production APP_DEBUG=false
+          export APP_KEY="base64:$(head -c 32 /dev/urandom | base64)"
+          touch /tmp/app.sqlite
+          ./app php-cli artisan migrate --force | tail -3
+          timeout 20 ./app php-cli artisan queue:work --once --stop-when-empty | tail -2 || true
+          ( ./app php-server --listen 127.0.0.1:8080 > /tmp/server.log 2>&1 & )
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:8080/ && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)" = 200
+          test "$(curl -s http://127.0.0.1:8080/hello)" = embedded
+          echo "serving; $(ps -o rss= -C app | head -1) KB resident"
+
+      - name: publish
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:$TAG" "$IMAGE:8.5"
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:8.5"

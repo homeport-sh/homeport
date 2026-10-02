@@ -1,0 +1,3 @@
+#!/bin/sh
+# PHP is the base FrankenPHP: the same version and extensions the app gets
+exec /opt/homeport/frankenphp php-cli "$@"
