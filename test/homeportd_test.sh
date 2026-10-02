@@ -821,7 +821,11 @@ sbv() { (validate_sandbox "$@") >/dev/null 2>&1 && echo ok || echo deny; }
 eq "sandbox: gvisor accepted"             "$(sbv gvisor "" "")" "ok"
 eq "sandbox: strict/relaxed/unset accepted" "$(sbv strict "" ""; sbv relaxed "" ""; sbv "" "" "")" $'ok\nok\nok'
 eq "sandbox: unknown value refused"       "$(sbv docker "" "")" "deny"
-eq "sandbox: gvisor + release hook refused"      "$(sbv gvisor "bWlncmF0ZQ==" "")" "deny"
+# a gvisor app's release command runs in a sandbox of its own: args to ./bin,
+# like run (there's no shell inside), so no shell syntax and no variables
+eq "sandbox: gvisor + release args accepted"     "$(sbv gvisor "$(b64 'artisan migrate --force')" "")" "ok"
+eq "sandbox: gvisor + release shell refused"     "$(sbv gvisor "$(b64 'php artisan migrate && echo done')" "")" "deny"
+eq "sandbox: gvisor + release variable refused"  "$(sbv gvisor "$(b64 'migrate $DATABASE_URL')" "")" "deny"
 eq "sandbox: gvisor + post_release hook refused" "$(sbv gvisor "" "bWlncmF0ZQ==")" "deny"
 eq "sandbox: strict + hooks still fine"   "$(sbv strict "bWlncmF0ZQ==" "bWlncmF0ZQ==")" "ok"
 
@@ -917,6 +921,51 @@ else
 fi
 eq "host_alias_owner finds alias" "$(host_alias_owner www.homeport.sh newapp)" "website"
 rm -rf "$HOMEPORT_ETC"
+
+# --- processes: a worker or scheduler beside the web process ---
+# each is args to ./bin with its own limits ("-" = the app's), in a port slot
+# of its own: a range past every app's replica block, 8 slots an app
+eq "proc_base: first app"          "$(proc_base 8100)" "30000"
+eq "proc_base: next app"           "$(proc_base 8101)" "30008"
+(( $(proc_base 8100) > $(replica_base 9099) + 19 )) && echo "ok   proc_base: clear of the last replica block" \
+  || { echo "FAIL proc_base overlaps the replica blocks"; fails=$((fails + 1)); }
+eq "proc_unit: app_name, never another app's" "$(proc_unit web worker)" "homeport-web_worker"
+procs=$(b64 $'worker - - artisan queue:work\nscheduler 128M 25% artisan schedule:work')
+pp() { (parse_processes "$1") 2>/dev/null || echo deny; }
+eq "processes: none"               "$(pp '')" ""
+eq "processes: sorted, defaults kept" "$(pp "$procs")" $'scheduler 128M 25% artisan schedule:work\nworker - - artisan queue:work'
+for bad in 'Worker - - run' 'web - - run' 'release - - run' 'a_b - - run' 'averyveryverylongname - - run' \
+           'worker lots - run' 'worker - many run' 'worker - -' 'worker - - run;rm' 'worker - - run $HOME' \
+           $'a - - x\nb - - x\nc - - x\nd - - x\ne - - x' $'w - - x\nw - - y'; do
+  eq "processes: refused [${bad//$'\n'/|}]" "$(pp "$(b64 "$bad")")" "deny"
+done
+eq "proc_slot: release first, then each process" "$(proc_slot 8100 0) $(proc_slot 8100 1) $(proc_slot 8100 4)" "30000 30001 30004"
+
+# what a sandbox runs: the web's args get its port; release and processes don't
+RUN_B64=$(b64 'serve --port $PORT') RELEASE_B64=$(b64 'artisan migrate --force') PROCESSES_B64=$procs
+eq "sandbox_args: web"      "$(sandbox_args web 8100)" "serve --port 8100"
+eq "sandbox_args: release"  "$(sandbox_args release 30000)" "artisan migrate --force"
+eq "sandbox_args: process"  "$(sandbox_args worker 30002)" "artisan queue:work"
+eq "sandbox_args: unknown"  "$( (sandbox_args nope 30003) 2>/dev/null || echo deny)" "deny"
+RUN_B64=- RELEASE_B64=-
+eq "sandbox_args: no run"   "$(sandbox_args web 8100)" ""
+
+# every unit the app runs, for pause, metering and logs: processes carry their
+# own memory (MB) - billed at their size, not the app's
+eq "meter: processes beside the web" "$(PORT=8100 REPLICAS=1 IDLE= AUTOSCALE_MAX= MEMORY=512M meter_instances web)" \
+  $'homeport-web 8100\nhomeport-web_scheduler 30001 128\nhomeport-web_worker 30002 512'
+unset RUN_B64 RELEASE_B64 PROCESSES_B64
+
+eq "meter_record: web only, mb_ms = size × time" "$(meter_record 1 0 60 web 256 1000 5 0 | grep -o '"mb_ms":[0-9]*')" '"mb_ms":256000'
+eq "meter_record: processes billed at their own size" "$(meter_record 1 0 60 web 256 2000 5 0 384000 | grep -o '"mb_ms":[0-9]*')" '"mb_ms":384000'
+
+# a process unit: the app's body, its own ExecStart and limits
+psu=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX=gvisor limits=$'MemoryMax=128M' emit_service_body 30001 scheduler)
+has "process unit (gvisor): its own sandbox"   "$psu" "ExecStart=/usr/local/bin/homeportd sandbox-run web 30001 scheduler"
+has "process unit (gvisor): cleaned by slot"   "$psu" "ExecStopPost=/usr/local/bin/homeportd sandbox-clean web 30001"
+has "process unit (gvisor): the app's journal" "$psu" "LogNamespace=hp-web"
+psn=$(app=web user=homeport-web HOMEPORT_ROOT=/opt/homeport SANDBOX= limits= RUN='artisan queue:work' emit_service_body 30002 worker)
+has "process unit (native): its args"          "$psn" "ExecStart=/opt/homeport/web/current/bin artisan queue:work"
 
 echo "----"
 if (( fails > 0 )); then echo "$fails bash test(s) FAILED"; exit 1; fi

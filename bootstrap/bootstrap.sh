@@ -164,8 +164,9 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.12.0
-HOMEPORTD_API=1
+HOMEPORTD_VERSION=0.13.0
+# 2: processes and a sandboxed release command (add's 25th argument)
+HOMEPORTD_API=2
 
 HOMEPORT_ROOT=/opt/homeport
 HOMEPORT_ETC=/etc/homeport/apps
@@ -243,6 +244,122 @@ wait_healthy_port() { # <port> — polls http://127.0.0.1:<port>$HEALTH_PATH
 # the public (8100+) or idle (9100+) ranges or another app's block.
 replica_base() { echo $((10000 + ($1 - BASE_PORT) * 20)); }
 
+# --- processes: long-running commands beside the web (a queue worker, a
+# scheduler), and the release command. Each runs as its own unit with its own
+# limits; a sandboxed one needs a network slot of its own, and replicas can
+# fill an app's whole replica block, so these get a range of their own past
+# every replica block: 8 slots an app - the release command, then up to
+# PROC_MAX processes in name order.
+PROC_MAX=4
+proc_base() { echo $((30000 + ($1 - BASE_PORT) * 8)); }
+proc_slot() { echo $(( $(proc_base "$1") + $2 )); }   # <port> <0=release | 1..PROC_MAX>
+# an app's name never holds "_", so these never collide with another app's
+# units (a "-" would: app "a" process "proxy" vs app "a"'s own -proxy)
+proc_unit() { echo "homeport-${1}_$2"; }
+valid_proc_name() { [[ ${1:-} =~ ^[a-z][a-z0-9]{0,14}$ && $1 != web && $1 != release ]]; }
+
+# valid_bin_args <args> — args to ./bin, exec'd without a shell: the run
+# charset, and no variables at all
+valid_bin_args() {
+  local re='^[A-Za-z0-9 ._:/=@,+-]+$'
+  [[ ${1:-} =~ $re ]]
+}
+
+# parse_processes <b64> — validate the processes an app declares, one per line
+# "<name> <memory|-> <cpu|-> <args…>", and print them sorted by name
+parse_processes() {
+  [[ -z ${1:-} || $1 == - ]] && return 0
+  local text line name mem cpu args n=0 seen=" " out=""
+  text=$(printf %s "$1" | base64 -d 2>/dev/null) || die "processes: invalid encoding"
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    read -r name mem cpu args <<<"$line"
+    valid_proc_name "$name" || die "process name '$name': lowercase letters and digits, max 15, not web or release"
+    [[ $seen != *" $name "* ]] || die "process '$name' is declared twice"
+    seen+="$name "
+    [[ $mem == - || $mem =~ ^[0-9]+[KMG]$ ]] || die "process '$name': memory must be like 256M or 1G"
+    [[ $cpu == - || $cpu =~ ^[0-9]+%$ ]] || die "process '$name': cpu must be like 50%"
+    valid_bin_args "$args" || die "process '$name': args to ./bin, letters, digits, spaces and . _ : / = @ , + - only"
+    out+="$name $mem $cpu $args"$'\n'
+    n=$((n + 1))
+  done <<<"$text"
+  (( n <= PROC_MAX )) || die "at most $PROC_MAX processes"
+  printf '%s' "$out" | sort
+}
+
+# app_processes — the loaded app's processes, sorted: "<name> <mem> <cpu> <args>"
+app_processes() { parse_processes "${PROCESSES_B64:-}"; }
+
+# app_proc_slots — the loaded app's processes with their slots:
+# "<name> <slot> <mem> <cpu> <args>"
+app_proc_slots() {
+  local i=0 name mem cpu args
+  while read -r name mem cpu args; do
+    [[ -n $name ]] || continue
+    i=$((i + 1))
+    echo "$name $(proc_slot "$PORT" "$i") $mem $cpu $args"
+  done < <(app_processes)
+}
+
+# write_process_units <app> <app memory> <app cpu> <old "name slot …" lines>
+# — one unit per process of the (re)written config. A process that's gone, or
+# whose slot moved, is stopped first: its running sandbox is keyed by the old
+# slot, which the rewritten unit would no longer name. Activate starts them.
+write_process_units() {
+  local app=$1 app_mem=$2 app_cpu=$3 old=$4 name slot mem cpu args unit
+  local new; new=$(app_proc_slots)
+  while read -r name slot _; do
+    [[ -n $name ]] || continue
+    grep -q "^$name $slot " <<<"$new" && continue
+    unit=$(proc_unit "$app" "$name")
+    systemctl disable --now "$unit" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$unit.service"
+  done <<<"$old"
+  while read -r name slot mem cpu args; do
+    [[ -n $name ]] || continue
+    [[ $mem == - ]] && mem=$app_mem
+    [[ $cpu == - ]] && cpu=$app_cpu
+    local limits RUN=$args
+    limits=$(compute_limits "$mem" "$cpu")
+    { echo "[Unit]"
+      echo "Description=homeport process: $app $name"
+      echo "After=network-online.target"
+      echo "Wants=network-online.target"
+      echo
+      emit_service_body "$slot" "$(sandbox_on && echo "$name")"
+      echo
+      echo "[Install]"
+      echo "WantedBy=multi-user.target"
+    } > "/etc/systemd/system/$(proc_unit "$app" "$name").service"
+  done <<<"$new"
+  systemctl daemon-reload
+  while read -r name _; do
+    [[ -n $name ]] && { systemctl enable "$(proc_unit "$app" "$name")" >/dev/null 2>&1 || true; }
+  done <<<"$new"
+}
+
+# sandbox_args <role> <port> — the args a sandbox runs ./bin with: the web's
+# run (with its port), the release command, or a process's
+sandbox_args() {
+  local role=$1 port=$2 args="" name mem cpu rest
+  case $role in
+    web)
+      [[ -n ${RUN_B64:-} && $RUN_B64 != - ]] || return 0
+      args=$(printf %s "$RUN_B64" | base64 -d)
+      args=${args//\$\{PORT\}/$port}; args=${args//\$PORT/$port}
+      args=${args//\$\{HOST\}/0.0.0.0}; args=${args//\$HOST/0.0.0.0} ;;
+    release)
+      [[ -n ${RELEASE_B64:-} && $RELEASE_B64 != - ]] || die "no release command"
+      args=$(printf %s "$RELEASE_B64" | base64 -d) ;;
+    *)
+      while read -r name mem cpu rest; do
+        [[ $name == "$role" ]] && { args=$rest; break; }
+      done < <(app_processes)
+      [[ -n $args ]] || die "no process '$role'" ;;
+  esac
+  printf '%s' "$args"
+}
+
 # is_template — does the loaded app run as per-instance template units?
 # True for fixed replicas>1 AND autoscale (even at 1 instance). Callers must
 # have run load_app. This is what most runtime commands branch on, not a bare
@@ -269,8 +386,10 @@ compute_limits() {
   printf '%s' "$limits"
 }
 
-# emit_service_body <port-expr> — the shared [Service] block. Relies on
-# bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from cmd_add.
+# emit_service_body <port-expr> [process] — the shared [Service] block. Relies
+# on bash dynamic scoping to read $app/$user/$limits/$HOMEPORT_ROOT from
+# cmd_add; a process unit passes its name (sandboxed) or sets RUN to its args
+# (native).
 emit_service_body() {
   if sandbox_on; then
     # The app runs inside gVisor; this unit runs homeportd as root to build
@@ -279,7 +398,7 @@ emit_service_body() {
 [Service]
 Slice=homeport-tenants.slice
 LogNamespace=$(log_namespace "$app")
-ExecStart=/usr/local/bin/homeportd sandbox-run $app $1
+ExecStart=/usr/local/bin/homeportd sandbox-run $app $1${2:+ $2}
 ExecStop=/usr/local/bin/homeportd sandbox-stop $app $1
 ExecStopPost=/usr/local/bin/homeportd sandbox-clean $app $1
 EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env
@@ -393,8 +512,13 @@ validate_sandbox() {
   case $sb in
     ""|strict|relaxed) return 0 ;;
     gvisor)
-      # hooks run natively as the app user — customer code outside the sandbox
-      [[ -z $rel && -z $post ]] || die "sandbox: gvisor apps can't have release/post_release hooks yet (they would run outside the sandbox)"
+      # post_release would run natively as the app user, outside the sandbox
+      [[ -z $post ]] || die "sandbox: gvisor apps can't have a post_release hook (it would run outside the sandbox)"
+      # the release command runs in a sandbox of its own, which has no shell
+      if [[ -n $rel ]]; then
+        local cmd; cmd=$(printf %s "$rel" | base64 -d 2>/dev/null) || die "release: invalid encoding"
+        valid_bin_args "$cmd" || die "sandbox: a gvisor app's release command is args to ./bin (no shell, no variables), like run"
+      fi
       return 0 ;;
   esac
   die "sandbox must be 'strict' (default), 'relaxed', or 'gvisor'"
@@ -616,10 +740,13 @@ ensure_tenant_slice() {
   systemctl daemon-reload
 }
 
-# cmd_sandbox_run <app> <port> — ExecStart of a gvisor app's unit (as root).
+# cmd_sandbox_run <app> <port> [role] — ExecStart of a gvisor app's unit (as
+# root). role is the web (default), "release" (the release command, run once
+# by activate) or a process's name; port is the instance's slot either way.
 cmd_sandbox_run() {
-  local app=${1:-} port=${2:-}
+  local app=${1:-} port=${2:-} role=${3:-web}
   valid_app "$app"; [[ $port =~ ^[0-9]{2,5}$ ]] || die "sandbox-run: invalid port '$port'"
+  [[ $role == web || $role == release ]] || valid_proc_name "$role" || die "sandbox-run: invalid role '$role'"
   load_app "$app"
   sandbox_on || die "sandbox-run: app '$app' is not sandbox: gvisor"
   sandbox_check_tools
@@ -642,12 +769,8 @@ cmd_sandbox_run() {
   echo 'hosts: files dns' > "$b/rootfs/etc/nsswitch.conf"
   # the app's environment exactly as systemd parsed it for this unit
   env -0 > "$b/env"; chmod 600 "$b/env"
-  local args=""
-  if [[ -n ${RUN_B64:-} && $RUN_B64 != - ]]; then
-    args=$(printf %s "$RUN_B64" | base64 -d)
-    args=${args//\$\{PORT\}/$port}; args=${args//\$PORT/$port}
-    args=${args//\$\{HOST\}/0.0.0.0}; args=${args//\$HOST/0.0.0.0}
-  fi
+  local args
+  args=$(sandbox_args "$role" "$port") || exit 1
   sandbox_spec --uid "$uid" --gid "$gid" --cwd "$HOMEPORT_ROOT/$app/current" --bin "$HOMEPORT_ROOT/$app/current/bin" \
     --args "$args" --release "$release" --shared "$HOMEPORT_ROOT/$app/shared" \
     --netns "/var/run/netns/hp-$port" --hostname "$app" --env-file "$b/env" > "$b/config.json"
@@ -978,7 +1101,7 @@ meter_delta() {
 
 # meter_instances <app> — "<unit> <port>" per instance of the LOADED app.
 meter_instances() {
-  local app=$1 n i p rbase
+  local app=$1 n i p rbase name mem cpu rest
   if [[ ${REPLICAS:-1} -gt 1 || -n ${AUTOSCALE_MAX:-} ]]; then
     n=${REPLICAS:-1}; [[ -n ${AUTOSCALE_MAX:-} && $AUTOSCALE_MAX -gt $n ]] && n=$AUTOSCALE_MAX
     rbase=$(replica_base "$PORT")
@@ -987,6 +1110,13 @@ meter_instances() {
     p=$PORT; [[ -n ${IDLE:-} ]] && p=$((PORT + 1000))
     echo "homeport-$app $p"
   fi
+  # processes: "<unit> <slot> <memory MB>", billed at their own size
+  local slot
+  while read -r name slot mem cpu rest; do
+    [[ -n $name ]] || continue
+    [[ $mem == - ]] && mem=${MEMORY:-}
+    echo "$(proc_unit "$app" "$name") $slot $(meter_mb "$mem")"
+  done < <(app_proc_slots)
 }
 
 meter_mb() { # <512M|1G|…> → MB (0 when unset)
@@ -999,11 +1129,12 @@ meter_mb() { # <512M|1G|…> → MB (0 when unset)
   esac
 }
 
-# meter_record <seq> <start> <end> <app> <memory_mb> <awake_ms> <cpu_ms> <egress_bytes>
-# (every field is a number or a validated app name: no escaping needed)
+# meter_record <seq> <start> <end> <app> <memory_mb> <awake_ms> <cpu_ms> <egress_bytes> [mb_ms]
+# (every field is a number or a validated app name: no escaping needed).
+# mb_ms is memory × awake, summed per instance when processes differ in size.
 meter_record() {
   printf '{"seq":%s,"start":%d,"end":%d,"app":"%s","memory_mb":%d,"awake_ms":%d,"mb_ms":%d,"cpu_ms":%d,"egress_bytes":%d}' \
-    "$1" "$2" "$3" "$4" "$5" "$6" $(( $5 * $6 )) "$7" "$8"
+    "$1" "$2" "$3" "$4" "$5" "$6" "${9:-$(( $5 * $6 ))}" "$7" "$8"
 }
 
 _meter_lock() { # hold METER_DIR/lock for the rest of the calling (sub)shell
@@ -1051,10 +1182,10 @@ cmd_meter_tick() {
   for cfg in "$HOMEPORT_ETC"/*/config; do
     [[ -f $cfg ]] || continue
     app=$(basename "$(dirname "$cfg")")
-    local mem awake=0 cpu=0 egress=0 insts
+    local mem awake=0 cpu=0 egress=0 insts mbus=0 imem a_us   # mbus: MB·ms
     insts=$( load_app "$app"; [[ ${STATIC:-} == 1 ]] && exit 0; meter_instances "$app" )
     mem=$( load_app "$app"; meter_mb "${MEMORY:-}" )
-    while read -r unit port; do
+    while read -r unit port imem; do
       [[ -n $unit ]] || continue
       local st="" ae=0 ie=0 cpu_ns=0 inv="" k v
       while IFS='=' read -r k v; do
@@ -1067,7 +1198,9 @@ cmd_meter_tick() {
         esac
       done < <(systemctl show "$unit" -p ActiveState,ActiveEnterTimestampMonotonic,InactiveEnterTimestampMonotonic,CPUUsageNSec,InvocationID 2>/dev/null)
       if [[ -n $last_us ]]; then
-        awake=$(( awake + $(meter_awake_us "$last_us" "$now_us" "$st" "$ae" "$ie") ))
+        a_us=$(meter_awake_us "$last_us" "$now_us" "$st" "$ae" "$ie")
+        awake=$(( awake + a_us ))
+        mbus=$(( mbus + ${imem:-$mem} * (a_us / 1000) ))
       fi
       # CPU: the cgroup counter for this invocation of the unit
       local pc=${prev[$unit.cpu]:-} pi=${prev[$unit.inv]:-}
@@ -1085,7 +1218,7 @@ cmd_meter_tick() {
       next+="$unit.rx $rx"$'\n'"$unit.idx $idx"$'\n'
     done <<<"$insts"
     if [[ -n $last_us ]] && (( awake > 0 || cpu > 0 || egress > 0 )); then
-      meter_append "$(meter_record __SEQ__ "$last_unix" "$now_unix" "$app" "$mem" $(( awake / 1000 )) $(( cpu / 1000000 )) "$egress")"
+      meter_append "$(meter_record __SEQ__ "$last_unix" "$now_unix" "$app" "$mem" $(( awake / 1000 )) $(( cpu / 1000000 )) "$egress" "$mbus")"
     fi
   done
   printf '%s' "$next" > "$METER_DIR/state.tmp" && mv "$METER_DIR/state.tmp" "$METER_DIR/state"
@@ -1242,7 +1375,7 @@ cmd_pause() {
     systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
     systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
   fi
-  while read -r unit port; do
+  while read -r unit port _; do
     [[ -n $unit ]] && { systemctl disable --now "$unit" 2>/dev/null || true; }
   done < <(meter_instances "$app")
   echo "paused '$app' — stopped, and nothing will wake it until it's resumed"
@@ -1272,6 +1405,10 @@ cmd_resume() {
   else
     systemctl enable --now "homeport-$app" >/dev/null 2>&1 || true
   fi
+  local pn
+  while read -r pn _; do
+    [[ -n $pn ]] && { systemctl enable --now "$(proc_unit "$app" "$pn")" >/dev/null 2>&1 || true; }
+  done < <(app_proc_slots)
   echo "resumed '$app'"
 }
 
@@ -2487,7 +2624,7 @@ prune_releases() { # keep the newest $KEEP releases, never the live one
 }
 
 cmd_add() {
-  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-} redirect_from=${22:-} aliases=${23:-} egress=${24:-}
+  local app=${1:-} domain=${2:-} health=${3:-/} memory=${4:-} cpu=${5:-} idle=${6:-} idle_timeout=${7:-} replicas=${8:-} autoscale=${9:-} run_b64=${10:-} release_b64=${11:-} post_release_b64=${12:-} path=${13:-} sandbox=${14:-} strategy=${15:-} health_timeout=${16:-} static=${17:-} spa=${18:-} headers_b64=${19:-} tls_mode=${20:-} tls_dns_env=${21:-} redirect_from=${22:-} aliases=${23:-} egress=${24:-} processes_b64=${25:-}
   valid_app "$app"
   die_if_paused "$app"
   # "-" means unset (positional placeholder from the CLI)
@@ -2511,6 +2648,10 @@ cmd_add() {
   [[ -z $health_timeout || $health_timeout =~ ^[0-9]+[smh]$ ]] || die "health timeout must be a number with s/m/h suffix (e.g. 30s, 2m)"
   validate_sandbox "$sandbox" "$release_b64" "$post_release_b64"
   validate_egress "$sandbox" "$egress"
+  [[ $processes_b64 == - ]] && processes_b64=""
+  parse_processes "$processes_b64" >/dev/null
+  # a sleeping app's worker would either keep it awake or miss its jobs
+  [[ -z $processes_b64 || -z $idle || $idle == - ]] || die "processes need an always-on app (not idle)"
   [[ $egress == - ]] && egress=""
   [[ $sandbox != gvisor ]] || { sandbox_check_tools; ensure_meter_timer; ensure_tenant_slice; }
   [[ -z $strategy || $strategy == blue-green || $strategy == recreate ]] || die "strategy must be 'blue-green' (default) or 'recreate'"
@@ -2605,10 +2746,12 @@ cmd_add() {
   [[ $replicas -gt 1 || -n $autoscale ]] && use_template=1
   local user="homeport-$app" port keep=5 old_replicas=1 old_domain="" old_path=""
 
+  local old_procs=""
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
     load_app "$app"
     port=$PORT keep=$KEEP old_replicas=${REPLICAS:-1}
     old_domain=${DOMAIN:-} old_path=${PATH_PREFIX:-}
+    old_procs=$(app_proc_slots)
   else
     port=$(next_port)
   fi
@@ -2651,7 +2794,9 @@ TLS_MODE=$tls_mode
 TLS_DNS_ENV=$tls_dns_env
 REDIRECT_FROM=$redirect_from
 ALIASES=$aliases
+PROCESSES_B64=$processes_b64
 EOF
+  local PROCESSES_B64=$processes_b64
 
   # cgroup limits — the same kernel mechanism as docker --memory/--cpus.
   # MemoryHigh (90% of the cap) throttles before MemoryMax OOM-kills.
@@ -2801,6 +2946,8 @@ EOF
     fi
     caddy_upstreams=" 127.0.0.1:$port"
   fi
+
+  write_process_units "$app" "$memory" "$cpu" "$old_procs"
 
   # --- Caddy routing ---
   # snapshot every fragment this add may touch, so a validation failure can
@@ -3059,6 +3206,62 @@ activate_and_check() {
 # release symlinked at current/. Returns the command's exit status. Pass a
 # non-empty with_port to also export PORT (the post-hook can reach the now-live
 # app at $HOST:$PORT; the pre-hook gets no PORT — nothing is listening yet).
+# run_release_sandboxed <app> — the release command of a gvisor app, in a
+# sandbox of its own (slot 0 of the app's process range): a transient unit
+# with the app's limits and env, its output on the deploy's, ten minutes at
+# most. It runs the NEW release (current already points at it) while the old
+# instances keep serving.
+run_release_sandboxed() {
+  local app=$1 slot unit
+  slot=$(proc_slot "$PORT" 0) unit="$(proc_unit "$app" release)"
+  local -a props=(-p "Slice=homeport-tenants.slice"
+    -p "EnvironmentFile=-$HOMEPORT_ROOT/$app/shared/env"
+    -p "Environment=NODE_ENV=production PORT=$slot STATE_DIR=$HOMEPORT_ROOT/$app/shared NBC_RUNTIME_DIR=$HOMEPORT_ROOT/$app/shared/runtime"
+    -p "ExecStopPost=/usr/local/bin/homeportd sandbox-clean $app $slot"
+    -p "RuntimeMaxSec=600" -p "KillMode=mixed" -p "TasksMax=512")
+  local line
+  while IFS= read -r line; do [[ -n $line ]] && props+=(-p "$line"); done < <(compute_limits "${MEMORY:-}" "${CPU:-}")
+  [[ -n ${MEMORY:-} ]] && props+=(-p "MemorySwapMax=0")
+  systemctl reset-failed "$unit" 2>/dev/null || true
+  systemd-run --quiet --wait --pipe --collect --unit="$unit" "${props[@]}" \
+    /usr/local/bin/homeportd sandbox-run "$app" "$slot" release
+}
+
+# restart_processes <app> — (re)start every process on the current release,
+# after the web is healthy. A process must come up and stay up: one that
+# exits or restarts within PROC_SETTLE seconds fails the deploy.
+PROC_SETTLE=${PROC_SETTLE:-5}
+restart_processes() {
+  local app=$1 name unit units=()
+  while read -r name _; do
+    [[ -n $name ]] || continue
+    unit=$(proc_unit "$app" "$name"); units+=("$unit")
+    systemctl reset-failed "$unit" 2>/dev/null || true
+    systemctl enable "$unit" >/dev/null 2>&1 || true
+    systemctl restart "$unit" || { echo "process $name failed to start" >&2; return 1; }
+  done < <(app_proc_slots)
+  (( ${#units[@]} )) || return 0
+  sleep "$PROC_SETTLE"
+  local bad=0
+  for unit in "${units[@]}"; do
+    if [[ $(systemctl is-active "$unit" 2>/dev/null) != active || $(systemctl show "$unit" -p NRestarts --value) != 0 ]]; then
+      echo "process ${unit#*_} didn't stay up:" >&2
+      local -a ns=(); sandbox_on && ns=(--namespace="$(log_namespace "$app")")
+      journalctl "${ns[@]}" -u "$unit" -n 15 --no-pager >&2 2>/dev/null || true
+      bad=1
+    fi
+  done
+  (( bad == 0 )) && echo "processes: ${units[*]#homeport-${app}_}"
+  return $bad
+}
+
+stop_processes() {
+  local app=$1 name
+  while read -r name _; do
+    [[ -n $name ]] && { systemctl stop "$(proc_unit "$app" "$name")" 2>/dev/null || true; }
+  done < <(app_proc_slots)
+}
+
 run_deploy_hook() {
   # two lines: in one `local`, "homeport-$app" would expand before app is set
   local app=$1 cmd=$2 with_port=${3:-}
@@ -3266,10 +3469,12 @@ cmd_activate() {
   # release hook runs against the new binary while old instances keep serving
   # the previous one — a failed migration aborts the deploy with no disruption.
   if [[ -n ${RELEASE_B64:-} && $RELEASE_B64 != - ]]; then
-    local RELEASE
+    local RELEASE ran=0
     RELEASE=$(printf %s "$RELEASE_B64" | base64 -d 2>/dev/null) || die "release: invalid encoding"
     echo "release hook: $RELEASE"
-    if ! run_deploy_hook "$app" "$RELEASE"; then
+    if sandbox_on; then run_release_sandboxed "$app" && ran=1
+    else run_deploy_hook "$app" "$RELEASE" && ran=1; fi
+    if [[ $ran == 0 ]]; then
       if [[ -n $prev && $prev != "releases/$release" ]]; then
         swap_current "$app" "$prev"
         die "release hook failed — deploy aborted (still on ${prev#releases/})"
@@ -3278,7 +3483,7 @@ cmd_activate() {
     fi
   fi
 
-  if activate_and_check "$app"; then
+  if activate_and_check "$app" && restart_processes "$app"; then
     prune_releases "$app"
     # post_release hook runs after the app is live and healthy — best-effort
     # side effects (cache warm, smoke test, notify). It CANNOT auto-revert (the
@@ -3306,9 +3511,11 @@ cmd_activate() {
     if [[ -n $prev && $prev != "releases/$release" ]]; then
       swap_current "$app" "$prev"
       activate_and_check "$app" >/dev/null 2>&1 || true
+      restart_processes "$app" >/dev/null 2>&1 || true
       die "health check failed — reverted to ${prev#releases/}"
     fi
     systemctl stop "homeport-$app" 2>/dev/null || true
+    stop_processes "$app"
     die "health check failed and there is no previous release to revert to"
   fi
 }
@@ -3463,6 +3670,13 @@ _env_restart() { # restart to pick up new env (mode-aware; idle reloads on wake)
     systemctl restart "homeport-$app"
     echo "restarted homeport-$app"
   fi
+  # processes read the env at start too
+  local pn unit
+  while read -r pn _; do
+    unit=$(proc_unit "$app" "$pn")
+    [[ -n $pn ]] && systemctl is-active --quiet "$unit" && systemctl restart "$unit" && echo "restarted $pn"
+  done < <(app_proc_slots)
+  return 0
 }
 
 cmd_env_sync() { # DECLARATIVE: replace the env file entirely with stdin
@@ -3636,6 +3850,10 @@ cmd_status() {
     echo "domain:   (internal — 127.0.0.1:$PORT, reach via homeport tunnel)"
   fi
   [[ -n ${IDLE:-} ]] && echo "mode:     scale-to-zero (sleeps after ${IDLE_TIMEOUT} idle)"
+  local pn
+  while read -r pn _; do
+    [[ -n $pn ]] && echo "process:  $pn ($(systemctl is-active "$(proc_unit "$app" "$pn")" 2>/dev/null || true))"
+  done < <(app_proc_slots)
   if [[ -n ${AUTOSCALE_MAX:-} ]]; then
     # like `kubectl get hpa`: current cpu% / target, replicas, min-max
     local aspct=""
@@ -3835,7 +4053,7 @@ cmd_logs() {
   shift || true
   # exact units only — a bare "homeport-$app*" glob would also match a
   # sibling app whose name shares the prefix (web vs webshop)
-  local -a args=(-u "homeport-$app.service" -u "homeport-$app@*" -u "homeport-$app-proxy.service" --no-pager -n 100)
+  local -a args=(-u "homeport-$app.service" -u "homeport-$app@*" -u "homeport-$app-proxy.service" -u "homeport-${app}_*" --no-pager -n 100)
   # a sandboxed app has a journal of its own
   if [[ -f "$HOMEPORT_ETC/$app/config" ]]; then
     load_app "$app"
@@ -3861,6 +4079,14 @@ cmd_remove() {
   local as_max=0 gwdom="" gwpath=""
   [[ -f "$HOMEPORT_ETC/$app/config" ]] && { load_app "$app"; replicas=${REPLICAS:-1}; port=$PORT; as_max=${AUTOSCALE_MAX:-0}; gwdom=${DOMAIN:-}; gwpath=${PATH_PREFIX:-}; }
   systemctl disable --now "homeport-$app" 2>/dev/null || true
+  # processes, and a release command a crash left behind
+  local pu
+  for pu in /etc/systemd/system/"homeport-${app}_"*.service; do
+    [[ -f $pu ]] || continue
+    systemctl disable --now "$(basename "$pu")" 2>/dev/null || true
+    rm -f "$pu"
+  done
+  systemctl stop "$(proc_unit "$app" release)" 2>/dev/null || true
   # scale-to-zero units, if this was an idle app
   systemctl disable --now "homeport-$app-proxy.socket" 2>/dev/null || true
   systemctl stop "homeport-$app-proxy.service" 2>/dev/null || true
@@ -3885,7 +4111,7 @@ cmd_remove() {
         "$CADDY_DIR/$app.caddy"
   systemctl daemon-reload
   # a unit that ended failed stays listed (and keeps its state) until reset
-  systemctl reset-failed "homeport-$app.service" "homeport-$app@*.service" "homeport-$app-green.service" 2>/dev/null || true
+  systemctl reset-failed "homeport-$app.service" "homeport-$app@*.service" "homeport-$app-green.service" "homeport-${app}_*.service" 2>/dev/null || true
   systemctl reload caddy 2>/dev/null || true
   # the BYO cert dir holds a private key — it must not outlive the app
   rm -rf "${HOMEPORT_ROOT:?}/${app:?}" "${HOMEPORT_ETC:?}/${app:?}" "${TLS_CERT_DIR:?}/${app:?}"

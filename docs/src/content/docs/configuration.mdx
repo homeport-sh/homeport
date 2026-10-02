@@ -24,14 +24,15 @@ referenced-but-unset variable is a hard error).
 | `health.path` | `/` | must return 200 before a release is promoted |
 | `health.timeout` | `30s` | how long to wait for that 200 |
 | `run` | — | launch args appended to the binary; `$PORT`/`$HOST` substituted |
-| `release` | — | pre-activate hook (migrations) — fails the deploy if it fails |
-| `post_release` | — | post-activate hook (best-effort; warns, never reverts) |
+| `release` | — | pre-activate hook (migrations) — fails the deploy if it fails; with `sandbox: gvisor`, args to the binary (see [Processes](#processes-and-the-release-command)) |
+| `post_release` | — | post-activate hook (best-effort; warns, never reverts); not with `sandbox: gvisor` |
+| `processes` | — | long-running commands beside the web — a queue worker, a scheduler (see [Processes](#processes-and-the-release-command)) |
 | `resources.memory` † | — | cgroup cap, e.g. `512M`, `1G` |
 | `resources.cpu` † | — | cgroup cap, e.g. `150%` (= 1.5 cores) |
 | `idle` | `false` | scale-to-zero (socket-activated); with `idle_timeout` † (`5m`) |
 | `replicas` | `1` | fixed instance count (1–20), load-balanced + rolling |
 | `autoscale.{min,max,target_cpu}` | — | dynamic replicas by CPU (`target_cpu` default 70) |
-| `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers); `gvisor` to run the app inside gVisor, with its own kernel and network, for a box shared between people who don't trust each other (needs `homeport server sandbox install`; no `release`/`post_release` hooks yet) |
+| `sandbox` | `strict` | `relaxed` for binaries that run their own sandbox (browsers); `gvisor` to run the app inside gVisor, with its own kernel and network, for a box shared between people who don't trust each other (needs `homeport server sandbox install`; no `post_release` hook) |
 | `strategy` | `blue-green` | `recreate` for singletons that can't run two instances |
 | `tls` | `auto` | `manual` (cert via `homeport tls set`) or `dns:<provider>` (DNS-01 via a caddy-dns plugin) |
 | `dns_token_env` † | `HOMEPORT_DNS_<PROVIDER>` | env var holding the DNS token for `tls: dns:*`; `none` for SDK-env providers |
@@ -60,6 +61,50 @@ build:
 health:
   path: /healthz
 ```
+
+## Processes and the release command
+
+An app can run more than its web server. `processes` are long-running
+commands beside it, each its own service with its own limits; `release` runs
+once per deploy, before traffic moves, and a failure aborts the deploy.
+
+```yaml title="homeport.yaml"
+release: migrate
+processes:
+  worker: queue:work          # just the args, or:
+  scheduler:
+    run: schedule:work
+    memory: 128M              # default: the app's resources
+    cpu: 25%
+```
+
+- **A process is args to the binary**, like `run`: `worker: queue:work` runs
+  `./bin queue:work`. There's no shell — no `&&`, no `$VARS` (the env reaches
+  it as environment). At most four, named in lowercase letters and digits.
+- **On deploy**, processes restart once the web passes its health check. One
+  that exits or restarts within five seconds fails the deploy, which reverts
+  to the previous release — web and processes together.
+- **They share the app's env** and state dir, show up in `homeport status` and
+  `homeport logs`, stop with `pause`, and are billed at their own size.
+- **Not with `idle`**: a sleeping app's worker would either keep it awake or
+  miss its jobs.
+
+With `sandbox: gvisor`, the release command runs in a sandbox of its own, with
+the app's limits and env, for up to ten minutes — and like a process, it's args
+to the binary (`release: migrate`, not `./bin migrate`). Without the sandbox
+it's a shell command, as before.
+
+**The binary migrates itself.** Nothing is installed on the server, so the
+release command is a mode of your own binary:
+
+- **Laravel (FrankenPHP)**: `release: php-cli artisan migrate --force`,
+  `worker: php-cli artisan queue:work`.
+- **Drizzle**: keep drizzle-kit a dev dependency (it only generates the SQL).
+  Embed the migration files in the binary and call drizzle-orm's `migrate()`
+  when the binary is run as `./bin migrate`.
+
+Processes and a sandboxed release command need homeportd 0.13
+(`homeport server update`); the CLI checks before it deploys.
 
 ## Behind Cloudflare
 

@@ -125,3 +125,36 @@ func TestSymlinksInTheRepositoryAreNotFollowed(t *testing.T) {
 		t.Fatalf("followed a symlinked go.mod: %+v", p)
 	}
 }
+
+// A hosted app runs sandboxed, so the plan carries how it runs from the same
+// homeport.yaml: run, the release command and processes, checked by the
+// sandbox's rules (args to ./bin, no shell).
+func TestThePlanSaysHowTheAppRuns(t *testing.T) {
+	p := plan(t, map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24.2\n",
+		"homeport.yaml": "run: serve --port $PORT\nrelease: migrate\npost_release: ./bin warm\n" +
+			"processes:\n  worker: work --queue default\n  ticker:\n    run: tick\n    memory: 128M\n",
+	})
+	if p.Run != "serve --port $PORT" || p.Release != "migrate" {
+		t.Fatalf("run/release: %+v", p)
+	}
+	want := []planProcess{{Name: "ticker", Run: "tick", Memory: "128M"}, {Name: "worker", Run: "work --queue default"}}
+	if len(p.Processes) != 2 || p.Processes[0] != want[0] || p.Processes[1] != want[1] {
+		t.Fatalf("processes: %+v", p.Processes)
+	}
+	// nothing to run: the fields are left out
+	if q := plan(t, map[string]string{"go.mod": "module x\n\ngo 1.24.2\n"}); q.Run != "" || q.Release != "" || q.Processes != nil {
+		t.Fatalf("%+v", q)
+	}
+	for name, yml := range map[string]string{
+		"shell release": "release: migrate && seed\n",
+		"./bin release": "release: ./bin migrate\n",
+		"bad run":       "run: serve; rm -rf /\n",
+		"bad process":   "processes:\n  worker: work $QUEUE\n",
+		"bad name":      "processes:\n  Worker: work\n",
+	} {
+		if _, err := planBuild(repo(t, map[string]string{"go.mod": "module x\n\ngo 1.24.2\n", "homeport.yaml": yml})); err == nil {
+			t.Errorf("%s: planned", name)
+		}
+	}
+}

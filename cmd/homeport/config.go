@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +110,9 @@ type config struct {
 	// extra response headers, verbatim; homeport never sets any on its own.
 	// keyed by path glob ("/*" = all paths), then header name -> value.
 	Headers map[string]map[string]string `yaml:"headers"`
+	// long-running commands beside the web (a queue worker, a scheduler),
+	// keyed by name: args to ./bin, each with its own limits
+	Processes map[string]processConfig `yaml:"processes"`
 
 	// spaResolved is the concrete SPA decision for this deploy (SPA overridden
 	// or auto-detected from the static dir); set by cmdDeploy, read by addArgs.
@@ -148,6 +154,10 @@ var (
 	// run: launch args appended to the binary in ExecStart. exec (no shell),
 	// so no shell metachars; only $PORT/$HOST are substituted server-side.
 	runRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+${}-]*$`)
+	// args to ./bin exec'd without a shell and with no variables: a process's
+	// run, and a gvisor app's release command
+	binArgsRe  = regexp.MustCompile(`^[A-Za-z0-9 ._:/=@,+-]+$`)
+	procNameRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,14}$`)
 	// an empty `${}` or an unterminated `${…` with no closing brace
 	malformedRefRe = regexp.MustCompile(`\$\{\}|\$\{[^}]*$`)
 	// static: a relative directory. A leading "./" is fine; no "..", no
@@ -282,19 +292,15 @@ func parseConfig(data []byte) (*config, error) {
 		return nil, fmt.Errorf("%s: autoscale needs 1 <= min <= max <= 20 (got min=%d max=%d)", configFile, cfg.Autoscale.Min, cfg.Autoscale.Max)
 	case cfg.Autoscale.on() && cfg.Autoscale.TargetCPU != 0 && (cfg.Autoscale.TargetCPU < 1 || cfg.Autoscale.TargetCPU > 100):
 		return nil, fmt.Errorf("%s: autoscale.target_cpu must be 1-100 (got %d)", configFile, cfg.Autoscale.TargetCPU)
-	case cfg.Run != "" && !runRe.MatchString(cfg.Run):
-		return nil, fmt.Errorf("%s: run has unsupported characters (letters, digits, spaces, . _ : / = @ , + - ${} only)", configFile)
-	case cfg.Run != "" && strings.Contains(stripRunVars(cfg.Run), "$"):
-		return nil, fmt.Errorf("%s: run may only reference $PORT and $HOST, no other variables", configFile)
 	case strings.ContainsAny(cfg.Release, "\n\r"):
 		return nil, fmt.Errorf("%s: release must be a single line (chain steps with && )", configFile)
 	case strings.ContainsAny(cfg.PostRelease, "\n\r"):
 		return nil, fmt.Errorf("%s: post_release must be a single line (chain steps with && )", configFile)
 	case cfg.Sandbox != "" && cfg.Sandbox != "strict" && cfg.Sandbox != "relaxed" && cfg.Sandbox != "gvisor":
 		return nil, fmt.Errorf("%s: sandbox must be 'strict' (default), 'relaxed' (for binaries that run their own sandbox, e.g. a browser), or 'gvisor' (its own kernel and network — for a box shared between customers), got %q", configFile, cfg.Sandbox)
-	case cfg.Sandbox == "gvisor" && (cfg.Release != "" || cfg.PostRelease != ""):
-		// hooks run natively as the app user, i.e. outside the sandbox
-		return nil, fmt.Errorf("%s: sandbox: gvisor apps can't have release/post_release hooks yet — they would run outside the sandbox", configFile)
+	case cfg.Sandbox == "gvisor" && cfg.PostRelease != "":
+		// post_release runs natively as the app user, i.e. outside the sandbox
+		return nil, fmt.Errorf("%s: sandbox: gvisor apps can't have a post_release hook — it would run outside the sandbox", configFile)
 	case cfg.Strategy != "" && cfg.Strategy != "blue-green" && cfg.Strategy != "recreate":
 		return nil, fmt.Errorf("%s: strategy must be 'blue-green' (default, zero-downtime) or 'recreate' (restart in place — for singleton apps that can't run two instances), got %q", configFile, cfg.Strategy)
 	case cfg.TLS != "" && cfg.TLS != "auto" && cfg.TLS != "manual" && !dnsProviderRe.MatchString(cfg.TLS):
@@ -351,6 +357,17 @@ func parseConfig(data []byte) (*config, error) {
 	}
 	if err := validateHeaders(configFile, cfg.Headers); err != nil {
 		return nil, err
+	}
+	if err := checkRun(cfg.Run); err != nil {
+		return nil, err
+	}
+	if err := cfg.checkProcesses(); err != nil {
+		return nil, err
+	}
+	if cfg.Sandbox == "gvisor" {
+		if err := checkSandboxedRelease(cfg.Release); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Replicas == 0 {
 		cfg.Replicas = 1
@@ -448,7 +465,98 @@ func (c *config) addArgs() []string {
 		dashIfEmpty(c.DNSTokenEnv), // arg 21: token env var override for dns: mode
 		dashIfEmpty(strings.Join(c.RedirectFrom, ",")),   // arg 22: alias domains that 301 here (comma-safe: commas can't appear in a domain)
 		dashIfEmpty(strings.Join(c.extraDomains(), ",")), // arg 23: extra SERVED hostnames (domain list beyond the first)
+		"-",              // arg 24: egress policy (the hosted control plane's; unset here)
+		c.processesArg(), // arg 25: processes, base64 "<name> <mem|-> <cpu|-> <args>" lines
 	}
+}
+
+// processConfig is one long-running command beside the web. In YAML it's
+// either just its args ("worker: queue:work") or run + limits.
+type processConfig struct {
+	Run    string `yaml:"run"`
+	Memory string `yaml:"memory"`
+	CPU    string `yaml:"cpu"`
+}
+
+func (p *processConfig) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&p.Run)
+	}
+	type plain processConfig
+	return n.Decode((*plain)(p))
+}
+
+// checkSandboxedRelease: a sandboxed release command runs in a sandbox of its
+// own, which has no shell, so it's args to ./bin.
+func checkSandboxedRelease(release string) error {
+	switch {
+	case release == "":
+		return nil
+	case strings.HasPrefix(strings.TrimSpace(release), "./bin"):
+		return fmt.Errorf("%s: a sandboxed release command is args to ./bin — write `%s`, not %q",
+			configFile, strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(release), "./bin")), release)
+	case !binArgsRe.MatchString(release):
+		return fmt.Errorf("%s: a sandboxed release command is args to ./bin, run without a shell (letters, digits, spaces, . _ : / = @ , + - only; no && or variables)", configFile)
+	}
+	return nil
+}
+
+// checkRun: run is args to ./bin that may name only $PORT and $HOST.
+func checkRun(run string) error {
+	switch {
+	case run != "" && !runRe.MatchString(run):
+		return fmt.Errorf("%s: run has unsupported characters (letters, digits, spaces, . _ : / = @ , + - ${} only)", configFile)
+	case run != "" && strings.Contains(stripRunVars(run), "$"):
+		return fmt.Errorf("%s: run may only reference $PORT and $HOST, no other variables", configFile)
+	}
+	return nil
+}
+
+// maxProcesses matches homeportd's PROC_MAX: an app's process range has a
+// slot for the release command and four processes.
+const maxProcesses = 4
+
+func (c *config) checkProcesses() error {
+	if len(c.Processes) == 0 {
+		return nil
+	}
+	switch {
+	case c.isStatic():
+		return fmt.Errorf("%s: a static site has no processes", configFile)
+	case c.Idle:
+		return fmt.Errorf("%s: processes need an always-on app (not idle): a worker would keep it awake or miss its jobs", configFile)
+	case len(c.Processes) > maxProcesses:
+		return fmt.Errorf("%s: at most %d processes", configFile, maxProcesses)
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Processes)) {
+		p := c.Processes[name]
+		switch {
+		case !procNameRe.MatchString(name) || name == "web" || name == "release":
+			return fmt.Errorf("%s: process name %q: lowercase letters and digits, max 15, not web or release", configFile, name)
+		case p.Run == "":
+			return fmt.Errorf("%s: process %q needs run: its args to ./bin", configFile, name)
+		case !binArgsRe.MatchString(p.Run):
+			return fmt.Errorf("%s: process %q runs args to ./bin, without a shell (letters, digits, spaces, . _ : / = @ , + - only; no ; && or variables)", configFile, name)
+		case p.Memory != "" && !memoryRe.MatchString(p.Memory):
+			return fmt.Errorf("%s: process %q memory must be like 256M or 1G", configFile, name)
+		case p.CPU != "" && !cpuRe.MatchString(p.CPU):
+			return fmt.Errorf("%s: process %q cpu must be like 50%%", configFile, name)
+		}
+	}
+	return nil
+}
+
+// processesArg is the processes as homeportd takes them, sorted by name.
+func (c *config) processesArg() string {
+	if len(c.Processes) == 0 {
+		return "-"
+	}
+	var lines []string
+	for _, name := range slices.Sorted(maps.Keys(c.Processes)) {
+		p := c.Processes[name]
+		lines = append(lines, fmt.Sprintf("%s %s %s %s", name, dashIfEmpty(p.Memory), dashIfEmpty(p.CPU), p.Run))
+	}
+	return base64.StdEncoding.EncodeToString([]byte(strings.Join(lines, "\n")))
 }
 
 // extraDomains returns the served hostnames beyond the canonical first one.
@@ -540,7 +648,40 @@ func stripRunVars(s string) string {
 // push` seed env before the first deploy — the app must be registered for its
 // env file to exist.
 func (c *config) register() error {
+	if need := c.neededAPI(); need > 1 {
+		out, err := sshOutput(c.Server, c.homeportd("version", "--json"))
+		if err != nil {
+			return checkAPI("", need)
+		}
+		if err := checkAPI(out, need); err != nil {
+			return err
+		}
+	}
 	return sshRun(c.Server, c.homeportd(c.addArgs()...))
+}
+
+// neededAPI is the homeportd API level this config needs: 2 for processes or
+// a sandboxed release command, which an older homeportd would silently drop.
+func (c *config) neededAPI() int {
+	if len(c.Processes) > 0 || (c.Sandbox == "gvisor" && c.Release != "") {
+		return 2
+	}
+	return 1
+}
+
+// checkAPI reads `homeportd version --json` and refuses a server older than need.
+func checkAPI(versionJSON string, need int) error {
+	var v struct {
+		Homeportd string `json:"homeportd"`
+		API       int    `json:"api"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(versionJSON)), &v); err != nil || v.API == 0 {
+		return fmt.Errorf("this app needs homeportd API %d (processes or a sandboxed release command) and the server didn't say which it runs — run `homeport server update`", need)
+	}
+	if v.API < need {
+		return fmt.Errorf("this app needs homeportd API %d (processes or a sandboxed release command); the server runs %s (API %d) — run `homeport server update`", need, v.Homeportd, v.API)
+	}
+	return nil
 }
 
 func (c *config) host() string {

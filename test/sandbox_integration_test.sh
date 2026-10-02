@@ -56,7 +56,7 @@ deploy_probe() { # <app> <memory> [egress]
 }
 
 cleanup() {
-  for a in probe probe-two probe-web; do "$HD" remove "$a" --yes >/dev/null 2>&1 || true; done
+  for a in probe probe-two probe-web probe-jobs; do "$HD" remove "$a" --yes >/dev/null 2>&1 || true; done
   [[ -n ${listener_pid:-} ]] && kill "$listener_pid" 2>/dev/null
 }
 trap cleanup EXIT
@@ -218,6 +218,71 @@ else
   eq "fork bomb took down only its own sandbox, which came back" "$(get /)" "ok"
 fi
 eq "the other tenant never noticed the fork bomb" "$(curl -s --max-time 5 "http://$G2:$P2/")" "ok"
+
+echo "--- processes and the release command"
+# a worker and a smaller ticker beside the web; a release command before
+# traffic moves - all in sandboxes of their own
+b64w() { printf '%s' "$1" | base64 -w0; }
+jobs_add() { # <release> <processes>
+  "$HD" add probe-jobs - / 256M 100% - - 1 - - "$(b64w "$1")" - - gvisor - - - - - - - - - - "$(b64w "$2")" >/dev/null
+}
+JP=$'worker - - worker worker\nticker 128M - worker ticker'
+jobs_add migrate "$JP" && ok "add with processes and a release command" || fail "add probe-jobs"
+"$HD" env probe-jobs </dev/null >/dev/null
+"$HD" upload probe-jobs r1 < /tmp/probe >/dev/null
+out=$("$HD" activate probe-jobs r1 2>&1) && ok "activate runs the release, then the processes" || fail "activate probe-jobs: $out"
+has "the release command's output is the deploy's" "$out" "migrated"
+JS=$HOMEPORT_ROOT/probe-jobs/shared
+read -r runs kern < "$JS/migrated" 2>/dev/null
+eq  "release ran once"                           "$runs" "1"
+[[ -n $kern && $kern != "$(uname -r)" ]] && ok "release ran in gVisor ($kern)" || fail "release kernel [$kern] vs host [$(uname -r)]"
+eq  "release unit is gone afterwards"            "$(systemctl list-units --all --no-legend 'homeport-probe-jobs_release.service' | wc -l | tr -d ' ')" "0"
+for pn in worker ticker; do
+  eq "process $pn is running"                    "$(systemctl is-active "homeport-probe-jobs_$pn")" "active"
+  eq "process $pn is in the tenant slice"        "$(systemctl show "homeport-probe-jobs_$pn" -p Slice --value)" "homeport-tenants.slice"
+  beat=$(cat "$JS/beat-$pn" 2>/dev/null || echo 0)
+  (( $(date +%s) - beat < 5 )) && ok "process $pn is working (heartbeat)" || fail "process $pn heartbeat [$beat]"
+done
+eq  "a process gets its own memory limit"        "$(systemctl show homeport-probe-jobs_ticker -p MemoryMax --value)" "$(( 128 * 1024 * 1024 ))"
+eq  "…or the app's"                              "$(systemctl show homeport-probe-jobs_worker -p MemoryMax --value)" "$(( 256 * 1024 * 1024 ))"
+has "status lists the processes"                 "$("$HD" status probe-jobs)" "process:  worker (active)"
+has "a process's output is in the app's journal" "$(cg probe-jobs "logs-read probe-jobs - 500")" "beat ticker"
+
+# billed at their own sizes: the ticker's 128M makes the app's MB·ms less
+# than (web's 256M) × (everything's awake time)
+systemctl stop homeport-meter.timer; "$HD" meter-ack 999999999 >/dev/null
+"$HD" meter-tick; sleep 3; "$HD" meter-tick
+jrec=$("$HD" meter-read 0 | jq -c 'select(.app == "probe-jobs")' | tail -1)
+eq  "metered: web + 2 processes awake"           "$(jq -r '.awake_ms > 6000' <<<"$jrec")" "true"
+eq  "metered: each at its own size"              "$(jq -r '.mb_ms < .memory_mb * .awake_ms and .mb_ms > 0' <<<"$jrec")" "true"
+systemctl start homeport-meter.timer
+
+# a failing release command aborts the deploy before anything moves
+jobs_add migrate-fail "$JP"
+"$HD" upload probe-jobs r2 < /tmp/probe >/dev/null
+out=$("$HD" activate probe-jobs r2 2>&1) && fail "a failed release command deployed" || ok "a failed release command aborts the deploy"
+has "…saying why"                                "$out" "migration failed"
+eq  "…still on r1"                               "$(basename "$(readlink "$HOMEPORT_ROOT/probe-jobs/current")")" "r1"
+eq  "…processes untouched"                       "$(systemctl is-active homeport-probe-jobs_worker)" "active"
+
+# a process that won't stay up fails the deploy, which goes back to r1
+jobs_add migrate $'worker - - worker worker\nbroken - - crash'
+"$HD" upload probe-jobs r3 < /tmp/probe >/dev/null
+out=$("$HD" activate probe-jobs r3 2>&1) && fail "a crashing process deployed" || ok "a process that won't stay up fails the deploy"
+eq  "…reverted to r1"                            "$(basename "$(readlink "$HOMEPORT_ROOT/probe-jobs/current")")" "r1"
+jobs_add migrate "$JP"
+"$HD" activate probe-jobs r1 >/dev/null 2>&1 && ok "back to the good config" || fail "redeploy r1"
+eq  "a dropped process is stopped"               "$(systemctl is-active homeport-probe-jobs_broken 2>/dev/null)" "inactive"
+eq  "…and its unit is gone"                      "$([[ -e /etc/systemd/system/homeport-probe-jobs_broken.service ]] && echo present || echo gone)" "gone"
+
+"$HD" pause probe-jobs >/dev/null
+eq  "pause stops the processes"                  "$(systemctl is-active homeport-probe-jobs_worker 2>/dev/null)" "inactive"
+"$HD" resume probe-jobs >/dev/null; sleep 2
+eq  "resume brings them back"                    "$(systemctl is-active homeport-probe-jobs_worker 2>/dev/null)" "active"
+JPORT=$(sed -n 's/^PORT=//p' "$HOMEPORT_ETC/probe-jobs/config")
+"$HD" remove probe-jobs --yes >/dev/null
+eq  "remove: process units gone"                 "$(ls /etc/systemd/system/homeport-probe-jobs_* 2>/dev/null | wc -l | tr -d ' ')" "0"
+eq  "remove: process networks gone"              "$(ip link show "hpv$(proc_slot "$JPORT" 1)" >/dev/null 2>&1 && echo present || echo gone)" "gone"
 
 echo "--- stop and clean up"
 # probe-two never hit a limit (probe's Result stays oom-kill from the bomb)
