@@ -323,6 +323,8 @@ IP=$(grep -m1 '^PORT=' "$HOMEPORT_ETC/probe-idle/config" | cut -d= -f2)
 eq "scale-to-zero: answers through its wake socket" "$(curl -s --max-time 20 "http://127.0.0.1:$IP/")" "ok"
 IIP=$((IP + 1000))
 eq "scale-to-zero: the app listens on its internal port" "$(curl -s --max-time 5 "http://$(sandbox_ip "$IIP" guest):$IIP/")" "ok"
-[[ $(findmnt -no OPTIONS -T "$SANDBOX_STATE") != *noexec* ]] && ok "sandbox bundles: exec allowed (gVisor remounts them)" || fail "sandbox bundles are on a noexec mount"
+# the bundle mount is made in the app unit's own mount namespace
+opts=$(nsenter -t "$(systemctl show -p MainPID --value homeport-probe-idle.service)" -m findmnt -no OPTIONS -T "$SANDBOX_STATE")
+[[ -n $opts && $opts != *noexec* ]] && ok "sandbox bundles: exec allowed (gVisor remounts them)" || fail "sandbox bundles: [$opts]"
 if [[ $fails -gt 0 ]]; then echo "$fails sandbox integration test(s) FAILED"; exit 1; fi
 echo "all sandbox integration tests passed ($(runsc --version | head -1))"
