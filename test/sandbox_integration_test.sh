@@ -55,8 +55,13 @@ deploy_probe() { # <app> <memory> [egress]
   "$HD" activate "$app" r1
 }
 
+# DigitalOcean's Ubuntu 24.04 mounts /run noexec (GitHub's runners don't):
+# sandbox bundles there made gVisor's read-only remount fail ("operation not
+# permitted") and no hosted app ever started. Run every test like DO's.
+mount -o remount,noexec /run && ok "/run is noexec, as on DigitalOcean" || fail "remount /run noexec"
+
 cleanup() {
-  for a in probe probe-two probe-web probe-jobs; do "$HD" remove "$a" --yes >/dev/null 2>&1 || true; done
+  for a in probe probe-two probe-web probe-jobs probe-idle; do "$HD" remove "$a" --yes >/dev/null 2>&1 || true; done
   [[ -n ${listener_pid:-} ]] && kill "$listener_pid" 2>/dev/null
 }
 trap cleanup EXIT
@@ -304,5 +309,20 @@ eq "netns gone"      "$(ip netns list | grep -c "^hp-$P\b" || true)" "0"
 eq "veth gone"       "$(ip link show "hpv$P" >/dev/null 2>&1 && echo present || echo gone)" "gone"
 eq "sandbox gone"    "$(runsc --root=/run/homeport-runsc list 2>/dev/null | grep -c "$(sandbox_id probe "$P")" || true)" "0"
 
+
+echo "--- a scale-to-zero app (every hosted Hobby app)"
+# The wake socket listens on the public port and the proxy forwards to the
+# sandbox on the internal one (public + 1000): the app must get the internal
+# PORT (sourcing its config gave it the public one), and activate's health
+# check must go through the socket, which is also what wakes it.
+"$HD" add probe-idle - / 256M 100% true 60s 1 - - - - - gvisor - - - - - - - - - - >/dev/null &&
+  "$HD" upload probe-idle r1 < /tmp/probe >/dev/null &&
+  "$HD" activate probe-idle r1 >/dev/null 2>&1 && ok "scale-to-zero: deploys, health-checked through its wake socket" ||
+  { fail "scale-to-zero: deploy"; journalctl --namespace="$(log_namespace probe-idle)" -n 20 --no-pager; }
+IP=$(grep -m1 '^PORT=' "$HOMEPORT_ETC/probe-idle/config" | cut -d= -f2)
+eq "scale-to-zero: answers through its wake socket" "$(curl -s --max-time 20 "http://127.0.0.1:$IP/")" "ok"
+IIP=$((IP + 1000))
+eq "scale-to-zero: the app listens on its internal port" "$(curl -s --max-time 5 "http://$(sandbox_ip "$IIP" guest):$IIP/")" "ok"
+[[ $(findmnt -no OPTIONS -T "$SANDBOX_STATE") != *noexec* ]] && ok "sandbox bundles: exec allowed (gVisor remounts them)" || fail "sandbox bundles are on a noexec mount"
 if [[ $fails -gt 0 ]]; then echo "$fails sandbox integration test(s) FAILED"; exit 1; fi
 echo "all sandbox integration tests passed ($(runsc --version | head -1))"
