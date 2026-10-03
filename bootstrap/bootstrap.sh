@@ -167,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.15.1
+HOMEPORTD_VERSION=0.15.2
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -572,6 +572,54 @@ ensure_sandbox_state() {
   ) 9>"$SANDBOX_STATE.lock"
 }
 
+# sandbox_cpu_boost <address> <port> — a sandboxed app starts with no CPU
+# limit, and gets its plan's back the moment it listens (or after
+# SANDBOX_BOOST_SECS, whatever happens). gVisor's start is CPU-heavy: at a
+# Hobby app's 25% of a core it took ~1s more than unlimited, and so did
+# homeportd's own setup - most of a 2s cold wake. Runs inside the app unit's
+# cgroup, where systemd keeps the plan as cpu.max; a daemon-reload mid-start
+# just puts the limit back early.
+SANDBOX_CGROUP_ROOT=/sys/fs/cgroup
+# port_open <address> <port> — one connection attempt, given up after 0.2s:
+# until a sandbox's network is up, a connection to it gets no answer, and a
+# bare connect sits in the kernel's ~1s SYN retry - that delay was most of a
+# cold wake once the CPU limit was lifted.
+port_open() {
+  ( exec 3<>"/dev/tcp/$1/$2" ) 2>/dev/null &
+  local p=$! i
+  for (( i = 0; i < 10; i++ )); do
+    kill -0 "$p" 2>/dev/null || { wait "$p"; return; }
+    sleep 0.02
+  done
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  return 1
+}
+SANDBOX_BOOST_SECS=5
+sandbox_cpu_boost() {
+  local cg plan
+  # this unit's cgroup (SANDBOX_CGROUP names it outright, for tests)
+  cg=${SANDBOX_CGROUP:-$SANDBOX_CGROUP_ROOT$(cut -d: -f3 /proc/self/cgroup 2>/dev/null)}
+  [[ -w $cg/cpu.max ]] || return 0
+  plan=$(<"$cg/cpu.max")
+  [[ $plan == max* ]] && return 0   # no limit to lift
+  echo "max ${plan#* }" > "$cg/cpu.max" 2>/dev/null || return 0
+  # a deadline in seconds, not a count of tries: a try can take 0.2s
+  ( local end=$((SECONDS + SANDBOX_BOOST_SECS))
+    while (( SECONDS < end )); do
+      port_open "$1" "$2" && break
+      sleep 0.02
+    done
+    echo "$plan" > "$cg/cpu.max" ) </dev/null >/dev/null 2>&1 &
+}
+
+# sandbox_leftover <app> <port> — whether a crashed run left anything behind
+# (its network namespace, runsc's state): cleaning when nothing's there cost
+# a wake ~0.2s of runsc calls.
+sandbox_leftover() {
+  local id; id=$(sandbox_id "$1" "$2")
+  [[ -e /var/run/netns/hp-$2 ]] || compgen -G "$SANDBOX_RUNSC_ROOT/${id}*" >/dev/null
+}
+
 # sandbox_id <app> <port> — a runsc container id. runsc matches ids by PREFIX,
 # so ids end in "_" and app names can't contain one: no id is ever a prefix
 # of another.
@@ -779,8 +827,10 @@ cmd_sandbox_run() {
   sandbox_check_tools
   local id b user="homeport-$app" release uid gid
   id=$(sandbox_id "$app" "$port"); b="$SANDBOX_STATE/$id"
+  # unthrottled until it listens: the setup below and gVisor's start
+  sandbox_cpu_boost "$(sandbox_ip "$port" guest)" "$port"
   # a crash can leave the last run behind
-  cmd_sandbox_clean "$app" "$port" >/dev/null 2>&1 || true
+  if sandbox_leftover "$app" "$port"; then cmd_sandbox_clean "$app" "$port" >/dev/null 2>&1 || true; fi
   ensure_sandbox_firewall
   release=$(readlink -f "$HOMEPORT_ROOT/$app/current") || die "sandbox-run: '$app' has no current release"
   [[ -x $release/bin ]] || die "sandbox-run: no binary at $release/bin"
@@ -1292,9 +1342,10 @@ cmd_wait_port() {
   local addr=${1:-} port=${2:-} secs=${3:-30} i
   [[ $addr =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "wait-port: invalid address '$addr'"
   [[ $port =~ ^[0-9]{1,5}$ && $secs =~ ^[0-9]{1,3}$ ]] || die "wait-port: invalid port or seconds"
-  for (( i = 0; i < secs * 10; i++ )); do
-    if (exec 3<>"/dev/tcp/$addr/$port") 2>/dev/null; then return 0; fi
-    sleep 0.1
+  local end=$((SECONDS + secs))
+  while (( SECONDS < end )); do
+    if port_open "$addr" "$port"; then return 0; fi
+    sleep 0.02
   done
   die "wait-port: nothing listening on $addr:$port after ${secs}s"
 }

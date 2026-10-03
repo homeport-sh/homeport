@@ -790,6 +790,42 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   rm -f "$jc_log"
   exit "$fails" ) || fails=$((fails + $?))
 
+# a cold wake: port_open gives up fast on a sandbox whose network isn't up
+# yet (a bare connect sat in the ~1s SYN retry); the startup boost lifts the
+# app's CPU limit until it listens, then puts the plan's back - exactly, and
+# even if it never listens; cleaning is skipped when nothing's left over.
+( fails=0
+  t0=$(date +%s); port_open 192.0.2.1 9 && r=open || r=closed; t1=$(date +%s)
+  eq  "port_open: an address that never answers is given up" "$r" "closed"
+  eq  "port_open: within a second" "$(( t1 - t0 <= 1 ))" "1"
+
+  cgr=$(mktemp -d); SANDBOX_CGROUP=$cgr; echo "25000 100000" > "$cgr/cpu.max"
+  lp_file=$(mktemp)
+  python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1], flush=True); time.sleep(0.6); s.listen(); time.sleep(3)' > "$lp_file" & lp=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s $lp_file ]] && break; sleep 0.1; done
+  sandbox_cpu_boost 127.0.0.1 "$(cat "$lp_file")"
+  eq  "boost: no CPU limit while it starts" "$(cat "$cgr/cpu.max")" "max 100000"
+  for _ in $(seq 1 40); do [[ $(cat "$cgr/cpu.max") == "25000 100000" ]] && break; sleep 0.05; done
+  eq  "boost: the plan's limit back once it listens" "$(cat "$cgr/cpu.max")" "25000 100000"
+  kill "$lp" 2>/dev/null
+  # never listens, and each try takes the full 0.2s: still back in time
+  SANDBOX_BOOST_SECS=1; echo "25000 100000" > "$cgr/cpu.max"
+  sandbox_cpu_boost 192.0.2.1 9
+  sleep 2.5
+  eq  "boost: the plan's limit back even if it never listens" "$(cat "$cgr/cpu.max")" "25000 100000"
+  echo "max 100000" > "$cgr/cpu.max"; sandbox_cpu_boost 127.0.0.1 1
+  eq  "boost: nothing to lift, nothing changed" "$(cat "$cgr/cpu.max")" "max 100000"
+  rm -rf "$cgr" "$lp_file"
+
+  SANDBOX_RUNSC_ROOT=$(mktemp -d)
+  sandbox_leftover web 59991 && r=yes || r=no
+  eq  "leftover: none, so no cleanup" "$r" "no"
+  touch "$SANDBOX_RUNSC_ROOT/$(sandbox_id web 59991)_sandbox.state"
+  sandbox_leftover web 59991 && r=yes || r=no
+  eq  "leftover: runsc state, so cleanup" "$r" "yes"
+  rm -rf "$SANDBOX_RUNSC_ROOT"
+  exit "$fails" ) || fails=$((fails + $?))
+
 # systemctl is stubbed: we check what pause/resume ask systemd to do per mode.
 ( fails=0
   pr_etc=$(mktemp -d); HOMEPORT_ETC=$pr_etc
