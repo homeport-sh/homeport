@@ -759,6 +759,37 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   rm -f "$HOST_READY_FILE"
   exit "$fails" ) || fails=$((fails + $?))
 
+# wait-port: a scale-to-zero app's ExecStartPost, so its proxy connects only
+# once the app listens
+( fails=0
+  ( cmd_wait_port 127.0.0.1 1 1 ) >/dev/null 2>&1 && r=up || r=down
+  eq "wait-port: gives up on a closed port"   "$r" "down"
+  python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(); print(s.getsockname()[1], flush=True); time.sleep(5)' > "${TMPDIR:-/tmp}/wp.$$" & lp=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "${TMPDIR:-/tmp}/wp.$$" ]] && break; sleep 0.2; done
+  ( cmd_wait_port 127.0.0.1 "$(cat "${TMPDIR:-/tmp}/wp.$$")" 5 ) >/dev/null 2>&1 && r=up || r=down
+  eq "wait-port: returns once it listens"      "$r" "up"
+  kill "$lp" 2>/dev/null; rm -f "${TMPDIR:-/tmp}/wp.$$"
+  ( cmd_wait_port 127.0.0.1 nope 1 ) >/dev/null 2>&1 && r=ok || r=refused
+  eq "wait-port: refuses a bad port"           "$r" "refused"
+  exit "$fails" ) || fails=$((fails + $?))
+
+# app_last_output: what a failed health check reports, so the deploy's error
+# says why (a crash, a wrong port, a sandbox that won't start), not just
+# "health check failed": the app's own journal, at most 3 lines.
+( fails=0
+  jc_log=$(mktemp)
+  journalctl() { echo "$*" > "$jc_log"; printf 'line one\nline two\nlisten tcp :8100: address already in use\n'; }
+  SANDBOX=gvisor
+  out=$(app_last_output web)
+  has "last output: the sandbox's namespace" "$(cat "$jc_log")" "--namespace=hp-web"
+  has "last output: what it said"            "$out" "address already in use"
+  eq  "last output: at most 3 lines"         "$(wc -l <<<"$out" | tr -d ' ')" "3"
+  SANDBOX=
+  app_last_output web >/dev/null
+  has "last output: a plain app's unit"      "$(cat "$jc_log")" "-u homeport-web.service"
+  rm -f "$jc_log"
+  exit "$fails" ) || fails=$((fails + $?))
+
 # systemctl is stubbed: we check what pause/resume ask systemd to do per mode.
 ( fails=0
   pr_etc=$(mktemp -d); HOMEPORT_ETC=$pr_etc

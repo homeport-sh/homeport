@@ -167,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.15.0
+HOMEPORTD_VERSION=0.15.1
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -1283,6 +1283,20 @@ meter_gate_decision() {
     *) echo "deny verb '${a[off]:-(none)}' is not permitted"; return ;;
   esac
   echo "allow $off"
+}
+
+# cmd_wait_port <address> <port> <seconds> — until something accepts a TCP
+# connection there, or fail after <seconds>: a scale-to-zero app's
+# ExecStartPost, so its wake proxy connects only once it listens.
+cmd_wait_port() {
+  local addr=${1:-} port=${2:-} secs=${3:-30} i
+  [[ $addr =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "wait-port: invalid address '$addr'"
+  [[ $port =~ ^[0-9]{1,5}$ && $secs =~ ^[0-9]{1,3}$ ]] || die "wait-port: invalid port or seconds"
+  for (( i = 0; i < secs * 10; i++ )); do
+    if (exec 3<>"/dev/tcp/$addr/$port") 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  die "wait-port: nothing listening on $addr:$port after ${secs}s"
 }
 
 # host-ready: a host is ready when its first boot finished, not when SSH
@@ -3243,6 +3257,9 @@ EOF
       [[ -n $idle_unit ]] && echo "$idle_unit"
       echo
       emit_service_body "$internal_port"
+      # scale-to-zero: "started" must mean listening, or the proxy (After=
+      # this unit) connects before a sandboxed app is up and the wake is a 502
+      [[ -n $idle ]] && echo "ExecStartPost=/usr/local/bin/homeportd wait-port $(app_addr "$internal_port") $internal_port 30"
       echo
       [[ -n $install_sec ]] && echo "$install_sec"
     } > "/etc/systemd/system/homeport-$app.service"
@@ -3844,6 +3861,9 @@ cmd_activate() {
       echo "live: $release (internal, 127.0.0.1:$PORT)$note"
     fi
   else
+    # why, before a revert restarts it: the deploy's error carries these
+    local said; said=$(app_last_output "$app")
+    [[ -n $said ]] && printf "the app's last output:\n%s\n" "$said" >&2
     if [[ -n $prev && $prev != "releases/$release" ]]; then
       swap_current "$app" "$prev"
       activate_and_check "$app" >/dev/null 2>&1 || true
@@ -4333,6 +4353,14 @@ LOG_DEFAULT_MB=50
 
 log_namespace() { printf 'hp-%s' "$1"; }
 
+# app_last_output <app> — its last 3 lines of output, from its own journal:
+# what a failed health check reports, so a deploy's error says why.
+app_last_output() {
+  local -a src=(-u "homeport-$1.service")
+  sandbox_on && src=("--namespace=$(log_namespace "$1")")
+  journalctl "${src[@]}" -n 3 -o cat --no-pager 2>/dev/null | cut -c1-200 || true
+}
+
 # journal_conf <days> <MB> — a namespace's journald.conf.
 journal_conf() {
   cat <<EOF
@@ -4556,6 +4584,7 @@ main() {
     env-list) cmd_env_list "$@" ;;
     status)   cmd_status "$@" ;;
     host-ready)      cmd_host_ready ;;
+    wait-port)       cmd_wait_port "$@" ;;
     host-ready-mark) cmd_host_ready_mark ;;
     run)      cmd_run "$@" ;;
     logs)     cmd_logs "$@" ;;
