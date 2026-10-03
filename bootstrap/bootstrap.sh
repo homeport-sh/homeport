@@ -70,11 +70,14 @@ PermitRootLogin no
 X11Forwarding no
 MaxAuthTries 5
 EOF
+  # Ubuntu 24.04 socket-activates sshd: no /run/sshd (which sshd -t needs)
+  # and no running ssh.service until its first connection
+  install -d -m 755 /run/sshd
   if ! sshd -t 2>/dev/null; then
     rm -f /etc/ssh/sshd_config.d/00-homeport.conf
     die "sshd config test failed — hardening rolled back, nothing changed"
   fi
-  systemctl reload ssh 2>/dev/null || systemctl reload sshd
+  systemctl try-reload-or-restart ssh 2>/dev/null || systemctl try-reload-or-restart sshd
 }
 
 setup_fail2ban() {
@@ -164,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.14.1
+HOMEPORTD_VERSION=0.14.2
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -1313,6 +1316,13 @@ host_cert_check() {
 # certificate restored if it would not start: a bad certificate must never
 # take SSH down.
 SSH_HOST_KEY=/etc/ssh/ssh_host_ed25519_key
+SSHD_PRIVSEP_DIR=/run/sshd
+# sshd_check / sshd_reload — on a socket-activated sshd too (Ubuntu 24.04):
+# until its first connection there's no /run/sshd, which `sshd -t` needs
+# ("Missing privilege separation directory"), and ssh.service is inactive,
+# so a plain reload fails; the next connection starts it with the new config.
+sshd_check() { install -d -m 755 "$SSHD_PRIVSEP_DIR" 2>/dev/null || true; sshd -t; }
+sshd_reload() { systemctl try-reload-or-restart ssh 2>/dev/null || systemctl try-reload-or-restart sshd; }
 
 cmd_host_cert_install() {
   local pub=$SSH_HOST_KEY.pub dest=$SSH_HOST_KEY-cert.pub tmp
@@ -1323,12 +1333,12 @@ cmd_host_cert_install() {
   chmod 644 "$tmp"
   [[ -f $dest ]] && cp -p "$dest" "$dest.prev"
   mv -f "$tmp" "$dest"
-  if ! sshd -t; then
+  if ! sshd_check; then
     if [[ -f $dest.prev ]]; then mv -f "$dest.prev" "$dest"; else rm -f "$dest"; fi
     die "sshd rejected the new certificate; the old one is back"
   fi
   rm -f "$dest.prev"
-  systemctl reload ssh 2>/dev/null || systemctl reload sshd
+  sshd_reload
   log "host certificate renewed"
 }
 
