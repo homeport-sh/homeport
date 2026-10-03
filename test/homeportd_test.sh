@@ -649,7 +649,7 @@ has "host cert: refuse garbage"        "$(hcc garbage)" "[rc=1]"
 
 # cmd_host_cert_install: installs a good certificate; refuses a bad one and
 # keeps the old; puts the old back if sshd won't take the new
-(
+( fails=0
   SSH_HOST_KEY=$hc/host
   log() { :; }; die() { echo "DIE $*"; exit 1; }
   sshd_ok=1; sshd() { (( sshd_ok )); }
@@ -669,7 +669,20 @@ has "host cert: refuse garbage"        "$(hcc garbage)" "[rc=1]"
   has "install: sshd says no, old back" "$(cat "$hc/host-cert.pub")" "$(cat "$hc/good")"
   has "install: no reload on failure" "[$(cat "$hc/reloads")]" "[]"
   has "install: no temp files left"  "[$(ls -A "$hc" | grep -c '^\.homeport-cert')]" "[0]"
-)
+  # Ubuntu 24.04 socket-activates sshd: until its first connection there's no
+  # /run/sshd, `sshd -t` fails without it ("Missing privilege separation
+  # directory"), and ssh.service is inactive, so a plain reload fails too.
+  # Renewal must work on such a host, or it's unreachable when its cert ends.
+  SSHD_PRIVSEP_DIR=$hc/run-sshd
+  sshd() { [[ ${1:-} == -t && ! -d $SSHD_PRIVSEP_DIR ]] && { echo "Missing privilege separation directory: $SSHD_PRIVSEP_DIR" >&2; return 255; }; return 0; }
+  systemctl() { echo "$*" >> "$hc/reloads"; [[ $1 != reload ]]; }   # inactive: a plain reload fails
+  : > "$hc/reloads"
+  sign "$hc/good3" "$hc/host" -h -n 203.0.113.9 -V -1m:+20d
+  out=$(cmd_host_cert_install < "$hc/good3" 2>&1)
+  has "install: socket-activated sshd, cert installed" "$(cat "$hc/host-cert.pub")" "$(cat "$hc/good3")"
+  has "install: socket-activated sshd, reload or restart" "$(cat "$hc/reloads")" "try-reload-or-restart ssh"
+  exit "$fails"
+) || fails=$((fails + $?))
 rm -rf "$hc"
 # and a deploy certificate can't read other tenants' usage
 has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
