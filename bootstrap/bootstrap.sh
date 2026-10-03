@@ -164,7 +164,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.14.0
+HOMEPORTD_VERSION=0.14.1
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -4486,6 +4486,9 @@ EOF
 
 main() {
   [[ $(id -u) -eq 0 ]] || die "must run as root (the homeport CLI calls this via sudo)"
+  # what homeportd writes is read by system users (Caddy reads its config as
+  # caddy): not under a caller's strict umask. Secrets set their own modes.
+  umask 022
   ensure_origin_auth_snippet
   ensure_caddy_admin_socket
   local cmd=${1:-}
