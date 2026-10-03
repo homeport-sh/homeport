@@ -534,6 +534,8 @@ has "meter-gate: ack"               "$(mg "sudo $hd meter-ack 12")"    "allow"
 has "meter-gate: deny a deploy"     "$(mg "sudo $hd upload web r1")"   "deny"
 has "meter-gate: deny status"       "$(mg "sudo $hd status web")"      "deny"
 has "meter-gate: deny bad seq"      "$(mg "sudo $hd meter-read 1;id")" "deny"
+has "meter-gate: host-ready"        "$(mg "sudo $hd host-ready")"      "allow"
+has "meter-gate: host-ready, exactly" "$(mg "sudo $hd host-ready x")"  "deny"
 has "meter-gate: deny a shell"      "$(mg "")"                         "deny"
 has "meter-gate: deny other binaries" "$(mg "cat /var/lib/homeport/meter/spool")" "deny"
 
@@ -742,6 +744,19 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   eq "upstream: sandboxed, scale-to-zero" "$(app_upstreams 8100 idle)" " 127.0.0.1:8100"
   SANDBOX=
   eq "upstream: plain, scale-to-zero"   "$(app_upstreams 8100 idle)" " 127.0.0.1:8100"
+  exit "$fails" ) || fails=$((fails + $?))
+
+# host-ready: a host is ready when its first boot finished, not when SSH
+# first answers - first boot that died half-way (sshd -t, edge-from) left
+# hosts that answered, were marked ready, and couldn't run anything.
+( fails=0
+  HOST_READY_FILE=$(mktemp -u)
+  ( cmd_host_ready ) >/dev/null 2>&1 && r=ready || r=not
+  eq "host-ready: not before first boot finishes" "$r" "not"
+  cmd_host_ready_mark
+  ( cmd_host_ready ) >/dev/null 2>&1 && r=ready || r=not
+  eq "host-ready: after first boot marks it" "$r" "ready"
+  rm -f "$HOST_READY_FILE"
   exit "$fails" ) || fails=$((fails + $?))
 
 # systemctl is stubbed: we check what pause/resume ask systemd to do per mode.

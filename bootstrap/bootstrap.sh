@@ -167,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.14.4
+HOMEPORTD_VERSION=0.15.0
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -1277,10 +1277,21 @@ meter_gate_decision() {
   [[ -n $off ]] || { echo "deny may only run homeportd"; return; }
   case ${a[off]:-} in
     meter-read|meter-ack) [[ ${a[off+1]:-} =~ ^[0-9]{1,18}$ && -z ${a[off+2]:-} ]] || { echo "deny invalid sequence"; return; } ;;
+    # the control plane's readiness probe (it holds only this certificate
+    # for a host until the host is in placement)
+    host-ready) [[ -z ${a[off+1]:-} ]] || { echo "deny host-ready takes no arguments"; return; } ;;
     *) echo "deny verb '${a[off]:-(none)}' is not permitted"; return ;;
   esac
   echo "allow $off"
 }
+
+# host-ready: a host is ready when its first boot finished, not when SSH
+# first answers. First boot marks it as its very last step; a first boot that
+# stops half-way never does, and the control plane deletes the host at its
+# setup timeout instead of placing apps on it.
+HOST_READY_FILE=/etc/homeport/setup-complete
+cmd_host_ready_mark() { install -d -m 755 "${HOST_READY_FILE%/*}"; date -u +%FT%TZ > "$HOST_READY_FILE"; }
+cmd_host_ready() { [[ -s $HOST_READY_FILE ]] || die "this host is still setting up"; echo "ready"; }
 
 cmd_meter_gate() {
   local orig=${1:-} d
@@ -4544,6 +4555,8 @@ main() {
     env-rm)   cmd_env_rm "$@" ;;
     env-list) cmd_env_list "$@" ;;
     status)   cmd_status "$@" ;;
+    host-ready)      cmd_host_ready ;;
+    host-ready-mark) cmd_host_ready_mark ;;
     run)      cmd_run "$@" ;;
     logs)     cmd_logs "$@" ;;
     logs-read)   cmd_logs_read "$@" ;;
