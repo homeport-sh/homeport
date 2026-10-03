@@ -799,7 +799,7 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   eq  "port_open: an address that never answers is given up" "$r" "closed"
   eq  "port_open: within a second" "$(( t1 - t0 <= 1 ))" "1"
 
-  cgr=$(mktemp -d); SANDBOX_CGROUP_ROOT=$cgr; echo "25000 100000" > "$cgr/cpu.max"
+  cgr=$(mktemp -d); SANDBOX_CGROUP=$cgr; echo "25000 100000" > "$cgr/cpu.max"
   lp_file=$(mktemp)
   python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1], flush=True); time.sleep(0.6); s.listen(); time.sleep(3)' > "$lp_file" & lp=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s $lp_file ]] && break; sleep 0.1; done

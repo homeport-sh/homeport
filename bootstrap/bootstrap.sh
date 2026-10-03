@@ -597,7 +597,8 @@ port_open() {
 SANDBOX_BOOST_SECS=5
 sandbox_cpu_boost() {
   local cg plan
-  cg=$SANDBOX_CGROUP_ROOT$(cut -d: -f3 /proc/self/cgroup 2>/dev/null)
+  # this unit's cgroup (SANDBOX_CGROUP names it outright, for tests)
+  cg=${SANDBOX_CGROUP:-$SANDBOX_CGROUP_ROOT$(cut -d: -f3 /proc/self/cgroup 2>/dev/null)}
   [[ -w $cg/cpu.max ]] || return 0
   plan=$(<"$cg/cpu.max")
   [[ $plan == max* ]] && return 0   # no limit to lift
