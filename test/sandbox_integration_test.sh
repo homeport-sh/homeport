@@ -327,6 +327,10 @@ eq "scale-to-zero: answers through its wake socket" "$(curl -s --max-time 20 "ht
 # app listens (gVisor takes a second or two), or the visitor gets a 502
 systemctl stop homeport-probe-idle-proxy.service homeport-probe-idle.service 2>/dev/null
 eq "scale-to-zero: a cold wake answers the first request" "$(curl -s --max-time 30 "http://127.0.0.1:$IP/")" "ok"
+# the startup boost lifted its CPU limit while it started: the plan's is back
+sleep 1
+eq "scale-to-zero: its CPU limit is the plan's once it's up" \
+  "$(cat "/sys/fs/cgroup$(cut -d: -f3 "/proc/$(systemctl show -p MainPID --value homeport-probe-idle.service)/cgroup")/cpu.max")" "100000 100000"
 IIP=$((IP + 1000))
 eq "scale-to-zero: the app listens on its internal port" "$(curl -s --max-time 5 "http://$(sandbox_ip "$IIP" guest):$IIP/")" "ok"
 # the bundle mount is made in the app unit's own mount namespace
