@@ -167,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.15.2
+HOMEPORTD_VERSION=0.15.3
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -572,8 +572,8 @@ ensure_sandbox_state() {
   ) 9>"$SANDBOX_STATE.lock"
 }
 
-# sandbox_cpu_boost <address> <port> — a sandboxed app starts with no CPU
-# limit, and gets its plan's back the moment it listens (or after
+# sandbox_cpu_boost <address> <port> — a sandboxed app starts with a full
+# core (at most), and gets its plan's back the moment it listens (or after
 # SANDBOX_BOOST_SECS, whatever happens). gVisor's start is CPU-heavy: at a
 # Hobby app's 25% of a core it took ~1s more than unlimited, and so did
 # homeportd's own setup - most of a 2s cold wake. Runs inside the app unit's
@@ -602,7 +602,13 @@ sandbox_cpu_boost() {
   [[ -w $cg/cpu.max ]] || return 0
   plan=$(<"$cg/cpu.max")
   [[ $plan == max* ]] && return 0   # no limit to lift
-  echo "max ${plan#* }" > "$cg/cpu.max" 2>/dev/null || return 0
+  # one full core, not the whole host: nearly all the gain (gVisor + app in
+  # 0.25s at a core vs 0.16s unlimited), and a waking app takes at most a
+  # core from its neighbours. A plan of a core or more is left as it is.
+  local quota=${plan%% *} period=${plan#* }
+  [[ $quota =~ ^[0-9]+$ && $period =~ ^[0-9]+$ ]] || return 0
+  (( quota < period )) || return 0
+  echo "$period $period" > "$cg/cpu.max" 2>/dev/null || return 0
   # a deadline in seconds, not a count of tries: a try can take 0.2s
   ( local end=$((SECONDS + SANDBOX_BOOST_SECS))
     while (( SECONDS < end )); do

@@ -804,7 +804,7 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1], flush=True); time.sleep(0.6); s.listen(); time.sleep(3)' > "$lp_file" & lp=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s $lp_file ]] && break; sleep 0.1; done
   sandbox_cpu_boost 127.0.0.1 "$(cat "$lp_file")"
-  eq  "boost: no CPU limit while it starts" "$(cat "$cgr/cpu.max")" "max 100000"
+  eq  "boost: one full core while it starts, not the whole host" "$(cat "$cgr/cpu.max")" "100000 100000"
   for _ in $(seq 1 40); do [[ $(cat "$cgr/cpu.max") == "25000 100000" ]] && break; sleep 0.05; done
   eq  "boost: the plan's limit back once it listens" "$(cat "$cgr/cpu.max")" "25000 100000"
   kill "$lp" 2>/dev/null
@@ -815,6 +815,8 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   eq  "boost: the plan's limit back even if it never listens" "$(cat "$cgr/cpu.max")" "25000 100000"
   echo "max 100000" > "$cgr/cpu.max"; sandbox_cpu_boost 127.0.0.1 1
   eq  "boost: nothing to lift, nothing changed" "$(cat "$cgr/cpu.max")" "max 100000"
+  echo "200000 100000" > "$cgr/cpu.max"; sandbox_cpu_boost 127.0.0.1 1
+  eq  "boost: a plan of a core or more is left as it is" "$(cat "$cgr/cpu.max")" "200000 100000"
   rm -rf "$cgr" "$lp_file"
 
   SANDBOX_RUNSC_ROOT=$(mktemp -d)
