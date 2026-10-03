@@ -167,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.14.3
+HOMEPORTD_VERSION=0.14.4
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -1508,6 +1508,9 @@ app_upstreams() {
   if [[ $mode == template ]]; then
     rbase=$(replica_base "$port")
     for (( i = 1; i <= count; i++ )); do upstreams+=" $(app_addr $((rbase + i))):$((rbase + i))"; done
+  elif [[ $mode == idle ]]; then
+    # its wake socket, on loopback: what starts it (sandboxed or not)
+    upstreams=" 127.0.0.1:$port"
   else
     upstreams=" $(app_addr "$port"):$port"
   fi

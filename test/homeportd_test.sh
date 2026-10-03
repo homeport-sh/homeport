@@ -732,6 +732,18 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   else echo "FAIL homeportd sets umask 022 before writing anything (umask at ${um:-none}, first write at ${first:-none})"; fails=1; fi
   exit "$fails" ) || fails=$((fails + $?))
 
+# Caddy's upstream: a scale-to-zero app is reached through its wake socket
+# (loopback, the public port), which starts it; a sandboxed one listens at
+# its sandbox's address otherwise. Pointing Caddy at the sandbox for an idle
+# app reached nothing: the first hosted app answered 502.
+( fails=0
+  SANDBOX=gvisor
+  eq "upstream: sandboxed, always on"   "$(app_upstreams 8100 single)" " $(sandbox_ip 8100 guest):8100"
+  eq "upstream: sandboxed, scale-to-zero" "$(app_upstreams 8100 idle)" " 127.0.0.1:8100"
+  SANDBOX=
+  eq "upstream: plain, scale-to-zero"   "$(app_upstreams 8100 idle)" " 127.0.0.1:8100"
+  exit "$fails" ) || fails=$((fails + $?))
+
 # systemctl is stubbed: we check what pause/resume ask systemd to do per mode.
 ( fails=0
   pr_etc=$(mktemp -d); HOMEPORT_ETC=$pr_etc
