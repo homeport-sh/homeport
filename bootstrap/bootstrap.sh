@@ -167,7 +167,7 @@ install_homeportd() {
 # mutation on the box goes through here and validates its inputs.
 set -euo pipefail
 
-HOMEPORTD_VERSION=0.14.2
+HOMEPORTD_VERSION=0.14.3
 # 2: processes and a sandboxed release command (add's 25th argument)
 HOMEPORTD_API=2
 
@@ -209,8 +209,12 @@ swap_current() { # swap_current <app> <target>  (atomic symlink flip)
   mv -Tf "$HOMEPORT_ROOT/$1/.current.tmp" "$HOMEPORT_ROOT/$1/current"
 }
 
-wait_healthy() { # uses $PORT and $HEALTH_PATH from load_app
-  wait_healthy_port "$PORT"
+wait_healthy() { # uses $PORT, $HEALTH_PATH and $IDLE from load_app
+  # a scale-to-zero app is reached through its wake socket - loopback, the
+  # public port - which is also what starts it; its instance listens on a
+  # private port (and, sandboxed, at its sandbox's address) behind the proxy
+  if [[ -n ${IDLE:-} ]]; then wait_healthy_at 127.0.0.1 "$PORT"
+  else wait_healthy_port "$PORT"; fi
 }
 
 # seconds for a duration like 30s/2m/1h (default 30 for empty/garbage). The
@@ -228,13 +232,17 @@ timeout_secs() {
   esac
 }
 
-wait_healthy_port() { # <port> — polls http://127.0.0.1:<port>$HEALTH_PATH
+wait_healthy_port() { # <port> — polls the app's address on <port>
+  wait_healthy_at "$(app_addr "$1")" "$1"
+}
+
+wait_healthy_at() { # <address> <port> — polls http://<address>:<port>$HEALTH_PATH
   # up to $HEALTH_TIMEOUT (default 30s), one probe every 0.5s
-  local port=$1 i iters
+  local addr=$1 port=$2 i iters
   iters=$(( $(timeout_secs "${HEALTH_TIMEOUT:-30s}") * 2 ))
   (( iters < 1 )) && iters=1
   for (( i = 1; i <= iters; i++ )); do
-    if curl -fs -o /dev/null --max-time 2 "http://$(app_addr "$port"):$port$HEALTH_PATH" 2>/dev/null; then
+    if curl -fs -o /dev/null --max-time 2 "http://$addr:$port$HEALTH_PATH" 2>/dev/null; then
       return 0
     fi
     sleep 0.5
@@ -553,6 +561,17 @@ sandbox_ip() {
   if [[ ${2:-guest} == host ]]; then echo "100.$a.$b.$((c + 1))"; else echo "100.$a.$b.$((c + 2))"; fi
 }
 
+# ensure_sandbox_state — bundles hold the app's env, so they stay in memory,
+# on a mount of their own: gVisor remounts each bundle read-only from inside
+# its user namespace, which the kernel refuses when the source mount is
+# noexec - and /run is on DigitalOcean's Ubuntu 24.04.
+ensure_sandbox_state() {
+  install -d -m 755 "$SANDBOX_STATE"
+  ( flock 9
+    mountpoint -q "$SANDBOX_STATE" || mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$SANDBOX_STATE"
+  ) 9>"$SANDBOX_STATE.lock"
+}
+
 # sandbox_id <app> <port> — a runsc container id. runsc matches ids by PREFIX,
 # so ids end in "_" and app names can't contain one: no id is ever a prefix
 # of another.
@@ -752,6 +771,10 @@ cmd_sandbox_run() {
   valid_app "$app"; [[ $port =~ ^[0-9]{2,5}$ ]] || die "sandbox-run: invalid port '$port'"
   [[ $role == web || $role == release ]] || valid_proc_name "$role" || die "sandbox-run: invalid role '$role'"
   load_app "$app"
+  # the config's PORT is the public one; this instance listens on its own
+  # (a scale-to-zero app's private port, a replica's) - systemd set it, and
+  # sourcing the config overwrote it
+  PORT=$port; export PORT
   sandbox_on || die "sandbox-run: app '$app' is not sandbox: gvisor"
   sandbox_check_tools
   local id b user="homeport-$app" release uid gid
@@ -762,6 +785,7 @@ cmd_sandbox_run() {
   release=$(readlink -f "$HOMEPORT_ROOT/$app/current") || die "sandbox-run: '$app' has no current release"
   [[ -x $release/bin ]] || die "sandbox-run: no binary at $release/bin"
   uid=$(id -u "$user") gid=$(id -g "$user")
+  ensure_sandbox_state
   install -d -m 700 "$b" "$SANDBOX_RUNSC_ROOT"
   install -d -m 755 "$b/rootfs" "$b/rootfs/etc" "$b/rootfs/tmp" "$b/rootfs/proc"
   # minimal /etc: who the app is, how it resolves names
