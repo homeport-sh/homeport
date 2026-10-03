@@ -315,12 +315,18 @@ echo "--- a scale-to-zero app (every hosted Hobby app)"
 # sandbox on the internal one (public + 1000): the app must get the internal
 # PORT (sourcing its config gave it the public one), and activate's health
 # check must go through the socket, which is also what wakes it.
+# it takes 2s to start, as real apps do: a cold wake must wait that out
 "$HD" add probe-idle - / 256M 100% true 60s 1 - - - - - gvisor - - - - - - - - - - >/dev/null &&
+  printf 'PROBE_START_DELAY=2s\n' | "$HD" env probe-idle >/dev/null &&
   "$HD" upload probe-idle r1 < /tmp/probe >/dev/null &&
   "$HD" activate probe-idle r1 >/dev/null 2>&1 && ok "scale-to-zero: deploys, health-checked through its wake socket" ||
   { fail "scale-to-zero: deploy"; journalctl --namespace="$(log_namespace probe-idle)" -n 20 --no-pager; }
 IP=$(grep -m1 '^PORT=' "$HOMEPORT_ETC/probe-idle/config" | cut -d= -f2)
 eq "scale-to-zero: answers through its wake socket" "$(curl -s --max-time 20 "http://127.0.0.1:$IP/")" "ok"
+# asleep, then ONE request: the proxy must not connect before the sandboxed
+# app listens (gVisor takes a second or two), or the visitor gets a 502
+systemctl stop homeport-probe-idle-proxy.service homeport-probe-idle.service 2>/dev/null
+eq "scale-to-zero: a cold wake answers the first request" "$(curl -s --max-time 30 "http://127.0.0.1:$IP/")" "ok"
 IIP=$((IP + 1000))
 eq "scale-to-zero: the app listens on its internal port" "$(curl -s --max-time 5 "http://$(sandbox_ip "$IIP" guest):$IIP/")" "ok"
 # the bundle mount is made in the app unit's own mount namespace

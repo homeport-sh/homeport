@@ -3259,7 +3259,6 @@ EOF
       emit_service_body "$internal_port"
       # scale-to-zero: "started" must mean listening, or the proxy (After=
       # this unit) connects before a sandboxed app is up and the wake is a 502
-      [[ -n $idle ]] && echo "ExecStartPost=/usr/local/bin/homeportd wait-port $(app_addr "$internal_port") $internal_port 30"
       echo
       [[ -n $install_sec ]] && echo "$install_sec"
     } > "/etc/systemd/system/homeport-$app.service"

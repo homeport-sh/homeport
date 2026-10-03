@@ -128,6 +128,10 @@ func main() {
 		}
 		fmt.Fprint(w, started)
 	})
+	// a slow start, like a real app's: what a cold wake has to wait out
+	if d, err := time.ParseDuration(os.Getenv("PROBE_START_DELAY")); err == nil {
+		time.Sleep(d)
+	}
 	addr := net.JoinHostPort(os.Getenv("HOST"), os.Getenv("PORT"))
 	fmt.Println("probe listening on", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
