@@ -22,4 +22,12 @@ lock=$(line 'DPkg::Lock::Timeout'); apt=$(line '^[[:space:]]+apt-get ')
 harden=$(line 'setup_ssh_hardening'); last=$(line 'setup_dirs_and_sudo'); hd=$(line 'install_homeportd')
 [[ -n $harden && -n $last && -n $hd && $harden -gt $last && $harden -gt $hd ]] && ok "root login is disabled last" \
   || bad "root login is disabled last (hardening at ${harden:-none}, homeportd at ${hd:-none}, sudo at ${last:-none})"
+# Run as a cloud's user data, bootstrap may inherit a strict umask (homeport's
+# first boot sets 077 for its token). What it installs is read by system users
+# - apt checks signatures as _apt, Caddy reads its config as caddy - so it sets
+# its own umask before writing anything: a root-only Caddy keyring stopped
+# every hosted host at "Installing Caddy" (NO_PUBKEY).
+um=$(line '^[[:space:]]+umask 022')
+[[ -n $um && -n $apt && $um -lt $apt && $um -lt $lock ]] && ok "bootstrap sets umask 022 before writing anything" \
+  || bad "bootstrap sets umask 022 before writing anything (umask at ${um:-none}, first apt-get at ${apt:-none})"
 exit $fail
