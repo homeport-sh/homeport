@@ -705,6 +705,20 @@ has "cgate: deny meter-read"        "$(cgate "sudo $hd meter-read 0")" "deny"
   has "run: no deploy certificate may either" "$(cert_gate_decision api 'sudo /usr/local/bin/homeportd run api x')" "deny"
   exit "$fails" ) || fails=$((fails + $?))
 
+# homeportd writes Caddy's config, which Caddy reads as its own user. Run
+# under a strict umask (a host's first boot, a cautious admin's shell), a new
+# file came out root-only: edge-from's 00-edge-only.caddy did, Caddy's reload
+# failed, and the hosted host never went behind the edge. So main sets
+# umask 022 before anything it does - its ensure_* steps write Caddy files too.
+( fails=0
+  m=$(awk "/<<'HOMEPORTD_SCRIPT'/{f=1;next} /^HOMEPORTD_SCRIPT\$/{f=0} f" "$root/bootstrap/bootstrap.sh" |
+    awk '/^main\(\) \{/{f=1} f{print} f&&/^\}/{exit}')
+  um=$(grep -n -m1 '^[[:space:]]*umask 022' <<<"$m" | cut -d: -f1)
+  first=$(grep -n -m1 -E 'ensure_|cmd_|case ' <<<"$m" | cut -d: -f1)
+  if [[ -n $um && -n $first && $um -lt $first ]]; then echo "ok   homeportd sets umask 022 before writing anything"
+  else echo "FAIL homeportd sets umask 022 before writing anything (umask at ${um:-none}, first write at ${first:-none})"; fails=1; fi
+  exit "$fails" ) || fails=$((fails + $?))
+
 # systemctl is stubbed: we check what pause/resume ask systemd to do per mode.
 ( fails=0
   pr_etc=$(mktemp -d); HOMEPORT_ETC=$pr_etc
